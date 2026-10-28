@@ -65,7 +65,7 @@ _No sessions archived yet._
         );
         fs::write(&daily_md, content)?;
 
-        eprintln!("[daily] Created daily directory: {}", daily_dir.display());
+        eprintln!("[daybook] Created daily directory: {}", daily_dir.display());
     }
 
     // Check for auto-digest of previous day's sessions
@@ -115,7 +115,7 @@ fn check_auto_digest(config: &crate::config::Config) {
     }
 
     eprintln!(
-        "[daily] Auto-digesting yesterday's sessions ({})...",
+        "[daybook] Auto-digesting yesterday's sessions ({})...",
         yesterday
     );
 
@@ -166,20 +166,20 @@ fn check_pending_skills(config: &crate::config::Config) {
     }
 
     eprintln!();
-    eprintln!("[daily] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    eprintln!("[daybook] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     eprintln!(
-        "[daily] {} pending skill(s) waiting for review:",
+        "[daybook] {} pending skill(s) waiting for review:",
         pending_skills.len()
     );
     for (date, name) in pending_skills.iter().take(5) {
-        eprintln!("[daily]   • {}/{}", date, name);
+        eprintln!("[daybook]   • {}/{}", date, name);
     }
     if pending_skills.len() > 5 {
-        eprintln!("[daily]   ... and {} more", pending_skills.len() - 5);
+        eprintln!("[daybook]   ... and {} more", pending_skills.len() - 5);
     }
-    eprintln!("[daily]");
-    eprintln!("[daily] Review with: daily review-skills");
-    eprintln!("[daily] Or ask Claude: \"review my pending skills\"");
-    eprintln!("[daily] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    eprintln!("[daybook]");
+    eprintln!("[daybook] Review with: daybook review-skills");
+    eprintln!("[daybook] Or ask Claude: \"review my pending skills\"");
+    eprintln!("[daybook] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     eprintln!();
 }

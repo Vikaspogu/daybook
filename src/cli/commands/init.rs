@@ -3,13 +3,12 @@ use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect, Input, Select};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::install;
 use crate::archive::ArchiveManager;
 use crate::config::{get_config_path, load_config, save_config, Config};
 
 /// Initialize the daily archive system
 pub async fn run(storage_path: Option<PathBuf>, interactive: bool, use_haiku: bool) -> Result<()> {
-    println!("[daily] Initializing Daily Context Archive System...");
+    println!("[daybook] Initializing Daily Context Archive System...");
 
     // Load or create config
     let mut config = load_config().unwrap_or_else(|_| Config::default());
@@ -17,9 +16,9 @@ pub async fn run(storage_path: Option<PathBuf>, interactive: bool, use_haiku: bo
     // Set model based on flag
     if use_haiku {
         config.summarization.model = "haiku".into();
-        println!("[daily] Using haiku model for summarization");
+        println!("[daybook] Using haiku model for summarization");
     } else {
-        println!("[daily] Using sonnet model for summarization (default)");
+        println!("[daybook] Using sonnet model for summarization (default)");
     }
 
     // Determine storage path based on options
@@ -48,23 +47,20 @@ pub async fn run(storage_path: Option<PathBuf>, interactive: bool, use_haiku: bo
     // Save config
     save_config(&config)?;
     let config_path = get_config_path()?;
-    println!("[daily] Configuration saved to: {}", config_path.display());
+    println!("[daybook] Configuration saved to: {}", config_path.display());
 
     // Create storage directory
     let manager = ArchiveManager::new(config.clone());
     let storage_dir = manager.ensure_storage_dir()?;
-    println!("[daily] Storage directory: {}", storage_dir.display());
+    println!("[daybook] Storage directory: {}", storage_dir.display());
 
     // Create today's directory
     let today_dir = manager.ensure_today_dir()?;
-    println!("[daily] Today's archive: {}", today_dir.display());
+    println!("[daybook] Today's archive: {}", today_dir.display());
 
     println!();
-    println!("[daily] Initialization complete!");
+    println!("[daybook] Initialization complete!");
 
-    // Automatically install hooks
-    println!();
-    install::run("user".to_string()).await?;
 
     Ok(())
 }
@@ -86,16 +82,16 @@ fn select_directory_interactive() -> Result<Option<PathBuf>> {
 
     // Ask user for storage path with default
     let input: String = dialoguer::Input::with_theme(&theme)
-        .with_prompt("Daily archive folder (e.g., '~/obsidian-vault/daily', '~/.claude/daily')")
-        .default("~/.claude/daily".into())
+        .with_prompt("Daily archive folder (e.g., '~/obsidian-vault/daily', '~/.daybook')")
+        .default("~/.daybook".into())
         .interact_text()
         .context("Failed to read input")?;
 
     let input = input.trim();
 
     // If user entered the default or empty, use default path
-    if input.is_empty() || input == "~/.claude/daily" {
-        return Ok(Some(expand_path(Path::new("~/.claude/daily"))));
+    if input.is_empty() || input == "~/.daybook" {
+        return Ok(Some(expand_path(Path::new("~/.daybook"))));
     }
 
     // Check if input looks like a path (contains / or ~)
@@ -109,7 +105,7 @@ fn select_directory_interactive() -> Result<Option<PathBuf>> {
     let candidates = search_directories_recursive(&home, &input.to_lowercase(), 10);
 
     if candidates.is_empty() {
-        println!("[daily] No matching directories found. Using default path.");
+        println!("[daybook] No matching directories found. Using default path.");
         return Ok(None);
     }
 
@@ -141,7 +137,7 @@ fn select_directory_interactive() -> Result<Option<PathBuf>> {
             Ok(Some(final_path))
         }
         None => {
-            println!("[daily] Selection cancelled. Using default path.");
+            println!("[daybook] Selection cancelled. Using default path.");
             Ok(None)
         }
     }
@@ -244,7 +240,7 @@ fn configure_language_interactive(config: &mut Config) -> Result<()> {
     let theme = ColorfulTheme::default();
 
     println!();
-    println!("[daily] Language Configuration");
+    println!("[daybook] Language Configuration");
 
     let languages = ["English", "中文 (Chinese)"];
     let language_codes = ["en", "zh"];
@@ -257,7 +253,7 @@ fn configure_language_interactive(config: &mut Config) -> Result<()> {
         .context("Failed to select language")?;
 
     config.summarization.summary_language = language_codes[selection].to_string();
-    println!("[daily] Summary language set to: {}", languages[selection]);
+    println!("[daybook] Summary language set to: {}", languages[selection]);
 
     Ok(())
 }
@@ -267,7 +263,7 @@ fn configure_digest_interactive(config: &mut Config) -> Result<()> {
     let theme = ColorfulTheme::default();
 
     println!();
-    println!("[daily] Digest Configuration");
+    println!("[daybook] Digest Configuration");
     println!("  Sessions are archived individually. Digest consolidates them into daily.md.");
     println!();
 

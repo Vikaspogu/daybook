@@ -142,8 +142,8 @@ impl SummarizerEngine {
         let summary_response: SessionSummaryResponse = match serde_json::from_str(&json_str) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[daily] Failed to parse JSON: {}", e);
-                eprintln!("[daily] Raw JSON: {}", json_str);
+                eprintln!("[daybook] Failed to parse JSON: {}", e);
+                eprintln!("[daybook] Raw JSON: {}", json_str);
                 // Try flexible parsing: convert array fields to strings
                 let mut v: serde_json::Value =
                     serde_json::from_str(&json_str).context("Failed to parse as JSON Value")?;

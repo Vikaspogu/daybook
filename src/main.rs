@@ -70,12 +70,6 @@ async fn main() -> Result<()> {
             show,
             interactive,
         } => cli::commands::config::run(set_storage, show, interactive).await,
-        Commands::Install { scope } => cli::commands::install::run(scope).await,
-        Commands::Uninstall { scope } => cli::commands::uninstall::run(scope).await,
-        Commands::UninstallHooks { scope } => cli::commands::uninstall::run_hooks_only(scope).await,
-        Commands::InstallHooks { scope } => cli::commands::install::run_hooks_only(scope).await,
-        Commands::Trash => cli::commands::trash::run().await,
-        Commands::Update { check, version } => cli::commands::update::run(check, version).await,
         Commands::Jobs { action } => match action {
             JobsAction::List { all } => cli::commands::jobs::list(all).await,
             JobsAction::Log {

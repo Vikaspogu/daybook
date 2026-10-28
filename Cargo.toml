@@ -1,17 +1,17 @@
 [package]
-name = "daily"
+name = "daybook"
 version = "0.1.8"
 edition = "2021"
 authors = ["Oanakiaja <oanakiaja@gmail.com>"]
-description = "Daily Context Archive System for Claude Code"
+description = "Daily Context Archive System for AI agents"
 license = "MIT"
-repository = "https://github.com/oanakiaja/claude-daily"
+repository = "https://github.com/Vikaspogu/daybook"
 readme = "README.md"
-keywords = ["claude-code", "archive", "productivity", "cli", "daily-log"]
+keywords = ["ai-agents", "archive", "productivity", "cli", "daily-log"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
-name = "daily"
+name = "daybook"
 path = "src/main.rs"
 
 [dependencies]

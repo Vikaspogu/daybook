@@ -2,8 +2,8 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "daily")]
-#[command(about = "Daily Context Archive System for Claude Code")]
+#[command(name = "daybook")]
+#[command(about = "Daily Context Archive System for AI agents")]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]
@@ -163,7 +163,7 @@ pub enum Commands {
 
     /// Initialize configuration (interactive by default)
     Init {
-        /// Storage path (default: ~/.claude/daily)
+        /// Storage path (default: ~/.daybook)
         #[arg(short, long)]
         storage_path: Option<PathBuf>,
 
@@ -191,47 +191,6 @@ pub enum Commands {
         interactive: bool,
     },
 
-    /// Install plugin to Claude Code
-    Install {
-        /// Scope: user or project
-        #[arg(short, long, default_value = "user")]
-        scope: String,
-    },
-
-    /// Uninstall plugin from Claude Code (removes hooks and commands only, keeps archive data)
-    Uninstall {
-        /// Scope: user or project
-        #[arg(short, long, default_value = "user")]
-        scope: String,
-    },
-
-    /// Remove hooks only (disable automatic summarization, keep commands)
-    UninstallHooks {
-        /// Scope: user or project
-        #[arg(short, long, default_value = "user")]
-        scope: String,
-    },
-
-    /// Re-install hooks only (re-enable automatic summarization)
-    InstallHooks {
-        /// Scope: user or project
-        #[arg(short, long, default_value = "user")]
-        scope: String,
-    },
-
-    /// Delete the daily binary itself
-    Trash,
-
-    /// Update daily to the latest version
-    Update {
-        /// Only check for updates, don't install
-        #[arg(long)]
-        check: bool,
-
-        /// Install specific version (e.g., "v0.2.0" or "0.2.0")
-        #[arg(long)]
-        version: Option<String>,
-    },
 
     /// Generate insights and trend analysis from archives
     Insights {

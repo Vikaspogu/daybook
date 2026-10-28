@@ -174,7 +174,7 @@ impl TranscriptParser {
                 }
                 Err(e) => {
                     // Log but don't fail on parse errors for individual lines
-                    eprintln!("[daily] Warning: Failed to parse transcript line: {}", e);
+                    eprintln!("[daybook] Warning: Failed to parse transcript line: {}", e);
                 }
             }
         }

@@ -22,8 +22,8 @@ pub async fn run_skill(
     // Get session content
     let session_content = get_session_content(&manager, &view_date, session.as_deref()).await?;
 
-    println!("[daily] Extracting skill from session...");
-    println!("[daily] Applying quality gate (踩过坑? 下次还会遇到? 能说清楚?)...");
+    println!("[daybook] Extracting skill from session...");
+    println!("[daybook] Applying quality gate (踩过坑? 下次还会遇到? 能说清楚?)...");
 
     // Extract skill using Claude
     let skill_content = engine.extract_skill(&session_content, None).await?;
@@ -36,14 +36,14 @@ pub async fn run_skill(
             .unwrap_or("Unknown reason")
             .trim();
         println!();
-        println!("[daily] ⚠ Skill not extractable: {}", reason);
+        println!("[daybook] ⚠ Skill not extractable: {}", reason);
         println!();
         println!("This session may not contain reusable knowledge that meets the quality bar:");
         println!("  - 踩过坑吗？ Was there debugging or non-obvious discovery?");
         println!("  - 下次还会遇到吗？ Is this a recurring problem?");
         println!("  - 能说清楚吗？ Can it be clearly described?");
         println!();
-        println!("Try a different session with `daily extract-skill --session <name>`");
+        println!("Try a different session with `daybook extract-skill --session <name>`");
         return Ok(());
     }
 
@@ -75,7 +75,7 @@ pub async fn run_skill(
     let skill_file = output_path.join("SKILL.md");
     fs::write(&skill_file, &skill_content)?;
 
-    println!("[daily] ✓ Skill extracted to: {}", output_path.display());
+    println!("[daybook] ✓ Skill extracted to: {}", output_path.display());
     println!();
     println!("Skill structure created:");
     println!("  {}/", output_path.display());
@@ -129,7 +129,7 @@ pub async fn run_command(
     // Get session content
     let session_content = get_session_content(&manager, &view_date, session.as_deref()).await?;
 
-    println!("[daily] Extracting command from session...");
+    println!("[daybook] Extracting command from session...");
 
     // Extract command using Claude
     let command_content = engine.extract_command(&session_content, None).await?;
@@ -155,7 +155,7 @@ pub async fn run_command(
     }
     fs::write(&output_path, &command_content)?;
 
-    println!("[daily] Command extracted to: {}", output_path.display());
+    println!("[daybook] Command extracted to: {}", output_path.display());
     println!();
     println!("Preview:");
     println!("{}", "-".repeat(50));

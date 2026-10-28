@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-const APP_NAME: &str = "daily";
+const APP_NAME: &str = "daybook";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -127,8 +127,7 @@ impl Default for Config {
     fn default() -> Self {
         let default_path = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".claude")
-            .join("daily");
+            .join(".daybook");
 
         Self {
             storage: StorageConfig { path: default_path },
@@ -222,7 +221,7 @@ mod tests {
             .storage
             .path
             .to_string_lossy()
-            .contains(".claude/daily"));
+            .contains(".daybook"));
         assert_eq!(config.summarization.model, "haiku");
     }
 

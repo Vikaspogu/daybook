@@ -36,7 +36,7 @@ pub async fn run(
     if !foreground {
         // Background mode: spawn detached process
         eprintln!(
-            "[daily] Starting background summarization for: {}",
+            "[daybook] Starting background summarization for: {}",
             task_name
         );
 
@@ -84,12 +84,12 @@ pub async fn run(
         // Suppress unused variable warning
         let _ = args;
 
-        eprintln!("[daily] Background summarization started");
+        eprintln!("[daybook] Background summarization started");
         return Ok(());
     }
 
     // Foreground mode: do the actual summarization
-    eprintln!("[daily] Summarizing session: {}", task_name);
+    eprintln!("[daybook] Summarizing session: {}", task_name);
 
     // Initialize job manager for status updates
     let job_manager = JobManager::new(&config).ok();
@@ -102,13 +102,13 @@ pub async fn run(
         match &result {
             Ok(_) => {
                 if let Err(e) = manager.mark_completed(id) {
-                    eprintln!("[daily] Warning: Failed to update job status: {}", e);
+                    eprintln!("[daybook] Warning: Failed to update job status: {}", e);
                 }
             }
             Err(e) => {
                 if let Err(update_err) = manager.mark_failed(id, &e.to_string()) {
                     eprintln!(
-                        "[daily] Warning: Failed to update job status: {}",
+                        "[daybook] Warning: Failed to update job status: {}",
                         update_err
                     );
                 }
@@ -132,7 +132,7 @@ async fn run_summarization(
     // Check if transcript file exists before attempting to parse
     if !transcript.exists() {
         eprintln!(
-            "[daily] Transcript file not found, skipping: {}",
+            "[daybook] Transcript file not found, skipping: {}",
             transcript.display()
         );
         return Ok(());
@@ -143,7 +143,7 @@ async fn run_summarization(
         TranscriptParser::parse(transcript).context("Failed to parse transcript")?;
 
     if transcript_data.is_empty() {
-        eprintln!("[daily] Session is empty, skipping summarization");
+        eprintln!("[daybook] Session is empty, skipping summarization");
         return Ok(());
     }
 
@@ -157,20 +157,20 @@ async fn run_summarization(
 
     // Save the archive
     let archive_path = archive.save(config)?;
-    eprintln!("[daily] Session archived: {}", archive_path.display());
+    eprintln!("[daybook] Session archived: {}", archive_path.display());
 
     // Auto-evaluate skill extraction (沉淀三问 quality gate)
     if should_extract_skill(&archive.skill_hints) {
-        eprintln!("[daily] Skill candidate detected, attempting extraction...");
+        eprintln!("[daybook] Skill candidate detected, attempting extraction...");
         match auto_extract_skill(&engine, &archive, config).await {
             Ok(Some(skill_path)) => {
-                eprintln!("[daily] Pending skill saved: {}", skill_path.display());
+                eprintln!("[daybook] Pending skill saved: {}", skill_path.display());
             }
             Ok(None) => {
-                eprintln!("[daily] Skill did not pass quality gate, skipped");
+                eprintln!("[daybook] Skill did not pass quality gate, skipped");
             }
             Err(e) => {
-                eprintln!("[daily] Skill extraction failed: {}", e);
+                eprintln!("[daybook] Skill extraction failed: {}", e);
             }
         }
     }
@@ -178,7 +178,7 @@ async fn run_summarization(
     // Note: Daily summary is now generated via `daily digest` command
     // either manually or auto-triggered on session start
 
-    eprintln!("[daily] Summarization complete!");
+    eprintln!("[daybook] Summarization complete!");
 
     Ok(())
 }

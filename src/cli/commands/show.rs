@@ -170,7 +170,8 @@ async fn trigger_auto_summarize(config: &crate::config::Config) -> Result<usize>
             .unwrap_or_else(|| ".".to_string());
 
         // Spawn background process for summarization
-        let mut cmd = Command::new("daily");
+        let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("daybook"));
+    let mut cmd = Command::new(exe);
         cmd.args([
             "summarize",
             "--transcript",
@@ -201,14 +202,14 @@ async fn trigger_auto_summarize(config: &crate::config::Config) -> Result<usize>
                     &transcript.path,
                     JobType::AutoSummarize,
                 ) {
-                    eprintln!("[daily] Failed to register auto-summarize job: {}", e);
+                    eprintln!("[daybook] Failed to register auto-summarize job: {}", e);
                 } else {
                     spawned_count += 1;
                 }
             }
             Err(e) => {
                 eprintln!(
-                    "[daily] Failed to spawn auto-summarize process for {}: {}",
+                    "[daybook] Failed to spawn auto-summarize process for {}: {}",
                     transcript.session_id, e
                 );
             }

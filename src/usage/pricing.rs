@@ -53,7 +53,7 @@ impl PricingData {
             }
             Err(e) => {
                 eprintln!(
-                    "[daily] Failed to fetch pricing from LiteLLM: {}, trying cache...",
+                    "[daybook] Failed to fetch pricing from LiteLLM: {}, trying cache...",
                     e
                 );
             }
@@ -62,11 +62,11 @@ impl PricingData {
         // Try loading from file cache
         match Self::load_cache() {
             Ok(data) => {
-                eprintln!("[daily] Using cached pricing data");
+                eprintln!("[daybook] Using cached pricing data");
                 return data;
             }
             Err(_) => {
-                eprintln!("[daily] No cached pricing, using hardcoded fallback");
+                eprintln!("[daybook] No cached pricing, using hardcoded fallback");
             }
         }
 
@@ -107,9 +107,9 @@ impl PricingData {
         models
     }
 
-    /// Cache file path: ~/.config/daily/pricing_cache.json
+    /// Cache file path: ~/.config/daybook/pricing_cache.json
     fn cache_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("daily").join("pricing_cache.json"))
+        dirs::config_dir().map(|d| d.join("daybook").join("pricing_cache.json"))
     }
 
     /// Save pricing data to file cache

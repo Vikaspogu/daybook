@@ -31,7 +31,7 @@ pub async fn run(
     let target_date = if let Some(rel) = relative_date {
         parse_relative_date(&rel).unwrap_or_else(|| {
             eprintln!(
-                "[daily] Unknown relative date '{}', using as literal date",
+                "[daybook] Unknown relative date '{}', using as literal date",
                 rel
             );
             rel
@@ -51,17 +51,17 @@ pub async fn run(
             // Force mode: check if daily.md exists and regenerate
             if manager.read_daily_summary(&target_date).is_err() {
                 eprintln!(
-                    "[daily] No sessions and no existing daily.md for {}",
+                    "[daybook] No sessions and no existing daily.md for {}",
                     target_date
                 );
                 return Ok(());
             }
             eprintln!(
-                "[daily] Force regenerating daily summary for {}...",
+                "[daybook] Force regenerating daily summary for {}...",
                 target_date
             );
         } else {
-            eprintln!("[daily] No sessions found for {}", target_date);
+            eprintln!("[daybook] No sessions found for {}", target_date);
             return Ok(());
         }
     }
@@ -69,7 +69,7 @@ pub async fn run(
     if background {
         // Background mode: spawn detached process
         eprintln!(
-            "[daily] Starting background digest for {} ({} sessions)",
+            "[daybook] Starting background digest for {} ({} sessions)",
             target_date,
             sessions.len()
         );
@@ -89,14 +89,14 @@ pub async fn run(
             .spawn()
             .context("Failed to spawn background digest process")?;
 
-        eprintln!("[daily] Background digest started");
+        eprintln!("[daybook] Background digest started");
         return Ok(());
     }
 
     // Foreground mode: perform the digest
     if !sessions.is_empty() {
         eprintln!(
-            "[daily] Digesting {} sessions for {}...",
+            "[daybook] Digesting {} sessions for {}...",
             sessions.len(),
             target_date
         );
@@ -108,18 +108,18 @@ pub async fn run(
     match engine.update_daily_summary(&target_date).await {
         Ok(summary) => {
             let summary_path = summary.save(&config)?;
-            eprintln!("[daily] Daily summary created: {}", summary_path.display());
+            eprintln!("[daybook] Daily summary created: {}", summary_path.display());
             // Session files are preserved for reference
         }
         Err(e) => {
-            eprintln!("[daily] Error: Failed to create daily summary: {}", e);
+            eprintln!("[daybook] Error: Failed to create daily summary: {}", e);
             if !sessions.is_empty() {
-                eprintln!("[daily] Session files preserved for retry");
+                eprintln!("[daybook] Session files preserved for retry");
             }
             return Err(e);
         }
     }
 
-    eprintln!("[daily] Digest complete!");
+    eprintln!("[daybook] Digest complete!");
     Ok(())
 }

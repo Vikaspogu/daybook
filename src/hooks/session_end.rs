@@ -23,7 +23,7 @@ pub async fn handle() -> Result<()> {
     let input = match read_hook_input() {
         Ok(input) => input,
         Err(e) => {
-            eprintln!("[daily] Failed to read hook input: {}", e);
+            eprintln!("[daybook] Failed to read hook input: {}", e);
             return Ok(()); // Don't block session exit
         }
     };
@@ -31,18 +31,18 @@ pub async fn handle() -> Result<()> {
     // Archive on all session end reasons to collect complete history
     // Reasons: "prompt_input_exit" (Ctrl+D), "logout", "clear", "other"
     eprintln!(
-        "[daily] Session ended with {:?}, checking transcript",
+        "[daybook] Session ended with {:?}, checking transcript",
         input.reason
     );
 
     // Check if transcript is empty before spawning summarization job
     // This avoids creating useless 0s jobs for sessions with no user input
     if is_transcript_empty(&input.transcript_path) {
-        eprintln!("[daily] Empty session (no user input), skipping archive");
+        eprintln!("[daybook] Empty session (no user input), skipping archive");
         return Ok(());
     }
 
-    eprintln!("[daily] Starting archive");
+    eprintln!("[daybook] Starting archive");
 
     // Generate task name from working directory
     let task_name = generate_task_name(&input.cwd);
@@ -51,7 +51,7 @@ pub async fn handle() -> Result<()> {
     let job_manager = match JobManager::new(&config) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("[daily] Failed to initialize job manager: {}", e);
+            eprintln!("[daybook] Failed to initialize job manager: {}", e);
             return Ok(()); // Don't block session exit
         }
     };
@@ -76,7 +76,8 @@ pub async fn handle() -> Result<()> {
 
     // Spawn background process for summarization
     // This ensures Claude Code can exit immediately
-    let mut cmd = Command::new("daily");
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("daybook"));
+    let mut cmd = Command::new(exe);
     cmd.args([
         "summarize",
         "--transcript",
@@ -107,16 +108,16 @@ pub async fn handle() -> Result<()> {
                 &input.transcript_path,
                 JobType::SessionEnd,
             ) {
-                eprintln!("[daily] Failed to register job: {}", e);
+                eprintln!("[daybook] Failed to register job: {}", e);
             }
             eprintln!(
-                "[daily] Background summarization started: {} (PID: {})",
+                "[daybook] Background summarization started: {} (PID: {})",
                 job_id,
                 child.id()
             );
         }
         Err(e) => {
-            eprintln!("[daily] Failed to spawn summarization process: {}", e);
+            eprintln!("[daybook] Failed to spawn summarization process: {}", e);
         }
     }
 

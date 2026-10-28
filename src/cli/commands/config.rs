@@ -17,14 +17,14 @@ pub async fn run(set_storage: Option<PathBuf>, show: bool, interactive: bool) ->
     if let Some(path) = set_storage {
         config.storage.path = path.clone();
         save_config(&config)?;
-        println!("[daily] Storage path updated to: {}", path.display());
+        println!("[daybook] Storage path updated to: {}", path.display());
         return Ok(());
     }
 
     // Show current config
     if show || set_storage.is_none() {
         let config_path = get_config_path()?;
-        println!("[daily] Configuration file: {}", config_path.display());
+        println!("[daybook] Configuration file: {}", config_path.display());
         println!();
         println!("Current settings:");
         println!("  Storage path: {}", config.storage.path.display());
@@ -59,7 +59,7 @@ pub async fn run(set_storage: Option<PathBuf>, show: bool, interactive: bool) ->
         println!("  Include cwd: {}", config.archive.include_cwd);
         println!("  Include git info: {}", config.archive.include_git_info);
         println!();
-        println!("Tip: Use 'daily config -i' for interactive configuration");
+        println!("Tip: Use 'daybook config -i' for interactive configuration");
     }
 
     Ok(())
@@ -69,7 +69,7 @@ pub async fn run(set_storage: Option<PathBuf>, show: bool, interactive: bool) ->
 async fn configure_interactive(config: &mut crate::config::Config) -> Result<()> {
     let theme = ColorfulTheme::default();
 
-    println!("[daily] Interactive Configuration");
+    println!("[daybook] Interactive Configuration");
     println!();
 
     // Model selection
@@ -174,7 +174,7 @@ async fn configure_interactive(config: &mut crate::config::Config) -> Result<()>
     save_config(config)?;
 
     println!();
-    println!("[daily] Configuration saved!");
+    println!("[daybook] Configuration saved!");
     println!();
     println!("Updated settings:");
     println!("  Model: {}", config.summarization.model);
