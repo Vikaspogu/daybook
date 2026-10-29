@@ -9,6 +9,7 @@ use crate::auto_summarize::{
     should_trigger_auto_summarize_on_show,
 };
 use crate::config::{load_config, save_config};
+use crate::ledger::Ledger;
 use crate::server::{create_router, handlers::AppState};
 use crate::usage::pricing::PricingData;
 
@@ -54,9 +55,11 @@ pub async fn run(port: Option<u16>, host: String, open_browser: bool) -> Result<
     }
 
     let pricing = PricingData::load().await;
+    let ledger = Ledger::open(&config.server.db_path)?;
     let state = Arc::new(AppState {
         config: RwLock::new(config),
         pricing,
+        ledger,
     });
 
     // Find available port
@@ -89,6 +92,33 @@ pub async fn run(port: Option<u16>, host: String, open_browser: bool) -> Result<
     println!();
     println!("{}", "Server stopped.".dimmed());
 
+    Ok(())
+}
+
+/// `daybook serve`: headless ingest server on the ledger port. Same
+/// router as the dashboard; view handlers still read the local fs
+/// archives until they move onto the ledger.
+pub async fn run_serve(port: Option<u16>, host: String) -> Result<()> {
+    let config = load_config()?;
+    let ledger = Ledger::open(&config.server.db_path)?;
+    let bind_port = port.unwrap_or(config.server.port);
+    let pricing = PricingData::load().await;
+    let state = Arc::new(AppState {
+        config: RwLock::new(config),
+        pricing,
+        ledger,
+    });
+    let listener = TcpListener::bind((host.as_str(), bind_port))
+        .await
+        .with_context(|| format!("bind {host}:{bind_port}"))?;
+    println!(
+        "[daybook] Ingest server listening on http://{}:{}/api/ingest",
+        host, bind_port
+    );
+    axum::serve(listener, create_router(state))
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("Server error")?;
     Ok(())
 }
 

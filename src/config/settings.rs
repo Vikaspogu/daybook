@@ -14,6 +14,39 @@ pub struct Config {
     /// Custom prompt templates (None = use built-in defaults)
     #[serde(default)]
     pub prompt_templates: PromptTemplatesConfig,
+    /// `daybook serve` settings (ledger-backed query/ingest server)
+    #[serde(default)]
+    pub server: ServerConfig,
+    /// Push client settings (scan -> server)
+    #[serde(default)]
+    pub push: PushConfig,
+}
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
+pub struct ServerConfig {
+    pub port: u16,
+    pub db_path: PathBuf,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            port: 31457,
+            db_path: dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".daybook/ledger.db3"),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct PushConfig {
+    /// Base URL of the daybook server (None = local-only, no push)
+    pub url: Option<String>,
+    /// Bearer token for the ingest API
+    pub token: Option<String>,
+    /// Machine label reported to the server (default: hostname)
+    pub machine: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -162,6 +195,8 @@ impl Default for Config {
                 time_format: "%H:%M:%S".into(),
             },
             prompt_templates: PromptTemplatesConfig::default(),
+            server: ServerConfig::default(),
+            push: PushConfig::default(),
         }
     }
 }
@@ -190,23 +225,51 @@ impl Config {
     }
 }
 
+/// Optional config file override set once from the `-c/--config` CLI flag.
+/// ponytail: process-global via OnceLock; threads never fight over it.
+static CONFIG_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Set the config file override from the CLI (first call wins).
+pub fn set_config_path(path: Option<std::path::PathBuf>) {
+    if let Some(p) = path {
+        let _ = CONFIG_PATH.set(p);
+    }
+}
+
 /// Load configuration from file or create default
 pub fn load_config() -> Result<Config> {
-    let config: Config =
-        confy::load(APP_NAME, Some("config")).context("Failed to load configuration")?;
+    let config: Config = match CONFIG_PATH.get() {
+        Some(path) => confy::load_path(path).context("Failed to load configuration")?,
+        None => confy::load(APP_NAME, Some("config")).context("Failed to load configuration")?,
+    };
     Ok(config)
 }
 
 /// Save configuration to file
 pub fn save_config(config: &Config) -> Result<()> {
-    confy::store(APP_NAME, Some("config"), config).context("Failed to save configuration")?;
+    let path = match CONFIG_PATH.get() {
+        Some(path) => path.clone(),
+        None => confy::get_configuration_file_path(APP_NAME, Some("config"))
+            .context("Failed to resolve configuration path")?,
+    };
+    confy::store_path(&path, config).context("Failed to save configuration")?;
+    // The config may hold push.token; keep it owner-only after confy's
+    // default-umask write.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
     Ok(())
 }
 
 /// Get the configuration file path
 pub fn get_config_path() -> Result<PathBuf> {
-    let path = confy::get_configuration_file_path(APP_NAME, Some("config"))
-        .context("Failed to get configuration path")?;
+    let path = match CONFIG_PATH.get() {
+        Some(p) => p.clone(),
+        None => confy::get_configuration_file_path(APP_NAME, Some("config"))
+            .context("Failed to get configuration path")?,
+    };
     Ok(path)
 }
 

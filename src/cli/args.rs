@@ -35,6 +35,32 @@ pub enum Commands {
         no_open: bool,
     },
 
+    /// Run the headless ledger ingest server (no dashboard, no browser)
+    Serve {
+        /// Port (default: config server.port)
+        #[arg(short, long)]
+        port: Option<u16>,
+
+        /// Host to bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+    },
+
+    /// Manage ingest tokens (mint by default)
+    Token {
+        /// List tokens
+        #[arg(long)]
+        list: bool,
+
+        /// Revoke the token with this label
+        #[arg(long)]
+        revoke: Option<String>,
+
+        /// Label for a newly minted token (default: machine hostname)
+        #[arg(long)]
+        label: Option<String>,
+    },
+
     /// View archives (interactive date selection if no date specified)
     View {
         /// Date to view (format: yyyy-mm-dd)

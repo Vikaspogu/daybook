@@ -5,7 +5,9 @@ pub mod init;
 pub mod insights;
 pub mod jobs;
 pub mod scan;
+
 pub mod show;
 pub mod skills;
 pub mod summarize;
+pub mod token;
 pub mod view;

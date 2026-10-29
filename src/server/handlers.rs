@@ -1,7 +1,8 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, Request, State},
     http::StatusCode,
-    response::IntoResponse,
+    middleware::Next,
+    response::{IntoResponse, Response},
     Json,
 };
 use std::sync::{Arc, RwLock};
@@ -10,6 +11,7 @@ use crate::archive::ArchiveManager;
 use crate::config::Config;
 use crate::insights::collector::InsightsData;
 use crate::insights::daily::DateInsights;
+use crate::ledger::{Ledger, SessionRecord, UpsertOutcome};
 use crate::summarizer::Prompts;
 use crate::usage::pricing::PricingData;
 
@@ -19,6 +21,130 @@ use super::dto::*;
 pub struct AppState {
     pub config: RwLock<Config>,
     pub pricing: PricingData,
+    pub ledger: Ledger,
+}
+
+/// Bearer-token identity attached by `auth_middleware`.
+#[derive(Clone)]
+pub struct AuthedLabel(pub String);
+
+/// Rejects requests without a valid bearer token before axum buffers and
+/// parses the JSON body; also stamps the token's last_used_at.
+pub async fn auth_middleware(
+    State(state): State<Arc<AppState>>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let authed = match req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        Some(secret) => match state.ledger.check_token(secret) {
+            Ok(label) => label,
+            // DB errors propagate: a broken ledger must not masquerade as 401.
+            Err(e) => {
+                eprintln!("[daybook] token check failed: {e:#}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::<()>::error("internal server error")),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+    match authed {
+        Some(label) => {
+            req.extensions_mut().insert(AuthedLabel(label));
+            next.run(req).await
+        }
+        None => (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiResponse::<()>::error("invalid or missing token")),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/ingest — append or refresh a session record pushed by a
+/// client machine. Runs behind `auth_middleware` and the 1 MiB body cap
+/// set in the router.
+pub async fn ingest(
+    State(state): State<Arc<AppState>>,
+    Extension(authed): Extension<AuthedLabel>,
+    Json(record): Json<SessionRecord>,
+) -> impl IntoResponse {
+    if let Err(msg) = validate_record(&record) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<&str>::error(msg)),
+        );
+    }
+    // Containment: a token minted for one machine must not write rows for another.
+    if authed.0 != record.machine {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse::<&str>::error(
+                "token label does not match record.machine",
+            )),
+        );
+    }
+    match state.ledger.upsert_session(&record) {
+        Ok(UpsertOutcome::RejectedStale) => (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::<&str>::error(
+                "stale version: a newer record already exists",
+            )),
+        ),
+        Ok(outcome) => (
+            StatusCode::OK,
+            // Callers can log whether this was a fresh insert, an update, or a repeat.
+            Json(ApiResponse::success(outcome.as_str())),
+        ),
+        Err(e) => {
+            // Internal detail stays in the server log; the client sees a generic 500.
+            eprintln!("[daybook] ingest failed: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<&str>::error("internal server error")),
+            )
+        }
+    }
+}
+
+/// Cheap sanity checks before the record reaches SQLite: garbage keys
+/// would otherwise live in the ledger forever.
+fn validate_record(record: &SessionRecord) -> Result<(), String> {
+    if record.session_id.trim().is_empty() {
+        return Err("session_id must not be empty".into());
+    }
+    if record.session_id.len() > 128 {
+        return Err("session_id too long (max 128 bytes)".into());
+    }
+    // Bound the other key fields: unbounded strings would live in the
+    // ledger forever (the 1 MiB body cap is too generous for keys).
+    for (field, val, max) in [
+        ("machine", record.machine.as_str(), 128),
+        ("runtime", record.runtime.as_str(), 64),
+        ("project", record.project.as_str(), 256),
+        ("content_hash", record.content_hash.as_str(), 128),
+    ] {
+        if val.len() > max {
+            return Err(format!("{field} too long (max {max} bytes)"));
+        }
+    }
+    if record.machine.trim().is_empty() {
+        return Err("machine must not be empty".into());
+    }
+    if chrono::NaiveDate::parse_from_str(&record.journal_date, "%Y-%m-%d").is_err() {
+        return Err("journal_date must be a valid YYYY-MM-DD date".into());
+    }
+    if record.version < 1 {
+        return Err("version must be >= 1".into());
+    }
+    Ok(())
 }
 
 /// List all available dates
@@ -666,4 +792,152 @@ fn extract_session_metadata(content: &str) -> SessionMetadata {
     }
 
     metadata
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec() -> SessionRecord {
+        SessionRecord {
+            session_id: "s1".into(),
+            machine: "vm1".into(),
+            runtime: "pi".into(),
+            project: "/tmp/p".into(),
+            journal_date: "2026-10-29".into(),
+            started_utc: None,
+            ended_utc: None,
+            title: None,
+            git_branch: None,
+            version: 1,
+            content_hash: "h".into(),
+            summary_md: "md".into(),
+            facets_json: None,
+            usage: crate::ledger::UsageRecord::default(),
+            aggregates: crate::ledger::AggregatesRecord::default(),
+        }
+    }
+
+    #[test]
+    fn test_validate_record_rejects_garbage() {
+        assert!(validate_record(&rec()).is_ok());
+        let mut bad = rec();
+        bad.session_id = "  ".into();
+        assert!(validate_record(&bad).is_err());
+        let mut bad = rec();
+        bad.journal_date = "2026/10/29".into();
+        assert!(validate_record(&bad).is_err());
+        let mut bad = rec();
+        bad.version = 0;
+        assert!(validate_record(&bad).is_err());
+        let mut bad = rec();
+        bad.machine = String::new();
+        assert!(validate_record(&bad).is_err());
+    }
+
+    // --- HTTP contract tests: exercise the real router (auth middleware,
+    // body cap, JSON layer) with tower::ServiceExt::oneshot. ---
+
+    use crate::server::router::create_router;
+    async fn test_app(name: &str) -> (axum::Router, Arc<AppState>, &'static str) {
+        let dir =
+            std::env::temp_dir().join(format!("daybook-httptest-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ledger = Ledger::open(&dir.join("t.db3")).unwrap();
+        let secret = "dbk_testsecret";
+        ledger
+            .mint_token("vm1", &crate::ledger::sha256_hex(secret.as_bytes()))
+            .unwrap();
+        let state = Arc::new(AppState {
+            config: RwLock::new(Config::default()),
+            pricing: PricingData::from_map(std::collections::HashMap::new()),
+            ledger,
+        });
+        (create_router(state.clone()), state, secret)
+    }
+
+    fn ingest_req(
+        token: Option<&str>,
+        body: &serde_json::Value,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut builder = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/ingest")
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        builder
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn status_of(
+        router: &axum::Router,
+        req: axum::http::Request<axum::body::Body>,
+    ) -> (axum::http::StatusCode, String) {
+        use tower::ServiceExt;
+        let resp = router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_http_contract() {
+        let (app, _state, token) = test_app("contract").await;
+        let good = serde_json::to_value(rec()).unwrap();
+
+        // missing token -> 401
+        let (s, _) = status_of(&app, ingest_req(None, &good)).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        // invalid token -> 401
+        let (s, _) = status_of(&app, ingest_req(Some("dbk_wrong"), &good)).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        // token valid for vm1 but record.machine is other -> 403
+        let mut wrong_machine = good.clone();
+        wrong_machine["machine"] = serde_json::json!("other");
+        let (s, b) = status_of(&app, ingest_req(Some(token), &wrong_machine)).await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        assert!(b.contains("does not match"));
+        // invalid date -> 400
+        let mut bad_date = good.clone();
+        bad_date["journal_date"] = serde_json::json!("2026-13-99");
+        let (s, _) = status_of(&app, ingest_req(Some(token), &bad_date)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        // valid first push -> 200 inserted
+        let (s, b) = status_of(&app, ingest_req(Some(token), &good)).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(b.contains("inserted"), "body: {b}");
+        // identical re-push -> 200 noop
+        let (s, b) = status_of(&app, ingest_req(Some(token), &good)).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(b.contains("noop"), "body: {b}");
+        // newer revision -> 200 updated
+        let mut v2 = good.clone();
+        v2["version"] = serde_json::json!(2);
+        v2["content_hash"] = serde_json::json!("h2");
+        let (s, b) = status_of(&app, ingest_req(Some(token), &v2)).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(b.contains("updated"), "body: {b}");
+        // older revision after newer -> 409
+        let mut v1 = good;
+        v1["content_hash"] = serde_json::json!("h-old");
+        let (s, _) = status_of(&app, ingest_req(Some(token), &v1)).await;
+        assert_eq!(s, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_ingest_revoked_token_is_401() {
+        let (app, state, token) = test_app("revoked").await;
+        let good = serde_json::to_value(rec()).unwrap();
+        // Token works, then is revoked: the same secret must stop working.
+        let (s, _) = status_of(&app, ingest_req(Some(token), &good)).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(state.ledger.revoke_token("vm1").unwrap());
+        let (s, _) = status_of(&app, ingest_req(Some(token), &good)).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+    }
 }

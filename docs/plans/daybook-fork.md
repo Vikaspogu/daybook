@@ -118,7 +118,7 @@ Follows the home-ops AGENTS.md application pattern exactly:
   - [ ] Unit tests against small redacted fixtures copied into `tests/fixtures/`, including a truncated JSONL, an unknown-event-type line (skipped with warning, never a crash), and worktree/T3-scratch-dir sessions for attribution
 - **Verification Gate:** `daybook scan --no-llm --local --day today` lists every Pi + Codex session with metadata-derived project attribution; a Pi and a Codex session from the same project attribute to it; a session recorded in a worktree or T3 scratch dir attributes to its parent project; fixture test with malformed input passes without panic; a session started yesterday and scanned today shows yesterday's date.
 
-### [ ] Slice 3 (S3): Journal + server core
+### [x] Slice 3 (S3): Journal + server core
 
 - **Purpose / Done when:** summarize → push → revision-aware store works end to end against a locally running server; the summarizer no longer depends on Claude-only assumptions; VM-local routes are gone.
 - **Blocked by:** S2

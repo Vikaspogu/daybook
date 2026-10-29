@@ -5,8 +5,8 @@ use crate::transcript::adapters;
 /// `daybook scan --no-llm --local --day <d>`: discovery + parse only.
 /// Without --no-llm, also runs the LLM summarization pass over every
 /// listed session, skipping ones already archived (incremental).
-/// --local is accepted for CLI compatibility and currently unused.
-pub async fn run(day: Option<String>, no_llm: bool, _local: bool) -> Result<()> {
+/// --local: run the LLM pass but don't push to the ledger server.
+pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
     let home = dirs::home_dir().context("Failed to get home directory")?;
     let sessions = adapters::discover_sessions(&home);
 
@@ -76,8 +76,8 @@ pub async fn run(day: Option<String>, no_llm: bool, _local: bool) -> Result<()> 
     }
 
     println!(
-        "{:<12} {:<18} {:<8} {:<13} {:<16} {:>7} {:>7}  {}",
-        "runtime", "project", "start", "duration", "model", "in", "out", "session"
+        "{:<12} {:<18} {:<8} {:<13} {:<16} {:>7} {:>7}  session",
+        "runtime", "project", "start", "duration", "model", "in", "out"
     );
     for (meta, parsed) in &rows {
         println!(
@@ -113,6 +113,16 @@ pub async fn run(day: Option<String>, no_llm: bool, _local: bool) -> Result<()> 
     if !no_llm {
         let config = crate::config::load_config()?;
         let mut ok = 0;
+
+        if config.push.url.is_some() {
+            let retried = crate::push::retry_pending(&config).await;
+            if retried > 0 {
+                eprintln!(
+                    "[daybook] Delivered {} parked record(s) to the ledger server",
+                    retried
+                );
+            }
+        }
         let total = rows.len();
         for (i, (meta, parsed)) in rows.iter().enumerate() {
             if parsed.data.is_empty() {
@@ -137,9 +147,22 @@ pub async fn run(day: Option<String>, no_llm: bool, _local: bool) -> Result<()> 
                 .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
             if already_archived(&config, &journal_date, &meta.session_id) {
                 eprintln!(
-                    "[daybook] Already archived, skipping: {}",
+                    "[daybook] Already archived, skipping summary: {}",
                     clean(&meta.session_id)
                 );
+                if !local {
+                    // Already summarized, but the ledger server may not have
+                    // it (e.g. push.url configured after the session archived).
+                    push_after_archive(
+                        &config,
+                        &meta.path,
+                        meta,
+                        parsed,
+                        &journal_date,
+                        &format!("session-{}", meta.session_id),
+                    )
+                    .await;
+                }
                 continue;
             }
             eprintln!(
@@ -158,7 +181,20 @@ pub async fn run(day: Option<String>, no_llm: bool, _local: bool) -> Result<()> 
             )
             .await
             {
-                Ok(_) => ok += 1,
+                Ok(_) => {
+                    ok += 1;
+                    if !local {
+                        push_after_archive(
+                            &config,
+                            &meta.path,
+                            meta,
+                            parsed,
+                            &journal_date,
+                            &task_name,
+                        )
+                        .await;
+                    }
+                }
                 Err(e) => eprintln!(
                     "[daybook] Summarize failed for {}: {}",
                     clean(&meta.session_id),
@@ -170,6 +206,87 @@ pub async fn run(day: Option<String>, no_llm: bool, _local: bool) -> Result<()> 
     }
 
     Ok(())
+}
+
+/// After a session archive lands on disk, ship it to the ledger server.
+/// Push failures park the record in ~/.daybook/pending/ and the next
+/// scan retries it. No-op when push.url isn't configured.
+async fn push_after_archive(
+    config: &crate::config::Config,
+    transcript: &std::path::Path,
+    meta: &adapters::SessionMeta,
+    parsed: &adapters::ParsedSession,
+    journal_date: &str,
+    task_name: &str,
+) {
+    if config.push.url.is_none() {
+        return;
+    }
+    let archive_path = crate::archive::ArchiveManager::new(config.clone())
+        .session_archive_path(journal_date, task_name);
+    let Ok(summary_md) = std::fs::read_to_string(&archive_path) else {
+        eprintln!(
+            "[daybook] Archive missing, not pushing: {}",
+            archive_path.display()
+        );
+        return;
+    };
+    let version = std::fs::metadata(transcript)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let cwd = meta.cwd.clone().unwrap_or_default();
+    let usage = parsed
+        .usage
+        .as_ref()
+        .map(|u| crate::ledger::UsageRecord {
+            input: u.input,
+            output: u.output,
+            ..Default::default()
+        })
+        .unwrap_or_default();
+    let record = crate::push::build_record(
+        config,
+        &meta.session_id,
+        meta.agent.as_str(),
+        &meta.project().unwrap_or(cwd.clone()),
+        journal_date,
+        parsed.title.clone(),
+        parsed.start.clone(),
+        parsed.end.clone(),
+        crate::archive::session::get_git_branch(&cwd),
+        version,
+        crate::ledger::sha256_hex(summary_md.as_bytes()),
+        summary_md,
+        None,
+        usage,
+        crate::ledger::AggregatesRecord::default(),
+    );
+    match crate::push::push_record(config, &record).await {
+        Ok(true) => {
+            eprintln!(
+                "[daybook] Pushed {} to ledger server",
+                clean(&meta.session_id)
+            )
+        }
+        Ok(false) => {}
+        Err(e) => match crate::push::park_record(config, &record) {
+            Ok(_) => {
+                eprintln!(
+                    "[daybook] Push failed, parked for retry: {}",
+                    clean(&e.to_string())
+                )
+            }
+            Err(pe) => eprintln!(
+                "[daybook] Push failed and parking failed for {}: {} / {}",
+                clean(&meta.session_id),
+                clean(&e.to_string()),
+                clean(&pe.to_string())
+            ),
+        },
+    }
 }
 
 /// True when the transcript looks finished: last modified more than

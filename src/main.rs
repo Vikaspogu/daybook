@@ -5,6 +5,8 @@ mod config;
 mod hooks;
 mod insights;
 mod jobs;
+mod ledger;
+mod push;
 mod server;
 mod summarizer;
 mod transcript;
@@ -17,7 +19,7 @@ use cli::args::{Cli, Commands, HookType, JobsAction};
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-
+    config::set_config_path(cli.config.clone());
     match cli.command {
         Commands::Init {
             storage_path,
@@ -89,5 +91,11 @@ async fn main() -> Result<()> {
             host,
             no_open,
         } => cli::commands::show::run(port, host, !no_open).await,
+        Commands::Serve { port, host } => cli::commands::show::run_serve(port, host).await,
+        Commands::Token {
+            list,
+            revoke,
+            label,
+        } => cli::commands::token::run(list, revoke, label),
     }
 }

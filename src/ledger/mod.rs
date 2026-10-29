@@ -1,0 +1,508 @@
+//! SQLite ledger: the server-side store for pushed session records.
+//!
+//! Upsert rule (D5): identical (session_id, machine) + identical
+//! content_hash -> no-op; changed hash with a HIGHER transcript version
+//! -> update; changed hash with a lower-or-equal version -> rejected
+//! (an older queued revision must never overwrite a newer one).
+
+use anyhow::{Context, Result};
+use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::sync::Mutex;
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct UsageRecord {
+    #[serde(default)]
+    pub input: u64,
+    #[serde(default)]
+    pub output: u64,
+    #[serde(default)]
+    pub cache_read: u64,
+    #[serde(default)]
+    pub cache_creation: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct AggregatesRecord {
+    #[serde(default)]
+    pub test_runs: u64,
+    #[serde(default)]
+    pub failed_tool_calls: u64,
+    #[serde(default)]
+    pub interrupted: u64,
+    #[serde(default)]
+    pub cache_hit_rate: Option<f64>,
+}
+
+/// Record pushed by a client machine. `version` is the transcript's last
+/// mtime in epoch seconds: strictly increasing as a session grows.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SessionRecord {
+    pub session_id: String,
+    pub machine: String,
+    pub runtime: String,
+    pub project: String,
+    pub journal_date: String,
+    #[serde(default)]
+    pub started_utc: Option<String>,
+    #[serde(default)]
+    pub ended_utc: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub git_branch: Option<String>,
+    /// Unix seconds of the transcript's last write; drives stale rejection.
+    pub version: i64,
+    pub content_hash: String,
+    /// Full markdown archive (frontmatter + summary sections).
+    pub summary_md: String,
+    #[serde(default)]
+    pub facets_json: Option<String>,
+    #[serde(default)]
+    pub usage: UsageRecord,
+    #[serde(default)]
+    pub aggregates: AggregatesRecord,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum UpsertOutcome {
+    Inserted,
+    Updated,
+    Noop,
+    RejectedStale,
+}
+
+impl UpsertOutcome {
+    /// Wire string for the ingest response payload.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UpsertOutcome::Inserted => "inserted",
+            UpsertOutcome::Updated => "updated",
+            UpsertOutcome::Noop => "noop",
+            UpsertOutcome::RejectedStale => "stale",
+        }
+    }
+}
+
+/// Lightweight row shape for query endpoints.
+// ponytail: read path unused until S4 (serve reads fs archives); remove if S4 drops it
+#[allow(dead_code)]
+#[derive(Debug, Serialize, Clone)]
+pub struct SessionRow {
+    pub session_id: String,
+    pub machine: String,
+    pub runtime: String,
+    pub project: String,
+    pub journal_date: String,
+    pub title: String,
+    pub revision: i64,
+    pub pushed_at: String,
+}
+
+pub struct Ledger {
+    conn: Mutex<Connection>,
+}
+
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    machine TEXT NOT NULL,
+    runtime TEXT NOT NULL,
+    project TEXT NOT NULL,
+    journal_date TEXT NOT NULL,
+    started_utc TEXT,
+    ended_utc TEXT,
+    title TEXT,
+    git_branch TEXT,
+    version INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    summary_md TEXT NOT NULL,
+    facets_json TEXT,
+    usage_json TEXT,
+    aggregates_json TEXT,
+    revision INTEGER NOT NULL DEFAULT 1,
+    pushed_at TEXT NOT NULL,
+    UNIQUE(session_id, machine)
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_date ON sessions(journal_date);
+CREATE TABLE IF NOT EXISTS tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT NOT NULL UNIQUE,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    revoked INTEGER NOT NULL DEFAULT 0
+);
+";
+
+// ponytail: list_dates/list_sessions/get_summary_md unused until S4 consumes them
+#[allow(dead_code)]
+impl Ledger {
+    pub fn open(path: &Path) -> Result<Self> {
+        if let Some(dir) = path.parent() {
+            let existed = dir.exists();
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("create ledger dir {}", dir.display()))?;
+            // Only chmod a dir we just created — a pre-existing parent
+            // (config may point db_path anywhere, e.g. $HOME) keeps its
+            // own permissions.
+            #[cfg(unix)]
+            if !existed {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+        let conn =
+            Connection::open(path).with_context(|| format!("open ledger {}", path.display()))?;
+        // WAL: readers don't block the ingest writer.
+        let _: String = conn
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .with_context(|| "set WAL")?;
+        conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+        conn.execute_batch(SCHEMA)?;
+        // Token hashes and all summaries live here: owner-only on unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::Permissions::from_mode(0o600);
+            let _ = std::fs::set_permissions(path, mode.clone());
+            // WAL sidecars hold the same data; best-effort same perms.
+            for side in ["-wal", "-shm"] {
+                let _ = std::fs::set_permissions(
+                    std::path::PathBuf::from(format!("{}{}", path.display(), side)),
+                    mode.clone(),
+                );
+            }
+        }
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    /// D5 upsert. Callers must send the full record every time.
+    pub fn upsert_session(&self, r: &SessionRecord) -> Result<UpsertOutcome> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let existing: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT version, content_hash FROM sessions
+                 WHERE session_id = ?1 AND machine = ?2",
+                [&r.session_id, &r.machine],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })?;
+
+        let outcome = match existing {
+            None => UpsertOutcome::Inserted,
+            Some((_, hash)) if hash == r.content_hash => UpsertOutcome::Noop,
+            Some((version, _)) if r.version > version => UpsertOutcome::Updated,
+            Some(_) => UpsertOutcome::RejectedStale,
+        };
+        if outcome == UpsertOutcome::RejectedStale {
+            return Ok(outcome);
+        }
+        if outcome == UpsertOutcome::Noop {
+            return Ok(outcome);
+        }
+
+        let usage = serde_json::to_string(&r.usage)?;
+        let aggs = serde_json::to_string(&r.aggregates)?;
+        conn.execute(
+            "INSERT INTO sessions (session_id, machine, runtime, project, journal_date,
+                started_utc, ended_utc, title, git_branch, version, content_hash,
+                summary_md, facets_json, usage_json, aggregates_json, revision, pushed_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,1,?16)
+             ON CONFLICT(session_id, machine) DO UPDATE SET
+                runtime=excluded.runtime, project=excluded.project,
+                journal_date=excluded.journal_date,
+                started_utc=excluded.started_utc, ended_utc=excluded.ended_utc,
+                title=excluded.title, git_branch=excluded.git_branch,
+                version=excluded.version, content_hash=excluded.content_hash,
+                summary_md=excluded.summary_md, facets_json=excluded.facets_json,
+                usage_json=excluded.usage_json, aggregates_json=excluded.aggregates_json,
+                revision=sessions.revision+1, pushed_at=excluded.pushed_at",
+            rusqlite::params![
+                r.session_id,
+                r.machine,
+                r.runtime,
+                r.project,
+                r.journal_date,
+                r.started_utc,
+                r.ended_utc,
+                r.title,
+                r.git_branch,
+                r.version,
+                r.content_hash,
+                r.summary_md,
+                r.facets_json,
+                usage,
+                aggs,
+                now,
+            ],
+        )?;
+        Ok(outcome)
+    }
+
+    pub fn list_dates(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT journal_date FROM sessions ORDER BY journal_date DESC")?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn list_sessions(&self, date: &str) -> Result<Vec<SessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, machine, runtime, project, journal_date, COALESCE(title, ''),
+                    revision, pushed_at
+             FROM sessions WHERE journal_date = ?1 ORDER BY pushed_at",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![date], |row| {
+                Ok(SessionRow {
+                    session_id: row.get(0)?,
+                    machine: row.get(1)?,
+                    runtime: row.get(2)?,
+                    project: row.get(3)?,
+                    journal_date: row.get(4)?,
+                    title: row.get(5)?,
+                    revision: row.get(6)?,
+                    pushed_at: row.get(7)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn get_summary_md(
+        &self,
+        date: &str,
+        session_id: &str,
+        machine: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+"SELECT summary_md FROM sessions WHERE journal_date = ?1 AND session_id = ?2 AND machine = ?3",
+            [date, session_id, machine],
+            |row| row.get::<_, String>(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(e),
+        })
+        .map_err(Into::into)
+    }
+
+    // ---- machine tokens (D7) ----
+
+    pub fn mint_token(&self, label: &str, token_hash: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO tokens (label, token_hash, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(label) DO UPDATE SET
+                 token_hash = excluded.token_hash,
+                 created_at = excluded.created_at,
+                 revoked = 0,
+                 last_used_at = NULL",
+            rusqlite::params![label, token_hash, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// None when the token is unknown or revoked; stamps last_used_at.
+    /// DB errors propagate (→ 500): only a clean miss is a 401.
+    pub fn check_token(&self, token: &str) -> Result<Option<String>> {
+        let hash = crate::ledger::sha256_hex(token.as_bytes());
+        let conn = self.conn.lock().unwrap();
+        let label = conn
+            .query_row(
+                "SELECT label FROM tokens WHERE token_hash = ?1 AND revoked = 0",
+                [hash.clone()],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })?;
+        if label.is_some() {
+            conn.execute(
+                "UPDATE tokens SET last_used_at = ?1
+                 WHERE token_hash = ?2 AND revoked = 0",
+                rusqlite::params![chrono::Utc::now().to_rfc3339(), hash],
+            )?;
+        }
+        Ok(label)
+    }
+
+    pub fn list_tokens(&self) -> Result<Vec<(String, String, String, bool)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT label, created_at, COALESCE(last_used_at, ''), revoked = 1
+             FROM tokens ORDER BY created_at",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, bool>(3)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn revoke_token(&self, label: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE tokens SET revoked = 1 WHERE label = ?1 AND revoked = 0",
+            [label],
+        )? > 0)
+    }
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(session_id: &str, version: i64, hash: &str) -> SessionRecord {
+        record_md(session_id, version, hash, "# md")
+    }
+
+    fn record_md(session_id: &str, version: i64, hash: &str, md: &str) -> SessionRecord {
+        SessionRecord {
+            session_id: session_id.into(),
+            machine: "vm1".into(),
+            runtime: "pi".into(),
+            project: "/tmp/p".into(),
+            journal_date: "2026-10-29".into(),
+            started_utc: None,
+            ended_utc: None,
+            title: Some("t".into()),
+            git_branch: None,
+            version,
+            content_hash: hash.into(),
+            summary_md: md.into(),
+            facets_json: None,
+            usage: UsageRecord::default(),
+            aggregates: AggregatesRecord::default(),
+        }
+    }
+
+    #[test]
+    fn test_upsert_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&dir.path().join("t.db3")).unwrap();
+        // insert
+        assert_eq!(
+            ledger
+                .upsert_session(&record_md("s1", 100, "h1", "# v1"))
+                .unwrap(),
+            UpsertOutcome::Inserted
+        );
+        // identical push -> noop
+        assert_eq!(
+            ledger
+                .upsert_session(&record_md("s1", 100, "h1", "# v1"))
+                .unwrap(),
+            UpsertOutcome::Noop
+        );
+        // grown transcript -> update
+        assert_eq!(
+            ledger
+                .upsert_session(&record_md("s1", 200, "h2", "# v2"))
+                .unwrap(),
+            UpsertOutcome::Updated
+        );
+        // older queued revision after newer -> rejected
+        assert_eq!(
+            ledger
+                .upsert_session(&record_md("s1", 150, "h3", "# v3"))
+                .unwrap(),
+            UpsertOutcome::RejectedStale
+        );
+        // latest content still the newer revision
+        let md = ledger
+            .get_summary_md("2026-10-29", "s1", "vm1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(md, "# v2");
+        let rows = ledger.list_sessions("2026-10-29").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].revision, 2);
+        // second machine is a separate row
+        let mut other = record("s1", 100, "h1");
+        other.machine = "vm2".into();
+        assert_eq!(
+            ledger.upsert_session(&other).unwrap(),
+            UpsertOutcome::Inserted
+        );
+        assert_eq!(ledger.list_dates().unwrap(), vec!["2026-10-29"]);
+    }
+
+    #[test]
+    fn test_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&dir.path().join("t.db3")).unwrap();
+        ledger.mint_token("vm1", &sha256_hex(b"secret1")).unwrap();
+        assert_eq!(
+            ledger.check_token("secret1").unwrap().as_deref(),
+            Some("vm1")
+        );
+        assert_eq!(ledger.check_token("wrong").unwrap(), None);
+        assert!(ledger.revoke_token("vm1").unwrap());
+        assert_eq!(ledger.check_token("secret1").unwrap(), None);
+        assert!(!ledger.revoke_token("vm1").unwrap());
+        // Rotation: minting the same label again revokes the old secret.
+        ledger.mint_token("vm1", &sha256_hex(b"secret2")).unwrap();
+        assert_eq!(ledger.check_token("secret1").unwrap(), None);
+        assert_eq!(
+            ledger.check_token("secret2").unwrap().as_deref(),
+            Some("vm1")
+        );
+    }
+
+    #[test]
+    fn test_check_token_miss_touches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&dir.path().join("t.db3")).unwrap();
+        ledger.mint_token("vm1", &sha256_hex(b"secret1")).unwrap();
+        // A miss must neither authenticate nor stamp last_used_at.
+        assert_eq!(ledger.check_token("wrong").unwrap(), None);
+        let stamped = ledger
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM tokens WHERE last_used_at IS NOT NULL",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(stamped, 0);
+        // The hit still works afterwards.
+        assert_eq!(
+            ledger.check_token("secret1").unwrap().as_deref(),
+            Some("vm1")
+        );
+    }
+}
