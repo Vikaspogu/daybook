@@ -7,7 +7,6 @@ use axum::{
 };
 use std::sync::{Arc, RwLock};
 
-use crate::archive::ArchiveManager;
 use crate::config::Config;
 use crate::insights::collector::InsightsData;
 use crate::insights::daily::DateInsights;
@@ -26,24 +25,53 @@ pub struct AppState {
 
 /// Bearer-token identity attached by `auth_middleware`.
 #[derive(Clone)]
-pub struct AuthedLabel(pub String);
+pub struct Authed {
+    pub label: String,
+    pub admin: bool,
+}
 
 /// Rejects requests without a valid bearer token before axum buffers and
-/// parses the JSON body; also stamps the token's last_used_at.
+/// parses the JSON body. Machine tokens are checked against the ledger
+/// (last_used_at stamped); the admin token from server config is checked
+/// by equality (read from a local config file, not a DB row).
 pub async fn auth_middleware(
     State(state): State<Arc<AppState>>,
     mut req: Request,
     next: Next,
 ) -> Response {
-    let authed = match req
+    let secret = req
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-    {
-        Some(secret) => match state.ledger.check_token(secret) {
-            Ok(label) => label,
+        .and_then(|v| v.strip_prefix("Bearer "));
+    // Empty configured admin token means "no admin configured", never a
+    // match for an empty bearer header. Compare SHA-256 digests so response
+    // timing cannot leak the operator-chosen secret's length or prefix.
+    let admin_digest = state
+        .config
+        .read()
+        .ok()
+        .and_then(|c| c.server.admin_token.clone())
+        .filter(|t| !t.is_empty())
+        .map(|t| crate::ledger::sha256_hex(t.as_bytes()));
+    let authed = match secret {
+        Some(s)
+            if admin_digest
+                .as_ref()
+                .is_some_and(|d| *d == crate::ledger::sha256_hex(s.as_bytes())) =>
+        {
+            Some(Authed {
+                label: "admin".into(),
+                admin: true,
+            })
+        }
+        Some(s) => match state.ledger.check_token(s) {
             // DB errors propagate: a broken ledger must not masquerade as 401.
+            Ok(Some(label)) => Some(Authed {
+                label,
+                admin: false,
+            }),
+            Ok(None) => None,
             Err(e) => {
                 eprintln!("[daybook] token check failed: {e:#}");
                 return (
@@ -56,8 +84,8 @@ pub async fn auth_middleware(
         None => None,
     };
     match authed {
-        Some(label) => {
-            req.extensions_mut().insert(AuthedLabel(label));
+        Some(a) => {
+            req.extensions_mut().insert(a);
             next.run(req).await
         }
         None => (
@@ -105,7 +133,7 @@ pub async fn get_stats(
 /// set in the router.
 pub async fn ingest(
     State(state): State<Arc<AppState>>,
-    Extension(authed): Extension<AuthedLabel>,
+    Extension(authed): Extension<Authed>,
     Json(record): Json<SessionRecord>,
 ) -> impl IntoResponse {
     if let Err(msg) = validate_record(&record) {
@@ -115,7 +143,7 @@ pub async fn ingest(
         );
     }
     // Containment: a token minted for one machine must not write rows for another.
-    if authed.0 != record.machine {
+    if !authed.admin && authed.label != record.machine {
         return (
             StatusCode::FORBIDDEN,
             Json(ApiResponse::<&str>::error(
@@ -146,6 +174,155 @@ pub async fn ingest(
     }
 }
 
+// ---- Token management (admin only) ----
+
+#[derive(serde::Serialize)]
+pub struct TokenRow {
+    pub label: String,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub revoked: bool,
+}
+
+#[derive(serde::Deserialize)]
+pub struct MintTokenBody {
+    pub label: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct RevokeTokenBody {
+    pub label: String,
+}
+
+fn admin_forbidden() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ApiResponse::<&str>::error("admin token required")),
+    )
+        .into_response()
+}
+
+/// GET /api/tokens — list machine tokens with last-used and revoked state.
+pub async fn list_tokens_api(
+    State(state): State<Arc<AppState>>,
+    Extension(authed): Extension<Authed>,
+) -> Response {
+    if !authed.admin {
+        return admin_forbidden();
+    }
+    match state.ledger.list_tokens() {
+        Ok(rows) => (
+            StatusCode::OK,
+            Json(ApiResponse::success(
+                rows.into_iter()
+                    .map(|(label, created_at, last_used_at, revoked)| TokenRow {
+                        label,
+                        created_at,
+                        last_used_at: if last_used_at.is_empty() {
+                            None
+                        } else {
+                            Some(last_used_at)
+                        },
+                        revoked,
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+        )
+            .into_response(),
+        Err(e) => {
+            eprintln!("[daybook] token list failed: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<()>::error("internal server error")),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// POST /api/tokens {label} — mint a machine token. The secret is
+/// returned exactly once; only its hash is stored.
+pub async fn mint_token_api(
+    State(state): State<Arc<AppState>>,
+    Extension(authed): Extension<Authed>,
+    Json(body): Json<MintTokenBody>,
+) -> Response {
+    if !authed.admin {
+        return admin_forbidden();
+    }
+    let label = body.label.trim().to_string();
+    if label.is_empty() || label.len() > 64 || label.contains(':') {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<&str>::error(
+                "label must be 1-64 chars and not contain ':'",
+            )),
+        )
+            .into_response();
+    }
+    let secret = match crate::ledger::generate_secret() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[daybook] secret generation failed: {e:#}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<()>::error("internal server error")),
+            )
+                .into_response();
+        }
+    };
+    match state
+        .ledger
+        .mint_token(&label, &crate::ledger::sha256_hex(secret.as_bytes()))
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(ApiResponse::success(serde_json::json!({
+                "label": label,
+                "token": secret,
+            }))),
+        )
+            .into_response(),
+        Err(e) => {
+            eprintln!("[daybook] token mint failed: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<()>::error("internal server error")),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// POST /api/tokens/revoke {label} — soft-revoke a machine token.
+pub async fn revoke_token_api(
+    State(state): State<Arc<AppState>>,
+    Extension(authed): Extension<Authed>,
+    Json(body): Json<RevokeTokenBody>,
+) -> Response {
+    if !authed.admin {
+        return admin_forbidden();
+    }
+    match state.ledger.revoke_token(body.label.trim()) {
+        Ok(true) => (StatusCode::OK, Json(ApiResponse::success(()))).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::<&str>::error(
+                "no active token with that label",
+            )),
+        )
+            .into_response(),
+        Err(e) => {
+            eprintln!("[daybook] token revoke failed: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<()>::error("internal server error")),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// Cheap sanity checks before the record reaches SQLite: garbage keys
 /// would otherwise live in the ledger forever.
 fn validate_record(record: &SessionRecord) -> Result<(), String> {
@@ -170,6 +347,12 @@ fn validate_record(record: &SessionRecord) -> Result<(), String> {
     if record.machine.trim().is_empty() {
         return Err("machine must not be empty".into());
     }
+    // Session names embed "machine:session_id" and machine labels are
+    // minted without ':' — records arriving here (e.g. via the admin
+    // token, which skips the label check) must not break that split.
+    if record.machine.contains(':') {
+        return Err("machine must not contain ':'".into());
+    }
     if chrono::NaiveDate::parse_from_str(&record.journal_date, "%Y-%m-%d").is_err() {
         return Err("journal_date must be a valid YYYY-MM-DD date".into());
     }
@@ -179,109 +362,159 @@ fn validate_record(record: &SessionRecord) -> Result<(), String> {
     Ok(())
 }
 
-/// List all available dates
+/// List all available dates (ledger-backed; the cluster has no fs archives)
 pub async fn list_dates(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let config = state.config.read().unwrap().clone();
-    let manager = ArchiveManager::new(config);
-
-    match manager.list_dates() {
-        Ok(dates) => {
-            let date_infos: Vec<DateInfo> = dates
+    match state.ledger.date_infos() {
+        Ok(infos) => {
+            let date_infos: Vec<DateInfo> = infos
                 .into_iter()
-                .map(|date| {
-                    let sessions = manager.list_sessions(&date).unwrap_or_default();
-                    let has_digest = manager
-                        .read_daily_summary(&date)
-                        .map(|content| {
-                            content.contains("## Overview")
-                                && !content.contains("No sessions recorded yet")
-                        })
-                        .unwrap_or(false);
-
-                    DateInfo {
-                        date,
-                        session_count: sessions.len(),
-                        has_digest,
-                    }
+                .map(|r| DateInfo {
+                    date: r.date,
+                    session_count: r.session_count as usize,
+                    has_digest: r.md_count > 0,
                 })
                 .collect();
-
             Json(ApiResponse::success(date_infos))
         }
-        Err(e) => Json(ApiResponse::<Vec<DateInfo>>::error(e.to_string())),
+        Err(e) => {
+            eprintln!("[daybook] list_dates failed: {e:#}");
+            Json(ApiResponse::<Vec<DateInfo>>::error("internal server error"))
+        }
     }
 }
 
-/// Get daily summary for a specific date
+/// Get daily summary for a specific date, synthesized from the ledger's
+/// session records (no fs day digests and no LLM on the cluster pod).
 pub async fn get_daily_summary(
     State(state): State<Arc<AppState>>,
     Path(date): Path<String>,
 ) -> impl IntoResponse {
-    let config = state.config.read().unwrap().clone();
-    let manager = ArchiveManager::new(config);
-
-    match manager.read_daily_summary(&date) {
-        Ok(content) => {
-            let file_path = manager.daily_summary_path(&date);
-            let mut summary = parse_daily_summary(&date, &content);
-            summary.file_path = file_path.to_string_lossy().to_string();
+    match state.ledger.session_briefs(&date) {
+        Ok(rows) => {
+            let session_count = rows.len();
+            let sessions: Vec<String> = rows.iter().map(session_name).collect();
+            let mut projects: std::collections::BTreeMap<&str, usize> =
+                std::collections::BTreeMap::new();
+            for r in &rows {
+                *projects.entry(r.project.as_str()).or_default() += 1;
+            }
+            let overview = if session_count == 0 {
+                "No sessions recorded yet.".to_string()
+            } else {
+                let tally: Vec<String> =
+                    projects.iter().map(|(p, n)| format!("{p} ({n})")).collect();
+                format!(
+                    "{session_count} session(s) across {} project(s): {}",
+                    projects.len(),
+                    tally.join(", ")
+                )
+            };
+            let raw_content = rows
+                .iter()
+                .map(|r| r.summary_md.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n---\n\n");
+            let summary = DailySummaryDto {
+                date: date.clone(),
+                overview,
+                session_count,
+                sessions,
+                insights: Vec::new(),
+                skills: Vec::new(),
+                commands: Vec::new(),
+                reflections: None,
+                tomorrow_focus: Vec::new(),
+                raw_content,
+                file_path: String::new(),
+            };
             Json(ApiResponse::success(summary))
         }
-        Err(e) => Json(ApiResponse::<DailySummaryDto>::error(e.to_string())),
+        Err(e) => {
+            eprintln!("[daybook] get_daily_summary failed: {e:#}");
+            Json(ApiResponse::<DailySummaryDto>::error(
+                "internal server error",
+            ))
+        }
     }
 }
 
-/// List sessions for a specific date
+/// List sessions for a specific date (ledger-backed)
 pub async fn list_sessions(
     State(state): State<Arc<AppState>>,
     Path(date): Path<String>,
 ) -> impl IntoResponse {
-    let config = state.config.read().unwrap().clone();
-    let manager = ArchiveManager::new(config);
-
-    match manager.list_sessions(&date) {
-        Ok(sessions) => {
-            let session_briefs: Vec<SessionBrief> = sessions
-                .into_iter()
-                .filter_map(|name| {
-                    manager.read_session(&date, &name).ok().map(|content| {
-                        let (title, summary) = extract_session_preview(&content);
-                        SessionBrief {
-                            name,
-                            title,
-                            summary_preview: summary,
-                        }
-                    })
+    match state.ledger.session_briefs(&date) {
+        Ok(rows) => {
+            let session_briefs: Vec<SessionBrief> = rows
+                // ponytail: session_briefs loads full summary_md per row; fine at
+                // tens of sessions/date — a SQL substr would break "## Summary"
+                // section semantics. Revisit if dates grow past hundreds.
+                .iter()
+                .map(|r| SessionBrief {
+                    name: session_name(r),
+                    title: if r.title.is_empty() {
+                        r.session_id.clone()
+                    } else {
+                        r.title.clone()
+                    },
+                    summary_preview: summary_preview(&r.summary_md),
                 })
                 .collect();
-
             Json(ApiResponse::success(session_briefs))
         }
-        Err(e) => Json(ApiResponse::<Vec<SessionBrief>>::error(e.to_string())),
+        Err(e) => {
+            eprintln!("[daybook] list_sessions failed: {e:#}");
+            Json(ApiResponse::<Vec<SessionBrief>>::error(
+                "internal server error",
+            ))
+        }
     }
 }
 
-/// Get session details
+/// Get session details (ledger-backed). `name` is "machine:session_id" as
+/// produced by `list_sessions` / the day view.
 pub async fn get_session(
     State(state): State<Arc<AppState>>,
     Path((date, name)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let config = state.config.read().unwrap().clone();
-    let manager = ArchiveManager::new(config);
-
-    match manager.read_session(&date, &name) {
-        Ok(content) => {
-            let metadata = extract_session_metadata(&content);
-            let file_path = manager.session_archive_path(&date, &name);
+    let Some((machine, session_id)) = split_session_name(&name) else {
+        return Json(ApiResponse::<SessionDetailDto>::error(
+            "session name must be machine:session_id",
+        ));
+    };
+    let row = match state.ledger.session_brief(&date, &machine, &session_id) {
+        Ok(row) => row,
+        // DB errors must not masquerade as "session not found".
+        Err(e) => {
+            eprintln!("[daybook] get_session failed: {e:#}");
+            return Json(ApiResponse::<SessionDetailDto>::error(
+                "internal server error",
+            ));
+        }
+    };
+    match row {
+        Some(r) => {
+            let metadata = SessionMetadata {
+                title: if r.title.is_empty() {
+                    r.session_id.clone()
+                } else {
+                    r.title.clone()
+                },
+                date: date.clone(),
+                session_id: Some(r.session_id.clone()),
+                cwd: None,
+                git_branch: r.git_branch.clone(),
+                duration: None,
+            };
             let detail = SessionDetailDto {
                 name,
-                content,
+                content: r.summary_md,
                 metadata,
-                file_path: file_path.to_string_lossy().to_string(),
+                file_path: format!("ledger://{date}/{machine}/{session_id}"),
             };
             Json(ApiResponse::success(detail))
         }
-        Err(e) => Json(ApiResponse::<SessionDetailDto>::error(e.to_string())),
+        None => Json(ApiResponse::<SessionDetailDto>::error("session not found")),
     }
 }
 
@@ -528,257 +761,33 @@ pub async fn get_date_insights(
 
 // Helper functions
 
-fn parse_daily_summary(date: &str, content: &str) -> DailySummaryDto {
-    let extract_section = |header: &str| -> Option<String> {
-        let pattern = format!("## {}\n", header);
-        if let Some(start) = content.find(&pattern) {
-            let start = start + pattern.len();
-            let end = content[start..]
-                .find("\n## ")
-                .map(|i| start + i)
-                .unwrap_or(content.len());
-            let section = content[start..end].trim().to_string();
-            if section.is_empty() || section == "No sessions recorded yet." {
-                None
-            } else {
-                Some(section)
-            }
-        } else {
-            None
-        }
-    };
-
-    // Parse a section into cards by splitting on ### subsections.
-    // Backward compat: if no ### found, wrap entire section as a single card.
-    let extract_cards = |header: &str| -> Vec<SummaryCardDto> {
-        let section = match extract_section(header) {
-            Some(s) => s,
-            None => return Vec::new(),
-        };
-
-        let mut cards: Vec<SummaryCardDto> = Vec::new();
-        let mut current_title: Option<String> = None;
-        let mut current_lines: Vec<String> = Vec::new();
-
-        for line in section.lines() {
-            if let Some(title) = line.strip_prefix("### ") {
-                // Flush previous card
-                if let Some(prev_title) = current_title.take() {
-                    let body = current_lines.join("\n").trim().to_string();
-                    if !body.is_empty() {
-                        cards.push(SummaryCardDto {
-                            title: prev_title,
-                            content: body,
-                        });
-                    }
-                }
-                current_title = Some(title.trim().to_string());
-                current_lines.clear();
-            } else {
-                current_lines.push(line.to_string());
-            }
-        }
-
-        // Flush last card
-        if let Some(prev_title) = current_title {
-            let body = current_lines.join("\n").trim().to_string();
-            if !body.is_empty() {
-                cards.push(SummaryCardDto {
-                    title: prev_title,
-                    content: body,
-                });
-            }
-        }
-
-        // Backward compatibility: if no ### subsections found, wrap as single card
-        if cards.is_empty() && !section.is_empty() {
-            cards.push(SummaryCardDto {
-                title: header.to_string(),
-                content: section,
-            });
-        }
-
-        cards
-    };
-
-    // Extract session names from frontmatter or content
-    let sessions: Vec<String> = if let Some(start) = content.find("sessions:") {
-        let start = start + 9;
-        let end = content[start..]
-            .find("\n---")
-            .or_else(|| content[start..].find("\ntags:"))
-            .map(|i| start + i)
-            .unwrap_or(content.len());
-        content[start..end]
-            .lines()
-            .filter_map(|line| {
-                let line = line.trim();
-                line.strip_prefix("- ")
-                    .map(|stripped| stripped.trim_matches('"').to_string())
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    // Skills & Commands live under "## Skills & Commands Identified" with
-    // "### Potential Skills" and "### Potential Commands" as sub-markers.
-    // The LLM-generated card content may contain rogue ## headings (e.g. "## 可复用技能"),
-    // so we locate these markers directly in the full content rather than relying on
-    // extract_section which would be broken by embedded ## headings.
-    let extract_skills_commands = || -> (Vec<SummaryCardDto>, Vec<SummaryCardDto>) {
-        let skills_marker = "\n### Potential Skills\n";
-        let commands_marker = "\n### Potential Commands\n";
-
-        // Also support file starting with the marker (no leading newline)
-        let skills_start = content
-            .find(skills_marker)
-            .map(|i| i + skills_marker.len())
-            .or_else(|| {
-                content
-                    .strip_prefix("### Potential Skills\n")
-                    .map(|_| "### Potential Skills\n".len())
-            });
-        let commands_start = content
-            .find(commands_marker)
-            .map(|i| i + commands_marker.len());
-
-        // Find the footer marker: "---" followed by "*Generated" or "*Archived"
-        let find_footer = |from: usize| -> usize {
-            let mut search_from = from;
-            loop {
-                match content[search_from..].find("\n---\n") {
-                    Some(pos) => {
-                        let after = search_from + pos + 4; // skip past "\n---\n"
-                        if content[after..].starts_with('*') {
-                            return search_from + pos;
-                        }
-                        // This "---" is a content separator (e.g. between cards), skip it
-                        search_from = after;
-                    }
-                    None => return content.len(),
-                }
-            }
-        };
-
-        // Skills section: from after "### Potential Skills\n" to "### Potential Commands\n" (or footer)
-        let skills_text = skills_start.map(|start| {
-            let end = content[start..]
-                .find(commands_marker)
-                .map(|i| start + i)
-                .unwrap_or_else(|| find_footer(start));
-            content[start..end].trim()
-        });
-
-        // Commands section: from after "### Potential Commands\n" to the footer
-        let commands_text = commands_start.map(|start| {
-            let end = find_footer(start);
-            content[start..end].trim()
-        });
-
-        let parse_cards_from_text = |text: Option<&str>| -> Vec<SummaryCardDto> {
-            let section = match text {
-                Some(s) if !s.is_empty() => s,
-                _ => return Vec::new(),
-            };
-            let mut cards: Vec<SummaryCardDto> = Vec::new();
-            let mut current_title: Option<String> = None;
-            let mut current_lines: Vec<String> = Vec::new();
-
-            for line in section.lines() {
-                // Card titles are ### level; skip any ## lines (LLM noise)
-                if let Some(title) = line.strip_prefix("### ") {
-                    if let Some(prev_title) = current_title.take() {
-                        let body = current_lines.join("\n").trim().to_string();
-                        if !body.is_empty() {
-                            cards.push(SummaryCardDto {
-                                title: prev_title,
-                                content: body,
-                            });
-                        }
-                    }
-                    current_title = Some(title.trim().to_string());
-                    current_lines.clear();
-                } else if line.starts_with("## ") {
-                    // Skip rogue H2 headings embedded in LLM content
-                    continue;
-                } else {
-                    current_lines.push(line.to_string());
-                }
-            }
-            if let Some(prev_title) = current_title {
-                let body = current_lines.join("\n").trim().to_string();
-                if !body.is_empty() {
-                    cards.push(SummaryCardDto {
-                        title: prev_title,
-                        content: body,
-                    });
-                }
-            }
-            cards
-        };
-
-        let skills = parse_cards_from_text(skills_text);
-        let commands = parse_cards_from_text(commands_text);
-        (skills, commands)
-    };
-
-    let (skills, commands) = extract_skills_commands();
-
-    DailySummaryDto {
-        date: date.to_string(),
-        overview: extract_section("Overview").unwrap_or_default(),
-        session_count: sessions.len(),
-        sessions,
-        insights: extract_cards("Key Insights"),
-        skills,
-        commands,
-        reflections: extract_section("Reflections"),
-        tomorrow_focus: extract_cards("Tomorrow's Focus"),
-        raw_content: content.to_string(),
-        file_path: String::new(), // Will be set by caller
-    }
+/// Dashboard session name: "machine:session_id" (machine labels reject ':',
+/// so the split is unambiguous).
+fn session_name(r: &crate::ledger::SessionBriefRow) -> String {
+    format!("{}:{}", r.machine, r.session_id)
 }
 
-fn extract_session_preview(content: &str) -> (String, String) {
-    // Extract title from frontmatter or first heading
-    let title = if let Some(start) = content.find("title:") {
-        let start = start + 6;
-        let end = content[start..]
-            .find('\n')
-            .map(|i| start + i)
-            .unwrap_or(content.len());
-        content[start..end].trim().trim_matches('"').to_string()
-    } else if let Some(start) = content.find("# ") {
-        let start = start + 2;
-        let end = content[start..]
-            .find('\n')
-            .map(|i| start + i)
-            .unwrap_or(content.len());
-        content[start..end].trim().to_string()
-    } else {
-        "Untitled".to_string()
-    };
+/// Inverse of `session_name`; None when malformed.
+fn split_session_name(name: &str) -> Option<(String, String)> {
+    let (machine, session_id) = name.split_once(':')?;
+    Some((machine.to_string(), session_id.to_string()))
+}
 
-    // Extract summary section preview
-    let summary = if let Some(start) = content.find("## Summary\n") {
-        let start = start + 11;
-        let end = content[start..]
-            .find("\n## ")
-            .map(|i| start + i)
-            .unwrap_or_else(|| (start + 300).min(content.len()));
-        let text = content[start..end].trim();
-        if text.chars().count() > 200 {
-            let truncated: String = text.chars().take(200).collect();
-            format!("{}...", truncated)
-        } else {
-            text.to_string()
-        }
-    } else {
-        String::new()
+/// First ~200 chars of the "## Summary" section for session list previews.
+fn summary_preview(summary_md: &str) -> String {
+    let Some(start) = summary_md.find("## Summary\n").map(|i| i + 11) else {
+        return String::new();
     };
-
-    (title, summary)
+    let end = summary_md[start..]
+        .find("\n## ")
+        .map(|i| start + i)
+        .unwrap_or(summary_md.len());
+    let text = summary_md[start..end].trim();
+    if text.chars().count() > 200 {
+        format!("{}...", text.chars().take(200).collect::<String>())
+    } else {
+        text.to_string()
+    }
 }
 
 /// Map a SessionUsage domain model to SessionUsageDto
@@ -798,33 +807,6 @@ fn map_session_usage_dto(u: crate::usage::types::SessionUsage) -> SessionUsageDt
     }
 }
 
-fn extract_session_metadata(content: &str) -> SessionMetadata {
-    let mut metadata = SessionMetadata::default();
-
-    // Parse YAML frontmatter
-    if let Some(stripped) = content.strip_prefix("---\n") {
-        if let Some(end) = stripped.find("\n---") {
-            let frontmatter = &stripped[..end];
-            for line in frontmatter.lines() {
-                if let Some((key, value)) = line.split_once(':') {
-                    let key = key.trim();
-                    let value = value.trim().trim_matches('"');
-                    match key {
-                        "title" => metadata.title = value.to_string(),
-                        "date" => metadata.date = value.to_string(),
-                        "session_id" => metadata.session_id = Some(value.to_string()),
-                        "cwd" => metadata.cwd = Some(value.to_string()),
-                        "git_branch" => metadata.git_branch = Some(value.to_string()),
-                        "duration" => metadata.duration = Some(value.to_string()),
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-
-    metadata
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -864,6 +846,9 @@ mod tests {
         let mut bad = rec();
         bad.machine = String::new();
         assert!(validate_record(&bad).is_err());
+        let mut bad = rec();
+        bad.machine = "vm:1".into();
+        assert!(validate_record(&bad).is_err());
     }
 
     // --- HTTP contract tests: exercise the real router (auth middleware,
@@ -880,12 +865,42 @@ mod tests {
         ledger
             .mint_token("vm1", &crate::ledger::sha256_hex(secret.as_bytes()))
             .unwrap();
+        let mut config = Config::default();
+        config.server.admin_token = Some("dbk_admin_secret".into());
         let state = Arc::new(AppState {
-            config: RwLock::new(Config::default()),
+            config: RwLock::new(config),
             pricing: PricingData::from_map(std::collections::HashMap::new()),
             ledger,
         });
         (create_router(state.clone()), state, secret)
+    }
+
+    /// Admin bearer for test_app's fixed config.
+    const ADMIN_SECRET: &str = "dbk_admin_secret";
+
+    fn get_req(uri: &str, token: Option<&str>) -> axum::http::Request<axum::body::Body> {
+        let mut builder = axum::http::Request::builder().method("GET").uri(uri);
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        builder.body(axum::body::Body::empty()).unwrap()
+    }
+
+    fn post_json_req(
+        uri: &str,
+        token: Option<&str>,
+        body: serde_json::Value,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut builder = axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            builder = builder.header("authorization", format!("Bearer {t}"));
+        }
+        builder
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
     }
 
     fn ingest_req(
@@ -1022,5 +1037,288 @@ mod tests {
             .unwrap();
         let (s, _) = status_of(&app, no_days).await;
         assert_eq!(s, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_s5_auth_gates_query_apis() {
+        let (app, _state, token) = test_app("s5-auth-gate").await;
+        // read API: missing / wrong token -> 401
+        let (s, _) = status_of(&app, get_req("/api/dates", None)).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        let (s, _) = status_of(&app, get_req("/api/dates", Some("dbk_wrong"))).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        // machine token and admin token both read
+        let (s, _) = status_of(&app, get_req("/api/dates", Some(token))).await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, _) = status_of(&app, get_req("/api/dates", Some(ADMIN_SECRET))).await;
+        assert_eq!(s, StatusCode::OK);
+        // health stays open
+        let (s, _) = status_of(&app, get_req("/api/health", None)).await;
+        assert_eq!(s, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_s5_token_management_admin_only() {
+        let (app, _state, token) = test_app("s5-tokens").await;
+        // machine token cannot manage tokens
+        let (s, _) = status_of(&app, get_req("/api/tokens", Some(token))).await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        let (s, _) = status_of(
+            &app,
+            post_json_req(
+                "/api/tokens",
+                Some(token),
+                serde_json::json!({"label": "vm2"}),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        // admin lists
+        let (s, body) = status_of(&app, get_req("/api/tokens", Some(ADMIN_SECRET))).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["data"][0]["label"], serde_json::json!("vm1"));
+        // admin mints vm2; the secret comes back exactly once
+        let (s, body) = status_of(
+            &app,
+            post_json_req(
+                "/api/tokens",
+                Some(ADMIN_SECRET),
+                serde_json::json!({"label": "vm2"}),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let vm2_secret = v["data"]["token"].as_str().unwrap().to_string();
+        assert!(vm2_secret.starts_with("dbk_"));
+        // vm2's secret works on read APIs
+        let (s, _) = status_of(&app, get_req("/api/dates", Some(&vm2_secret))).await;
+        assert_eq!(s, StatusCode::OK);
+        // bad label rejected
+        let (s, _) = status_of(
+            &app,
+            post_json_req(
+                "/api/tokens",
+                Some(ADMIN_SECRET),
+                serde_json::json!({"label": ""}),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_s5_revocation_isolates_machines() {
+        let (app, _state, vm1_secret) = test_app("s5-revoke").await;
+        // mint vm2 via admin API
+        let (_, body) = status_of(
+            &app,
+            post_json_req(
+                "/api/tokens",
+                Some(ADMIN_SECRET),
+                serde_json::json!({"label": "vm2"}),
+            ),
+        )
+        .await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let vm2_secret = v["data"]["token"].as_str().unwrap().to_string();
+
+        // vm1 record pushed with vm1 token
+        let mut r = rec();
+        r.machine = "vm1".into();
+        let (s, _) = status_of(
+            &app,
+            ingest_req(Some(vm1_secret), &serde_json::to_value(&r).unwrap()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        // vm2 record pushed with vm2 token
+        let mut r = rec();
+        r.machine = "vm2".into();
+        r.session_id = "s-vm2-1".into();
+        let (s, _) = status_of(
+            &app,
+            ingest_req(Some(&vm2_secret), &serde_json::to_value(&r).unwrap()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+
+        // revoke vm1
+        let (s, _) = status_of(
+            &app,
+            post_json_req(
+                "/api/tokens/revoke",
+                Some(ADMIN_SECRET),
+                serde_json::json!({"label": "vm1"}),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+
+        // vm1 blocked everywhere, vm2 unaffected
+        let (s, _) = status_of(&app, get_req("/api/dates", Some(vm1_secret))).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        // fresh vm1 record (previous `r` was mutated to vm2's identity above,
+        // so reusing it would have tested vm1's token against vm2's record)
+        let mut r = rec();
+        r.machine = "vm1".into();
+        let (s, _) = status_of(
+            &app,
+            ingest_req(Some(vm1_secret), &serde_json::to_value(&r).unwrap()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        // vm2 can still ingest after vm1's revocation
+        let mut r = rec();
+        r.machine = "vm2".into();
+        r.session_id = "s-vm2-2".into();
+        let (s, _) = status_of(
+            &app,
+            ingest_req(Some(&vm2_secret), &serde_json::to_value(&r).unwrap()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, _) = status_of(&app, get_req("/api/dates", Some(&vm2_secret))).await;
+        assert_eq!(s, StatusCode::OK);
+        // revoking again -> 404
+        let (s, _) = status_of(
+            &app,
+            post_json_req(
+                "/api/tokens/revoke",
+                Some(ADMIN_SECRET),
+                serde_json::json!({"label": "vm1"}),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        // admin token list reflects the revocation
+        let (s, body) = status_of(&app, get_req("/api/tokens", Some(ADMIN_SECRET))).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let row = |label: &str| {
+            v["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["label"] == label)
+                .unwrap_or_else(|| panic!("token list missing {label}"))
+                .clone()
+        };
+        assert_eq!(row("vm1")["revoked"], serde_json::json!(true));
+        assert_eq!(row("vm2")["revoked"], serde_json::json!(false));
+    }
+    #[tokio::test]
+    async fn test_s5_machine_token_revoke_forbidden() {
+        let (app, _state, vm1_secret) = test_app("s5-mt-revoke").await;
+        let (s, _) = status_of(
+            &app,
+            post_json_req(
+                "/api/tokens",
+                Some(vm1_secret),
+                serde_json::json!({"label": "vm2"}),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        let (s, _) = status_of(
+            &app,
+            post_json_req(
+                "/api/tokens/revoke",
+                Some(vm1_secret),
+                serde_json::json!({"label": "vm1"}),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        // ':' in label is rejected (session names embed machine:session_id)
+        let (s, _) = status_of(
+            &app,
+            post_json_req(
+                "/api/tokens",
+                Some(ADMIN_SECRET),
+                serde_json::json!({"label": "bad:label"}),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        // revoking an unknown label -> 404, ledger untouched
+        let (s, _) = status_of(
+            &app,
+            post_json_req(
+                "/api/tokens/revoke",
+                Some(ADMIN_SECRET),
+                serde_json::json!({"label": "no-such-machine"}),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        // failed revoke attempts left vm1's token active
+        let (s, _) = status_of(&app, get_req("/api/dates", Some(vm1_secret))).await;
+        assert_eq!(s, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_s5_ingested_content_is_readable() {
+        let (app, _state, vm1_secret) = test_app("s5-content").await;
+        // ingest a record with real journal-shaped content
+        let mut r = rec();
+        r.title = Some("Fix ledger race".into());
+        r.summary_md = "---\ntitle: Fix ledger race\n---\n## Summary\nFixed a write race in the ledger by adding a transaction. Tests added.\n".into();
+        let (s, _) = status_of(
+            &app,
+            ingest_req(Some(vm1_secret), &serde_json::to_value(&r).unwrap()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+
+        // date list contains the journal date
+        let (s, body) = status_of(&app, get_req("/api/dates", Some(vm1_secret))).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(
+            body.contains("2026-10-29"),
+            "dates list missing journal date"
+        );
+
+        // day summary lists the session with its preview
+        let (s, body) = status_of(&app, get_req("/api/dates/2026-10-29", Some(vm1_secret))).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(
+            body.contains("vm1:s1"),
+            "day summary missing session name, body: {body}"
+        );
+        assert!(
+            body.contains("Fixed a write race"),
+            "day summary missing preview"
+        );
+
+        // session list shows the session; detail returns the full summary
+        let (s, body) = status_of(
+            &app,
+            get_req("/api/dates/2026-10-29/sessions", Some(vm1_secret)),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(body.contains("vm1:s1"), "session list missing session");
+        assert!(
+            body.contains("Fix ledger race"),
+            "session list missing title"
+        );
+        assert!(
+            body.contains("Fixed a write race"),
+            "session list missing summary preview"
+        );
+
+        let (s, body) = status_of(
+            &app,
+            get_req("/api/dates/2026-10-29/sessions/vm1:s1", Some(vm1_secret)),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(
+            body.contains("## Summary"),
+            "session detail missing summary"
+        );
+        assert!(body.contains("transaction"), "session detail missing body");
     }
 }

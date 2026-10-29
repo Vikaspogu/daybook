@@ -29,6 +29,9 @@ pub struct Config {
 pub struct ServerConfig {
     pub port: u16,
     pub db_path: PathBuf,
+    /// Bearer token that may read everything AND manage machine tokens.
+    /// None = no admin access (machine tokens still work).
+    pub admin_token: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -38,6 +41,7 @@ impl Default for ServerConfig {
             db_path: dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".daybook/ledger.db3"),
+            admin_token: None,
         }
     }
 }

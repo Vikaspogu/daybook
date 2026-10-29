@@ -90,18 +90,27 @@ impl UpsertOutcome {
 }
 
 /// Lightweight row shape for query endpoints.
-// ponytail: read path unused until S4 (serve reads fs archives); remove if S4 drops it
-#[allow(dead_code)]
+/// Per-date rollup for the dashboard date list.
 #[derive(Debug, Serialize, Clone)]
-pub struct SessionRow {
-    pub session_id: String,
+pub struct DateInfoRow {
+    pub date: String,
+    pub session_count: i64,
+    /// Sessions with non-empty summary_md; drives the has_digest badge.
+    pub md_count: i64,
+}
+
+/// Per-session row for the dashboard session list and day view.
+#[derive(Debug, Serialize, Clone)]
+pub struct SessionBriefRow {
     pub machine: String,
+    pub session_id: String,
     pub runtime: String,
     pub project: String,
-    pub journal_date: String,
     pub title: String,
-    pub revision: i64,
-    pub pushed_at: String,
+    pub git_branch: Option<String>,
+    pub started_utc: Option<String>,
+    pub ended_utc: Option<String>,
+    pub summary_md: String,
 }
 
 /// One session row shaped for the stats report (S4), with the JSON columns
@@ -238,6 +247,18 @@ pub struct Ledger {
     conn: Mutex<Connection>,
 }
 
+/// Mint a fresh bearer secret: `dbk_` + 64 hex chars from the OS RNG.
+pub fn generate_secret() -> Result<String> {
+    use std::io::Read;
+    let mut buf = vec![0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .context("read /dev/urandom")?;
+    Ok(format!(
+        "dbk_{}",
+        buf.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    ))
+}
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -271,9 +292,6 @@ CREATE TABLE IF NOT EXISTS tokens (
 );
 ";
 
-// ponytail: list_dates/list_sessions/get_summary_md unused until S5 ports the
-// serve read path to the ledger; stat_rows is consumed by /api/stats (S4).
-#[allow(dead_code)]
 impl Ledger {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
@@ -384,59 +402,86 @@ impl Ledger {
         Ok(outcome)
     }
 
-    pub fn list_dates(&self) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare("SELECT DISTINCT journal_date FROM sessions ORDER BY journal_date DESC")?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    pub fn list_sessions(&self, date: &str) -> Result<Vec<SessionRow>> {
+    /// Date list for the dashboard: one GROUP BY, no N+1.
+    pub fn date_infos(&self) -> Result<Vec<DateInfoRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT session_id, machine, runtime, project, journal_date, COALESCE(title, ''),
-                    revision, pushed_at
-             FROM sessions WHERE journal_date = ?1 ORDER BY pushed_at",
+            "SELECT journal_date, COUNT(*),
+                    SUM(CASE WHEN summary_md IS NOT NULL AND summary_md != '' THEN 1 ELSE 0 END)
+             FROM sessions GROUP BY journal_date ORDER BY journal_date DESC",
         )?;
         let rows = stmt
-            .query_map(rusqlite::params![date], |row| {
-                Ok(SessionRow {
-                    session_id: row.get(0)?,
-                    machine: row.get(1)?,
-                    runtime: row.get(2)?,
-                    project: row.get(3)?,
-                    journal_date: row.get(4)?,
-                    title: row.get(5)?,
-                    revision: row.get(6)?,
-                    pushed_at: row.get(7)?,
+            .query_map([], |row| {
+                Ok(DateInfoRow {
+                    date: row.get(0)?,
+                    session_count: row.get(1)?,
+                    md_count: row.get(2)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
-    pub fn get_summary_md(
+    /// Sessions of one journal date with their summary markdown,
+    /// ordered oldest-start first (stable day view).
+    pub fn session_briefs(&self, date: &str) -> Result<Vec<SessionBriefRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT machine, session_id, runtime, project, COALESCE(title, ''),
+                    git_branch, started_utc, ended_utc, COALESCE(summary_md, '')
+             FROM sessions WHERE journal_date = ?1
+             ORDER BY COALESCE(started_utc, pushed_at), machine, session_id",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![date], |row| {
+                Ok(SessionBriefRow {
+                    machine: row.get(0)?,
+                    session_id: row.get(1)?,
+                    runtime: row.get(2)?,
+                    project: row.get(3)?,
+                    title: row.get(4)?,
+                    git_branch: row.get(5)?,
+                    started_utc: row.get(6)?,
+                    ended_utc: row.get(7)?,
+                    summary_md: row.get(8)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Point lookup for the session-detail endpoint: one row by
+    /// (journal_date, machine, session_id). `Ok(None)` = no such row;
+    /// `Err` = the query itself failed (caller must not fold it into a miss).
+    pub fn session_brief(
         &self,
         date: &str,
-        session_id: &str,
         machine: &str,
-    ) -> Result<Option<String>> {
+        session_id: &str,
+    ) -> Result<Option<SessionBriefRow>> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-"SELECT summary_md FROM sessions WHERE journal_date = ?1 AND session_id = ?2 AND machine = ?3",
-            [date, session_id, machine],
-            |row| row.get::<_, String>(0),
-        )
-        .map(Some)
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            e => Err(e),
-        })
-        .map_err(Into::into)
+        let mut stmt = conn.prepare(
+            "SELECT machine, session_id, runtime, project, COALESCE(title, ''),
+                    git_branch, started_utc, ended_utc, COALESCE(summary_md, '')
+             FROM sessions
+             WHERE journal_date = ?1 AND machine = ?2 AND session_id = ?3",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![date, machine, session_id], |row| {
+            Ok(SessionBriefRow {
+                machine: row.get(0)?,
+                session_id: row.get(1)?,
+                runtime: row.get(2)?,
+                project: row.get(3)?,
+                title: row.get(4)?,
+                git_branch: row.get(5)?,
+                started_utc: row.get(6)?,
+                ended_utc: row.get(7)?,
+                summary_md: row.get(8)?,
+            })
+        })?;
+        Ok(rows.next().transpose()?)
     }
+
     /// Rows for the stats report (S4): the `days` most recent journal
     /// dates, newest first. Malformed JSON columns degrade to defaults
     /// rather than failing the whole report.
@@ -499,6 +544,9 @@ impl Ledger {
                 rusqlite::Error::QueryReturnedNoRows => Ok(None),
                 e => Err(e),
             })?;
+        // ponytail: touch-write per authenticated request serializes reads
+        // behind the connection mutex. Fine for a single-operator dashboard;
+        // batch or throttle last_used_at updates if reads ever contend.
         if label.is_some() {
             conn.execute(
                 "UPDATE tokens SET last_used_at = ?1
@@ -604,15 +652,10 @@ mod tests {
                 .unwrap(),
             UpsertOutcome::RejectedStale
         );
-        // latest content still the newer revision
-        let md = ledger
-            .get_summary_md("2026-10-29", "s1", "vm1")
-            .unwrap()
-            .unwrap();
-        assert_eq!(md, "# v2");
-        let rows = ledger.list_sessions("2026-10-29").unwrap();
+        // latest content still the newer revision (session_briefs serves it)
+        let rows = ledger.session_briefs("2026-10-29").unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].revision, 2);
+        assert_eq!(rows[0].summary_md, "# v2");
         // second machine is a separate row
         let mut other = record("s1", 100, "h1");
         other.machine = "vm2".into();
@@ -620,7 +663,13 @@ mod tests {
             ledger.upsert_session(&other).unwrap(),
             UpsertOutcome::Inserted
         );
-        assert_eq!(ledger.list_dates().unwrap(), vec!["2026-10-29"]);
+        let dates: Vec<String> = ledger
+            .date_infos()
+            .unwrap()
+            .iter()
+            .map(|d| d.date.clone())
+            .collect();
+        assert_eq!(dates, vec!["2026-10-29"]);
     }
 
     /// S4 gate fixture: known values in, every promised metric asserted out.
@@ -743,6 +792,7 @@ mod tests {
         assert_eq!(older_report.days[2].date, "2026-10-15");
     }
 
+    #[test]
     fn test_tokens() {
         let dir = tempfile::tempdir().unwrap();
         let ledger = Ledger::open(&dir.path().join("t.db3")).unwrap();
