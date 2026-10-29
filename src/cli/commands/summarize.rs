@@ -260,7 +260,6 @@ async fn auto_extract_skill(
 
     // Extract skill name from content
     let skill_name = extract_skill_name(&skill_content);
-    let skill_name = extract_skill_name(&skill_content);
     // Path traversal guard: the LLM-derived name must stay a single path
     // segment inside pending-skills, never escape it.
     if skill_name.contains('/')

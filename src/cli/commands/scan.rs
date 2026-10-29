@@ -125,6 +125,13 @@ pub async fn run(day: Option<String>, no_llm: bool, _local: bool) -> Result<()> 
                 );
                 continue;
             }
+            let sid = clean(&meta.session_id);
+            if sid.is_empty() || sid == "unknown" {
+                // F5: two id-less sessions can't be deduped against each
+                // other; skip rather than risk permanently blocking one.
+                eprintln!("[daybook] Session has no usable id, skipping LLM pass");
+                continue;
+            }
             let journal_date = parsed
                 .start_date()
                 .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
@@ -187,7 +194,12 @@ fn already_archived(config: &crate::config::Config, date: &str, session_id: &str
         .map(|entries| {
             entries.flatten().any(|e| {
                 std::fs::read_to_string(e.path())
-                    .map(|c| c.contains(&format!("session_id: {}", session_id)))
+                    // Exact-line match: a substring match would also hit
+                    // ids that merely start with session_id (prefix collision).
+                    .map(|c| {
+                        c.lines()
+                            .any(|l| l.trim() == format!("session_id: {}", session_id))
+                    })
                     .unwrap_or(false)
             })
         })

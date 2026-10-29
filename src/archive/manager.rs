@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::hash::Hasher;
+use std::path::{Path, PathBuf};
 
 use super::templates::Templates;
 use crate::config::Config;
@@ -147,12 +148,33 @@ impl ArchiveManager {
         // Two sessions that start in the same minute can share an
         // HH_MM-topic title; never clobber a different session's archive —
         // disambiguate with a short session-id suffix instead.
+        let same_session = |p: &Path, id: &str| {
+            fs::read_to_string(p)
+                .map(|c| c.lines().any(|l| l.trim() == format!("session_id: {}", id)))
+                .unwrap_or(false)
+        };
         if path.exists() {
-            let existing = fs::read_to_string(&path).unwrap_or_default();
-            if let Some(id) = frontmatter_id(content) {
-                if !existing.contains(&format!("session_id: {}", id)) {
-                    let short: String = id.chars().take(8).collect();
-                    path = self.session_archive_path(date, &format!("{}-{}", task_name, short));
+            match frontmatter_id(content) {
+                Some(id) => {
+                    if !same_session(&path, id) {
+                        let short: String = id.chars().take(8).collect();
+                        let mut cand =
+                            self.session_archive_path(date, &format!("{}-{}", task_name, short));
+                        // Another session may already hold the 8-char-prefix name.
+                        if cand.exists() && !same_session(&cand, id) {
+                            cand =
+                                self.session_archive_path(date, &format!("{}-{}", task_name, id));
+                        }
+                        path = cand;
+                    }
+                }
+                // No id in frontmatter: never clobber, park the file under a
+                // content hash so retries stay idempotent.
+                None => {
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    std::hash::Hash::hash(&content, &mut h);
+                    path =
+                        self.session_archive_path(date, &format!("{}-{:x}", task_name, h.finish()));
                 }
             }
         }
@@ -226,6 +248,37 @@ mod tests {
             .write_session("2026-10-29", "01_22-topic", second)
             .unwrap();
         assert_eq!(again, p2);
+
+        // Two different sessions sharing an 8-char id prefix must not
+        // clobber each other on the suffixed name.
+        let a = "---\nsession_id: cccc1111x\n---\na";
+        let b = "---\nsession_id: cccc1111y\n---\nb";
+        let c = "---\nsession_id: cccc1111q\n---\nc";
+        manager
+            .write_session("2026-10-29", "02_00-clash", a)
+            .unwrap();
+        manager
+            .write_session("2026-10-29", "02_00-clash", b)
+            .unwrap();
+        // b took the 8-char-prefix name; c must fall back to the full id.
+        let pc = manager
+            .write_session("2026-10-29", "02_00-clash", c)
+            .unwrap();
+        assert!(pc.to_string_lossy().ends_with("02_00-clash-cccc1111q.md"));
+
+        // Content without a session_id never clobbers; hash suffix is
+        // idempotent across retries.
+        let bare = manager
+            .write_session("2026-10-29", "02_00-clash", "no frontmatter")
+            .unwrap();
+        let bare2 = manager
+            .write_session("2026-10-29", "02_00-clash", "no frontmatter")
+            .unwrap();
+        assert_eq!(bare, bare2);
+        let still_a =
+            std::fs::read_to_string(manager.session_archive_path("2026-10-29", "02_00-clash"))
+                .unwrap();
+        assert!(still_a.contains("cccc1111x"));
     }
 
     #[test]

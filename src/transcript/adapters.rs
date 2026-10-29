@@ -124,9 +124,15 @@ impl ParsedSession {
     /// fixed template lines (EN + ZH defaults; a fully custom prompt
     /// template would need its own first line here).
     fn from_daybook_prompt(data: &TranscriptData) -> bool {
-        const MARKERS: [&str; 2] = [
+        // Covers session-summary, skill-extract, and daily-digest templates,
+        // EN + ZH. ZH daily renders "你正在分析 {{date}}...", so only the
+        // short prefix is stable; a real ZH session quoting it is the
+        // accepted dev-only edge (same trade-off as a custom template).
+        const MARKERS: [&str; 4] = [
             "You are analyzing a Claude Code session transcript",
-            "你正在分析一个 Claude Code 会话记录",
+            "You are extracting a reusable skill from a Claude Code session",
+            "You are analyzing Claude Code sessions from",
+            "你正在分析",
         ];
         // codex exec prepends AGENTS.md as a user message, so the prompt is
         // not always first — check the first few user messages.
