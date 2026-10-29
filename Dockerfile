@@ -6,7 +6,9 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef
+# bookworm builder = glibc 2.36, matching the distroless cc-debian12 runtime
+# (unqualified -rust-1 tags moved to trixie/glibc 2.41 and broke the runtime)
+FROM lukemathwalker/cargo-chef:latest-rust-1-bookworm AS chef
 WORKDIR /app
 
 FROM chef AS planner
