@@ -30,6 +30,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     // cap the body below axum's 2 MiB default so floods can't buffer much.
     let ingest_routes = Router::new()
         .route("/ingest", post(handlers::ingest))
+        .route("/stats", get(handlers::get_stats))
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),

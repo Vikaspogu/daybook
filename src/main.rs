@@ -49,6 +49,7 @@ async fn main() -> Result<()> {
             job_id,
         } => cli::commands::summarize::run(transcript, task_name, cwd, foreground, job_id).await,
         Commands::Scan { no_llm, local, day } => cli::commands::scan::run(day, no_llm, local).await,
+        Commands::Stats { week, days, month } => cli::commands::stats::run(week, days, month).await,
         Commands::Digest {
             relative_date,
             date,

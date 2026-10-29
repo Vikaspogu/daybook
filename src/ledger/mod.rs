@@ -21,6 +21,10 @@ pub struct UsageRecord {
     pub cache_read: u64,
     #[serde(default)]
     pub cache_creation: u64,
+    /// Session cost in USD, computed client-side during scan (the server
+    /// has no transcript to price). None when no model pricing is known.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -100,6 +104,136 @@ pub struct SessionRow {
     pub pushed_at: String,
 }
 
+/// One session row shaped for the stats report (S4), with the JSON columns
+/// decoded. Malformed JSON degrades to defaults, not a failed report.
+/// Per-day rollup over the stats window.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(default)]
+pub struct DailyStats {
+    pub date: String,
+    pub sessions: u64,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_creation: u64,
+    pub cost_usd: f64,
+    pub test_runs: u64,
+    pub failed_tool_calls: u64,
+    pub interrupted: u64,
+    /// Pooled cache_read / (input + cache_read); None when no tokens seen.
+    pub cache_hit_rate: Option<f64>,
+}
+
+/// The /api/stats payload: daily series, window totals, friction counts,
+/// and the session-per-day trend over the requested window.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(default)]
+pub struct StatsReport {
+    /// Newest first.
+    pub days: Vec<DailyStats>,
+    /// Totals across the window; `date` is empty.
+    pub totals: DailyStats,
+    /// Friction label -> total count, summed from session facets.
+    pub friction_distribution: std::collections::BTreeMap<String, u64>,
+    /// Sessions per day, oldest first — a ready-to-print trend line.
+    pub trend: Vec<TrendPoint>,
+}
+
+/// Roll stat rows up into the report. Pure function over rows so tests can
+/// assert exact numbers without a server or database.
+pub fn aggregate_stats(rows: &[StatRow]) -> StatsReport {
+    use std::collections::BTreeMap;
+
+    let mut by_date: BTreeMap<String, DailyStats> = BTreeMap::new();
+    let mut friction: BTreeMap<String, u64> = BTreeMap::new();
+    let mut totals = DailyStats::default();
+
+    for row in rows {
+        let day = by_date.entry(row.journal_date.clone()).or_default();
+        day.date = row.journal_date.clone();
+        day.sessions += 1;
+        day.input += row.usage.input;
+        day.output += row.usage.output;
+        day.cache_read += row.usage.cache_read;
+        day.cache_creation += row.usage.cache_creation;
+        day.cost_usd += row.usage.cost_usd.unwrap_or(0.0);
+        day.test_runs += row.aggregates.test_runs;
+        day.failed_tool_calls += row.aggregates.failed_tool_calls;
+        day.interrupted += row.aggregates.interrupted;
+
+        totals.sessions += 1;
+        totals.input += row.usage.input;
+        totals.output += row.usage.output;
+        totals.cache_read += row.usage.cache_read;
+        totals.cache_creation += row.usage.cache_creation;
+        totals.cost_usd += row.usage.cost_usd.unwrap_or(0.0);
+        totals.test_runs += row.aggregates.test_runs;
+        totals.failed_tool_calls += row.aggregates.failed_tool_calls;
+        totals.interrupted += row.aggregates.interrupted;
+
+        if let Some(fj) = &row.facets_json {
+            if let Ok(facet) = serde_json::from_str::<crate::insights::facets::SessionFacet>(fj) {
+                for (k, v) in facet.friction_counts {
+                    *friction.entry(k).or_default() += v as u64;
+                }
+            }
+        }
+    }
+
+    let mut days: Vec<DailyStats> = by_date.into_values().collect();
+    // Pooled cache-hit rate from sums, per day and for totals.
+    for d in &mut days {
+        d.cache_hit_rate = pooled_hit_rate(d.input, d.cache_read);
+    }
+    totals.cache_hit_rate = pooled_hit_rate(totals.input, totals.cache_read);
+    // BTreeMap order is oldest first; report newest first for the series,
+    // oldest first for the trend line.
+    days.reverse();
+    let trend = days
+        .iter()
+        .rev()
+        .map(|d| TrendPoint {
+            date: d.date.clone(),
+            sessions: d.sessions,
+        })
+        .collect();
+
+    StatsReport {
+        days,
+        totals,
+        friction_distribution: friction,
+        trend,
+    }
+}
+
+fn pooled_hit_rate(input: u64, cache_read: u64) -> Option<f64> {
+    let denom = input + cache_read;
+    if denom > 0 {
+        Some(cache_read as f64 / denom as f64)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct StatRow {
+    pub journal_date: String,
+    #[serde(flatten)]
+    pub usage: UsageRecord,
+    #[serde(flatten)]
+    pub aggregates: AggregatesRecord,
+    #[serde(default)]
+    pub facets_json: Option<String>,
+}
+
+/// One point on the session-per-day trend line.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(default)]
+pub struct TrendPoint {
+    pub date: String,
+    pub sessions: u64,
+}
+
 pub struct Ledger {
     conn: Mutex<Connection>,
 }
@@ -137,7 +271,8 @@ CREATE TABLE IF NOT EXISTS tokens (
 );
 ";
 
-// ponytail: list_dates/list_sessions/get_summary_md unused until S4 consumes them
+// ponytail: list_dates/list_sessions/get_summary_md unused until S5 ports the
+// serve read path to the ledger; stat_rows is consumed by /api/stats (S4).
 #[allow(dead_code)]
 impl Ledger {
     pub fn open(path: &Path) -> Result<Self> {
@@ -302,7 +437,36 @@ impl Ledger {
         })
         .map_err(Into::into)
     }
-
+    /// Rows for the stats report (S4): the `days` most recent journal
+    /// dates, newest first. Malformed JSON columns degrade to defaults
+    /// rather than failing the whole report.
+    pub fn stat_rows(&self, days: usize) -> Result<Vec<StatRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT journal_date, usage_json, aggregates_json, facets_json
+             FROM sessions WHERE journal_date IN
+               (SELECT DISTINCT journal_date FROM sessions
+                ORDER BY journal_date DESC LIMIT ?1)
+             ORDER BY journal_date DESC",
+        )?;
+        let rows = stmt
+            .query_map([days as i64], |row| {
+                let usage_s: Option<String> = row.get(1)?;
+                let aggs_s: Option<String> = row.get(2)?;
+                Ok(StatRow {
+                    journal_date: row.get(0)?,
+                    usage: usage_s
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default(),
+                    aggregates: aggs_s
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default(),
+                    facets_json: row.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
     // ---- machine tokens (D7) ----
 
     pub fn mint_token(&self, label: &str, token_hash: &str) -> Result<()> {
@@ -459,7 +623,126 @@ mod tests {
         assert_eq!(ledger.list_dates().unwrap(), vec!["2026-10-29"]);
     }
 
+    /// S4 gate fixture: known values in, every promised metric asserted out.
     #[test]
+    fn stats_report_from_fixture_ledger_matches_expected_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&dir.path().join("t.db3")).unwrap();
+
+        let mut a1 = record_md("sA1", 100, "h1", "# a1");
+        a1.journal_date = "2026-10-28".into();
+        a1.usage = UsageRecord {
+            input: 1_000,
+            output: 200,
+            cache_read: 3_000,
+            cache_creation: 100,
+            cost_usd: Some(0.10),
+        };
+        a1.aggregates = AggregatesRecord {
+            test_runs: 3,
+            failed_tool_calls: 1,
+            interrupted: 0,
+            cache_hit_rate: None,
+        };
+        a1.facets_json = Some(r#"{"friction_counts": {"misunderstood_request": 2}}"#.into());
+        ledger.upsert_session(&a1).unwrap();
+
+        let mut a2 = record_md("sA2", 100, "h2", "# a2");
+        a2.journal_date = "2026-10-28".into();
+        a2.usage = UsageRecord {
+            input: 500,
+            output: 100,
+            cache_read: 500,
+            cache_creation: 0,
+            cost_usd: Some(0.05),
+        };
+        a2.aggregates = AggregatesRecord {
+            test_runs: 2,
+            failed_tool_calls: 0,
+            interrupted: 1,
+            cache_hit_rate: None,
+        };
+        // malformed facets JSON must degrade, not break the report
+        a2.facets_json = Some("{{not json".into());
+        ledger.upsert_session(&a2).unwrap();
+
+        let mut b1 = record_md("sB1", 100, "h3", "# b1");
+        b1.journal_date = "2026-10-29".into();
+        b1.usage = UsageRecord {
+            input: 2_000,
+            output: 400,
+            cache_read: 0,
+            cache_creation: 0,
+            cost_usd: Some(0.20),
+        };
+        b1.aggregates = AggregatesRecord {
+            test_runs: 5,
+            failed_tool_calls: 2,
+            interrupted: 0,
+            cache_hit_rate: None,
+        };
+        ledger.upsert_session(&b1).unwrap();
+
+        // older date, outside a 2-day window
+        let mut c1 = record_md("sC1", 100, "h4", "# c1");
+        c1.journal_date = "2026-10-15".into();
+        ledger.upsert_session(&c1).unwrap();
+        let rows = ledger.stat_rows(2).unwrap();
+        let r = aggregate_stats(&rows);
+
+        // Totals
+        assert_eq!(r.totals.sessions, 3);
+        assert_eq!(r.totals.input, 3_500);
+        assert_eq!(r.totals.output, 700);
+        assert_eq!(r.totals.cache_read, 3_500);
+        assert_eq!(r.totals.cache_creation, 100);
+        assert!((r.totals.cost_usd - 0.35).abs() < 1e-9);
+        assert_eq!(r.totals.test_runs, 10);
+        assert_eq!(r.totals.failed_tool_calls, 3);
+        assert_eq!(r.totals.interrupted, 1);
+        assert_eq!(r.totals.cache_hit_rate, Some(0.5));
+
+        // Per-day series, newest first
+        assert_eq!(r.days.len(), 2);
+        assert_eq!(r.days[0].date, "2026-10-29");
+        assert_eq!(r.days[0].sessions, 1);
+        assert_eq!(r.days[0].input, 2_000);
+        assert!((r.days[0].cost_usd - 0.20).abs() < 1e-9);
+        assert_eq!(r.days[0].test_runs, 5);
+        assert_eq!(r.days[0].cache_hit_rate, Some(0.0));
+        assert_eq!(r.days[1].date, "2026-10-28");
+        assert_eq!(r.days[1].sessions, 2);
+        assert_eq!(r.days[1].cache_hit_rate, Some(0.7)); // 3500/5000
+        assert!((r.days[1].cost_usd - 0.15).abs() < 1e-9);
+
+        // Friction distribution from facets
+        assert_eq!(
+            r.friction_distribution,
+            std::collections::BTreeMap::from([("misunderstood_request".to_string(), 2)])
+        );
+
+        // Trend: oldest first, sessions per day
+        assert_eq!(
+            r.trend,
+            vec![
+                TrendPoint {
+                    date: "2026-10-28".into(),
+                    sessions: 2
+                },
+                TrendPoint {
+                    date: "2026-10-29".into(),
+                    sessions: 1
+                },
+            ]
+        );
+
+        // Window cutoff: a 3-day window also pulls in the older date
+        let older = ledger.stat_rows(3).unwrap();
+        let older_report = aggregate_stats(&older);
+        assert_eq!(older_report.days.len(), 3);
+        assert_eq!(older_report.days[2].date, "2026-10-15");
+    }
+
     fn test_tokens() {
         let dir = tempfile::tempdir().unwrap();
         let ledger = Ledger::open(&dir.path().join("t.db3")).unwrap();

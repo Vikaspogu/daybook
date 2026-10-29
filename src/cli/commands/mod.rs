@@ -5,6 +5,7 @@ pub mod init;
 pub mod insights;
 pub mod jobs;
 pub mod scan;
+pub mod stats;
 
 pub mod show;
 pub mod skills;

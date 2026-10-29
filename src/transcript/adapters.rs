@@ -93,12 +93,15 @@ fn resolve_git_project(start: &Path) -> Option<String> {
     None
 }
 
-/// Token usage for one session (uncached input/output tokens; per-turn
-/// inputs are summed, so totals are an upper bound — good enough for journal stats).
+/// Token usage for one session (per-turn inputs are summed, so totals are
+/// an upper bound — good enough for journal stats). cache_* are filled
+/// only where the runtime records them; 0 otherwise.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SessionUsage {
     pub input: u64,
     pub output: u64,
+    pub cache_read: u64,
+    pub cache_creation: u64,
 }
 
 /// Parsed session: transcript data plus metadata extracted during parse.
@@ -414,6 +417,16 @@ pub fn parse_session(meta: &SessionMeta) -> Result<ParsedSession> {
                         usage.output = usage.output.saturating_add(
                             u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                         );
+                        usage.cache_creation = usage.cache_creation.saturating_add(
+                            u.get("cache_creation_input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                        );
+                        usage.cache_read = usage.cache_read.saturating_add(
+                            u.get("cache_read_input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                        );
                     }
                 }
             }
@@ -497,6 +510,19 @@ fn parse_pi(path: &Path) -> Result<ParsedSession> {
                     usage.output = usage
                         .output
                         .saturating_add(u.get("output").and_then(|v| v.as_u64()).unwrap_or(0));
+                    // Pi names cache fields per-variant; take whichever exists.
+                    usage.cache_read = usage.cache_read.saturating_add(
+                        ["cachedTokens", "cacheReadTokens", "cache_read_tokens"]
+                            .iter()
+                            .find_map(|k| u.get(*k).and_then(|v| v.as_u64()))
+                            .unwrap_or(0),
+                    );
+                    usage.cache_creation = usage.cache_creation.saturating_add(
+                        ["cacheCreationTokens", "cache_creation_tokens"]
+                            .iter()
+                            .find_map(|k| u.get(*k).and_then(|v| v.as_u64()))
+                            .unwrap_or(0),
+                    );
                 }
                 let Some(content) = message.get("content").and_then(|c| c.as_array()) else {
                     continue;
@@ -613,6 +639,11 @@ fn parse_codex(path: &Path) -> Result<ParsedSession> {
                     record_usage.output = record_usage.output.saturating_add(
                         u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                     );
+                    record_usage.cache_read = record_usage.cache_read.saturating_add(
+                        u.get("cached_input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0),
+                    );
                 }
             }
             Some("token_count") => {
@@ -626,6 +657,11 @@ fn parse_codex(path: &Path) -> Result<ParsedSession> {
                             .get("output_tokens")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0),
+                        cache_read: total
+                            .get("cached_input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0),
+                        ..Default::default()
                     });
                 }
             }
@@ -646,6 +682,11 @@ fn parse_codex(path: &Path) -> Result<ParsedSession> {
                             .get("output_tokens")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0),
+                        cache_read: total
+                            .get("cached_input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0),
+                        ..Default::default()
                     });
                 }
             }

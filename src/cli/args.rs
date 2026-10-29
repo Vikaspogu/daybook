@@ -135,6 +135,21 @@ pub enum Commands {
         #[arg(long)]
         day: Option<String>,
     },
+    /// Stats & insights over the ledger (sessions, tokens, cost, friction)
+    Stats {
+        /// Last 7 days
+        #[arg(long, conflicts_with = "days")]
+        week: bool,
+
+        /// How many days back (default 7; --month = 30)
+        #[arg(long)]
+        days: Option<usize>,
+
+        /// Last 30 days
+        #[arg(long, conflicts_with_all = ["week", "days"])]
+        month: bool,
+    },
+
     /// Generate daily digest from sessions (consolidate sessions into daily.md)
     Digest {
         /// Relative date (e.g., "yest" or "yesterday" for yesterday)

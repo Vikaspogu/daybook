@@ -4,7 +4,10 @@ use std::path::PathBuf;
 
 const APP_NAME: &str = "daybook";
 
+/// Missing fields fall back to defaults, so push-only machines can ship a
+/// minimal config with just `[push]` (or `[server]`) in it.
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct Config {
     pub storage: StorageConfig,
     pub archive: ArchiveConfig,

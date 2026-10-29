@@ -113,7 +113,11 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
     if !no_llm {
         let config = crate::config::load_config()?;
         let mut ok = 0;
-
+        let pricing = if config.push.url.is_some() {
+            Some(crate::usage::pricing::PricingData::load().await)
+        } else {
+            None
+        };
         if config.push.url.is_some() {
             let retried = crate::push::retry_pending(&config).await;
             if retried > 0 {
@@ -160,6 +164,7 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
                         parsed,
                         &journal_date,
                         &format!("session-{}", meta.session_id),
+                        pricing.as_ref(),
                     )
                     .await;
                 }
@@ -191,6 +196,7 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
                             parsed,
                             &journal_date,
                             &task_name,
+                            pricing.as_ref(),
                         )
                         .await;
                     }
@@ -218,6 +224,7 @@ async fn push_after_archive(
     parsed: &adapters::ParsedSession,
     journal_date: &str,
     task_name: &str,
+    pricing: Option<&crate::usage::pricing::PricingData>,
 ) {
     if config.push.url.is_none() {
         return;
@@ -241,10 +248,20 @@ async fn push_after_archive(
     let usage = parsed
         .usage
         .as_ref()
-        .map(|u| crate::ledger::UsageRecord {
-            input: u.input,
-            output: u.output,
-            ..Default::default()
+        .map(|u| {
+            let cost_usd = pricing
+                .zip(parsed.model.as_deref())
+                .map(|(p, m)| {
+                    p.calculate_cost(m, u.input, u.output, u.cache_creation, u.cache_read)
+                })
+                .filter(|c| *c > 0.0);
+            crate::ledger::UsageRecord {
+                input: u.input,
+                output: u.output,
+                cache_read: u.cache_read,
+                cache_creation: u.cache_creation,
+                cost_usd,
+            }
         })
         .unwrap_or_default();
     let record = crate::push::build_record(
@@ -260,9 +277,9 @@ async fn push_after_archive(
         version,
         crate::ledger::sha256_hex(summary_md.as_bytes()),
         summary_md,
-        None,
+        read_facets_json(&meta.session_id),
         usage,
-        crate::ledger::AggregatesRecord::default(),
+        compute_aggregates(parsed),
     );
     match crate::push::push_record(config, &record).await {
         Ok(true) => {
@@ -397,6 +414,62 @@ fn clean(s: &str) -> String {
         }
     }
     out
+}
+
+/// Claude Code's native usage-data writes per-session facets to
+/// ~/.claude/usage-data/facets/<session_id>.json. Codex sessions have no
+/// facet file — None is a normal result, facets are optional enrichment.
+// ponytail: Claude-only facet source; when S5 wants runtime-agnostic facets,
+// generate them in summarize and write next to the archive.
+fn read_facets_json(session_id: &str) -> Option<String> {
+    let dir = dirs::home_dir()?.join(".claude/usage-data/facets");
+    std::fs::read_to_string(dir.join(format!("{}.json", session_id))).ok()
+}
+
+/// Client-side aggregate metrics (F17): computed once at scan, pushed with
+/// the record, aggregated by the server. Heuristics on tool-call shapes —
+/// good enough for "how is my week going", not an audit.
+// ponytail: error/interrupt detection is lenient (None response, "interrupt"
+// substring); tighten per-runtime if the friction report miscounts.
+fn compute_aggregates(parsed: &adapters::ParsedSession) -> crate::ledger::AggregatesRecord {
+    use crate::ledger::AggregatesRecord;
+    let mut agg = AggregatesRecord::default();
+
+    for tc in &parsed.data.tool_calls {
+        // A test run = a shell tool call whose command mentions a test runner.
+        if tc.name.contains("bash") || tc.name.contains("execute") {
+            if let Some(cmd) = tc.input.get("command").and_then(|c| c.as_str()) {
+                if cmd.contains("cargo test")
+                    || cmd.contains("npm test")
+                    || cmd.contains("pytest")
+                    || cmd.contains("go test")
+                    || cmd.contains("jest")
+                    || cmd.contains("vitest")
+                    || cmd.contains(" make test")
+                {
+                    agg.test_runs += 1;
+                }
+            }
+        }
+        if tc.response.is_none() {
+            agg.failed_tool_calls += 1;
+        }
+    }
+
+    for msg in &parsed.data.user_messages {
+        if msg.contains("interrupt") || msg.contains("[Request interrupted") {
+            agg.interrupted += 1;
+        }
+    }
+
+    if let Some(u) = &parsed.usage {
+        let denom = u.input.saturating_add(u.cache_read);
+        if denom > 0 {
+            agg.cache_hit_rate = Some(u.cache_read as f64 / denom as f64);
+        }
+    }
+
+    agg
 }
 
 #[cfg(test)]

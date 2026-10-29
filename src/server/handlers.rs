@@ -68,6 +68,38 @@ pub async fn auth_middleware(
     }
 }
 
+#[derive(serde::Deserialize)]
+pub struct StatsQuery {
+    pub days: Option<usize>,
+}
+
+/// GET /api/stats?days=N — aggregate report over the ledger window.
+/// Token-gated like ingest: query APIs need the same auth (S4 gate, S5
+/// extends it to the browser).
+pub async fn get_stats(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<StatsQuery>,
+) -> Response {
+    // ponytail: hard cap at 90 days; paginated queries if the ledger grows
+    // past what one response should carry.
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    match state.ledger.stat_rows(days) {
+        Ok(rows) => (
+            StatusCode::OK,
+            Json(ApiResponse::success(crate::ledger::aggregate_stats(&rows))),
+        )
+            .into_response(),
+        Err(e) => {
+            eprintln!("[daybook] stats query failed: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<()>::error("internal server error")),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// POST /api/ingest — append or refresh a session record pushed by a
 /// client machine. Runs behind `auth_middleware` and the 1 MiB body cap
 /// set in the router.
@@ -939,5 +971,56 @@ mod tests {
         assert!(state.ledger.revoke_token("vm1").unwrap());
         let (s, _) = status_of(&app, ingest_req(Some(token), &good)).await;
         assert_eq!(s, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_stats_http_contract() {
+        let (app, _state, token) = test_app("stats-contract").await;
+        // seed one session so the report has data
+        let good = serde_json::to_value(rec()).unwrap();
+        let (s, _) = status_of(&app, ingest_req(Some(token), &good)).await;
+        assert_eq!(s, StatusCode::OK);
+
+        let stats_req = |token: Option<&str>, days: &str| {
+            let mut builder = axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/api/stats?days={days}"));
+            if let Some(t) = token {
+                builder = builder.header("authorization", format!("Bearer {t}"));
+            }
+            builder.body(axum::body::Body::empty()).unwrap()
+        };
+
+        // missing token -> 401
+        let (s, _) = status_of(&app, stats_req(None, "7")).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        // invalid token -> 401
+        let (s, _) = status_of(&app, stats_req(Some("dbk_wrong"), "7")).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        // valid token -> 200 with the ApiResponse<StatsReport> envelope
+        let (s, body) = status_of(&app, stats_req(Some(token), "7")).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["success"], serde_json::json!(true));
+        assert_eq!(v["data"]["totals"]["sessions"], serde_json::json!(1));
+        assert_eq!(
+            v["data"]["days"][0]["date"],
+            serde_json::json!("2026-10-29")
+        );
+        assert!(v["data"]["trend"].is_array());
+        // clamps: 0 -> 1, 999 -> 90 (both still 200)
+        let (s, _) = status_of(&app, stats_req(Some(token), "0")).await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, _) = status_of(&app, stats_req(Some(token), "999")).await;
+        assert_eq!(s, StatusCode::OK);
+        // days param absent -> default window
+        let no_days = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/stats")
+            .header("authorization", format!("Bearer {token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (s, _) = status_of(&app, no_days).await;
+        assert_eq!(s, StatusCode::OK);
     }
 }

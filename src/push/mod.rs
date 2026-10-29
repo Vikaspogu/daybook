@@ -127,6 +127,49 @@ pub async fn push_record(config: &Config, record: &SessionRecord) -> Result<bool
     Ok(true)
 }
 
+/// Wire shape of the server's ApiResponse for GET /api/stats.
+// ponytail: duplicated envelope, not shared with server::dto — that type is
+// Serialize-only and lives behind server feature assumptions.
+#[derive(serde::Deserialize)]
+struct StatsEnvelope {
+    success: bool,
+    data: Option<crate::ledger::StatsReport>,
+    error: Option<String>,
+}
+
+/// GET /api/stats?days=N with bearer auth. The CLI stats command renders
+/// the report; everything else stays server-side.
+pub async fn fetch_stats(config: &Config, days: usize) -> Result<crate::ledger::StatsReport> {
+    let url = config.push.url.clone().context(
+        "push.url is not configured — `daybook serve` on some machine, then set push.url",
+    )?;
+    let token = config
+        .push
+        .token
+        .clone()
+        .context("push.token is not configured — mint one with `daybook token`")?;
+    let resp = client()
+        .get(format!(
+            "{}/api/stats?days={}",
+            url.trim_end_matches('/'),
+            days.clamp(1, 90)
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .with_context(|| format!("GET {}/api/stats", url))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("stats returned {}: {}", status, truncate(&body, 200));
+    }
+    let env: StatsEnvelope = resp.json().await.context("malformed stats response")?;
+    match (env.success, env.data) {
+        (true, Some(report)) => Ok(report),
+        _ => anyhow::bail!(env.error.unwrap_or_else(|| "stats failed".into())),
+    }
+}
+
 /// Park a failed record for the next scan. Filename is stable per session
 /// so retries overwrite, not accumulate: `pending/<journal_date>-<session_id>.json`.
 /// A newer parked revision may replace an older one, never the reverse.
