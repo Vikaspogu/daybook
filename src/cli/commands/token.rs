@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 /// `daybook token`: mint (default), --list, or --revoke <label>.
 pub fn run(list: bool, revoke: Option<String>, label: Option<String>) -> Result<()> {

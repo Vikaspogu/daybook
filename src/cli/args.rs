@@ -121,6 +121,12 @@ pub enum Commands {
         job_id: Option<String>,
     },
 
+    /// Print one day's work overview + session summaries from the ledger server
+    Query {
+        /// Date to query (format: yyyy-mm-dd, default: today UTC)
+        #[arg(value_name = "DATE", default_value_t = chrono::Utc::now().format("%Y-%m-%d").to_string())]
+        date: String,
+    },
     /// Discover sessions from all agent runtimes and list them (no archiving)
     Scan {
         /// Accepted for gate compatibility; S2 scans are always non-LLM

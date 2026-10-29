@@ -170,6 +170,47 @@ pub async fn fetch_stats(config: &Config, days: usize) -> Result<crate::ledger::
     }
 }
 
+/// Fetch one day's summary from the ledger server (GET /api/dates/:date).
+/// Returns the raw DTO as JSON so the CLI never drifts from server structs.
+pub async fn fetch_daily(config: &Config, date: &str) -> Result<serde_json::Value> {
+    let url = config.push.url.clone().context(
+        "push.url is not configured — `daybook serve` on some machine, then set push.url",
+    )?;
+    let token = config
+        .push
+        .token
+        .clone()
+        .context("push.token is not configured — mint one with `daybook token`")?;
+    let resp = client()
+        .get(format!("{}/api/dates/{}", url.trim_end_matches('/'), date))
+        .bearer_auth(token)
+        .send()
+        .await
+        .with_context(|| format!("GET {}/api/dates/{}", url, date))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "daily summary returned {}: {}",
+            status,
+            truncate(&body, 200)
+        );
+    }
+    let env: serde_json::Value = resp.json().await.context("malformed daily response")?;
+    let ok = env["success"].as_bool().unwrap_or(false);
+    let data = env["data"].clone();
+    if ok && !data.is_null() {
+        Ok(data)
+    } else {
+        anyhow::bail!(
+            "{}",
+            env["error"]
+                .as_str()
+                .unwrap_or("daily summary request failed")
+        )
+    }
+}
+
 /// Park a failed record for the next scan. Filename is stable per session
 /// so retries overwrite, not accumulate: `pending/<journal_date>-<session_id>.json`.
 /// A newer parked revision may replace an older one, never the reverse.

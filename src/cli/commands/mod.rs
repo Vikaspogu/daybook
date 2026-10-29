@@ -4,6 +4,7 @@ pub mod extract;
 pub mod init;
 pub mod insights;
 pub mod jobs;
+pub mod query;
 pub mod scan;
 pub mod stats;
 
