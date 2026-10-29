@@ -138,20 +138,6 @@ impl From<JobInfo> for JobDto {
     }
 }
 
-/// Job log response
-#[derive(Serialize)]
-pub struct JobLogDto {
-    pub id: String,
-    pub content: String,
-}
-
-/// Digest trigger response
-#[derive(Serialize)]
-pub struct DigestResponse {
-    pub message: String,
-    pub session_count: usize,
-}
-
 /// WebSocket message types
 #[allow(dead_code)]
 #[derive(Serialize, Deserialize)]
@@ -180,34 +166,9 @@ pub struct ConfigDto {
     pub auto_summarize_inactive_minutes: u64,
 }
 
-/// Config update request
-#[derive(Deserialize)]
-pub struct ConfigUpdateRequest {
-    pub summary_language: Option<String>,
-    pub model: Option<String>,
-    pub enable_daily_summary: Option<bool>,
-    pub enable_extraction_hints: Option<bool>,
-    pub auto_digest_enabled: Option<bool>,
-    pub digest_time: Option<String>,
-    pub author: Option<String>,
-    pub prompt_templates: Option<PromptTemplatesUpdateRequest>,
-    pub auto_summarize_enabled: Option<bool>,
-    pub auto_summarize_on_show: Option<bool>,
-    pub auto_summarize_inactive_minutes: Option<u64>,
-}
-
 /// Prompt templates DTO for API responses
 #[derive(Serialize, Clone)]
 pub struct PromptTemplatesDto {
-    pub session_summary: Option<String>,
-    pub daily_summary: Option<String>,
-    pub skill_extract: Option<String>,
-    pub command_extract: Option<String>,
-}
-
-/// Prompt templates update request
-#[derive(Deserialize)]
-pub struct PromptTemplatesUpdateRequest {
     pub session_summary: Option<String>,
     pub daily_summary: Option<String>,
     pub skill_extract: Option<String>,
@@ -390,65 +351,4 @@ pub struct UsageSummaryDto {
     pub total_sessions: usize,
     pub model_distribution: Vec<ModelUsageCountDto>,
     pub daily_usage: Vec<DailyUsageDto>,
-}
-
-/// Request to install a skill or command from daily summary card
-#[derive(Deserialize)]
-pub struct InstallCardRequest {
-    pub title: String,
-    pub content: String,
-    /// "skill" or "command"
-    pub card_type: String,
-}
-
-/// Response after installing a skill or command
-#[derive(Serialize)]
-pub struct InstallCardResponse {
-    pub name: String,
-    pub path: String,
-    pub message: String,
-}
-
-/// A single content block within a conversation message
-#[derive(Serialize, Clone)]
-#[serde(tag = "type")]
-pub enum ConversationContentBlock {
-    /// Plain text content
-    #[serde(rename = "text")]
-    Text { text: String },
-
-    /// A tool invocation by the assistant
-    #[serde(rename = "tool_use")]
-    ToolUse {
-        tool_use_id: String,
-        name: String,
-        input: serde_json::Value,
-    },
-
-    /// Result returned from a tool
-    #[serde(rename = "tool_result")]
-    ToolResult {
-        tool_use_id: String,
-        content: String,
-    },
-}
-
-/// A conversation message (one turn in the chat)
-#[derive(Serialize, Clone)]
-pub struct ConversationMessage {
-    pub role: String,
-    pub content: Vec<ConversationContentBlock>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<String>,
-}
-
-/// Paginated conversation response
-#[derive(Serialize)]
-pub struct ConversationDto {
-    pub messages: Vec<ConversationMessage>,
-    pub total_entries: usize,
-    pub has_transcript: bool,
-    pub page: usize,
-    pub page_size: usize,
-    pub has_more: bool,
 }

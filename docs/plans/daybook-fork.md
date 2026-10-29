@@ -95,7 +95,7 @@ Follows the home-ops AGENTS.md application pattern exactly:
 | S7: Automation & soak | Freshness + real-data proof | Two VMs covered; 9pm digests in journal thread unattended ≥7 days |
 | S8: Friction report | R5 phase 2 | First monthly report identifies ≥1 actionable pattern with session links |
 
-### [ ] Slice 1 (S1): Fork & hygiene
+### [x] Slice 1 (S1): Fork & hygiene (commit 2221780, review 434b389)
 
 - **Purpose / Done when:** the clone exists as our repo, builds end to end (frontend embedded), and passes its own tests under the chosen name.
 - **Blocked by:** none
@@ -104,7 +104,7 @@ Follows the home-ops AGENTS.md application pattern exactly:
   - [ ] `npm --prefix web ci && npm --prefix web run build` (produces `web/dist`, embedded via `static_files.rs:11`; runnable from `WORKING_DIR`), then `cargo test`; register as T3 project; copy this plan into repo as `docs/plans/daybook-fork.md`, draft.md as `docs/design-research.md`
 
 - **Verification Gate:** `npm --prefix web ci && npm --prefix web run build && cargo build && cargo test` all exit 0 from `WORKING_DIR`; `daybook --help` prints rebranded usage; `web/dist` exists.
-### [ ] Slice 2 (S2): Transcript adapters + discovery
+### [x] Slice 2 (S2): Transcript adapters + discovery (commits 7519014, 4407a35..HEAD)
 
 - **Purpose / Done when:** all three runtimes' sessions parse into widened `TranscriptData` + `SessionMeta` (session_id, runtime, project_path from cwd metadata, start timestamp, duration, model, usage), and a non-LLM scan command already exists so its gate can run.
 - **Blocked by:** S1
