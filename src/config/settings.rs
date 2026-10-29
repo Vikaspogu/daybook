@@ -217,11 +217,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert!(config
-            .storage
-            .path
-            .to_string_lossy()
-            .contains(".daybook"));
+        assert!(config.storage.path.to_string_lossy().contains(".daybook"));
         assert_eq!(config.summarization.model, "haiku");
     }
 

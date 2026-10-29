@@ -56,7 +56,7 @@ pub fn find_all_transcripts() -> Result<Vec<PathBuf>> {
 }
 
 /// Get all transcript paths that have been archived by reading frontmatter
-fn get_archived_transcript_paths(config: &Config) -> Result<HashSet<String>> {
+pub fn get_archived_transcript_paths(config: &Config) -> Result<HashSet<String>> {
     let archive_manager = ArchiveManager::new(config.clone());
     let mut archived_paths = HashSet::new();
 
@@ -99,7 +99,7 @@ fn get_archived_transcript_paths(config: &Config) -> Result<HashSet<String>> {
 
 /// Check if a transcript has been recently modified (within the configured inactive threshold)
 /// This helps avoid processing active sessions
-fn is_transcript_active(path: &std::path::Path, inactive_minutes: u64) -> bool {
+pub fn is_transcript_active(path: &std::path::Path, inactive_minutes: u64) -> bool {
     if let Ok(metadata) = fs::metadata(path) {
         if let Ok(modified) = metadata.modified() {
             if let Ok(elapsed) = modified.elapsed() {
@@ -113,7 +113,7 @@ fn is_transcript_active(path: &std::path::Path, inactive_minutes: u64) -> bool {
 
 /// Check if a transcript was modified yesterday
 /// This helps limit auto-summarization to only yesterday's sessions
-fn is_transcript_from_yesterday(path: &std::path::Path) -> bool {
+pub fn is_transcript_from_yesterday(path: &std::path::Path) -> bool {
     use chrono::{Duration, Local};
 
     if let Ok(metadata) = fs::metadata(path) {

@@ -22,7 +22,7 @@ pub struct TranscriptEntry {
 }
 
 /// Parsed transcript data with extracted information
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct TranscriptData {
     pub entries: Vec<TranscriptEntry>,
@@ -33,7 +33,7 @@ pub struct TranscriptData {
     pub summary: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct ToolCall {
     pub name: String,
@@ -201,6 +201,15 @@ impl TranscriptParser {
             }
         }
 
+        // Add assistant messages (bounded so a long session stays cheap to summarize)
+        if !data.assistant_messages.is_empty() {
+            text.push_str("## Assistant Messages\n\n");
+            for msg in data.assistant_messages.iter().take(20) {
+                text.push_str(&format!("- {}\n", truncate_text(msg, 300)));
+            }
+            text.push('\n');
+        }
+
         // Add tool usage summary
         if !data.tool_calls.is_empty() {
             text.push_str("## Tools Used\n\n");
@@ -211,6 +220,21 @@ impl TranscriptParser {
             }
             for (tool, count) in tool_counts {
                 text.push_str(&format!("- {}: {} calls\n", tool, count));
+            }
+
+            // Bounded tool outcomes, so decisions made in tool results reach the summary
+            for call in data.tool_calls.iter().take(15) {
+                if let Some(response) = &call.response {
+                    let resp = response.to_string();
+                    let resp = resp.trim().trim_matches('"');
+                    if !resp.is_empty() {
+                        text.push_str(&format!(
+                            "- {} -> {}\n",
+                            call.name,
+                            truncate_text(resp, 200)
+                        ));
+                    }
+                }
             }
             text.push('\n');
         }

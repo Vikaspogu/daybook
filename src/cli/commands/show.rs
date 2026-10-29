@@ -171,7 +171,7 @@ async fn trigger_auto_summarize(config: &crate::config::Config) -> Result<usize>
 
         // Spawn background process for summarization
         let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("daybook"));
-    let mut cmd = Command::new(exe);
+        let mut cmd = Command::new(exe);
         cmd.args([
             "summarize",
             "--transcript",

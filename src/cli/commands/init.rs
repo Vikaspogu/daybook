@@ -47,7 +47,10 @@ pub async fn run(storage_path: Option<PathBuf>, interactive: bool, use_haiku: bo
     // Save config
     save_config(&config)?;
     let config_path = get_config_path()?;
-    println!("[daybook] Configuration saved to: {}", config_path.display());
+    println!(
+        "[daybook] Configuration saved to: {}",
+        config_path.display()
+    );
 
     // Create storage directory
     let manager = ArchiveManager::new(config.clone());
@@ -60,7 +63,6 @@ pub async fn run(storage_path: Option<PathBuf>, interactive: bool, use_haiku: bo
 
     println!();
     println!("[daybook] Initialization complete!");
-
 
     Ok(())
 }
@@ -253,7 +255,10 @@ fn configure_language_interactive(config: &mut Config) -> Result<()> {
         .context("Failed to select language")?;
 
     config.summarization.summary_language = language_codes[selection].to_string();
-    println!("[daybook] Summary language set to: {}", languages[selection]);
+    println!(
+        "[daybook] Summary language set to: {}",
+        languages[selection]
+    );
 
     Ok(())
 }

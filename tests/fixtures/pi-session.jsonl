@@ -1,0 +1,8 @@
+{"type":"session","version":3,"id":"01abc-pi-session","timestamp":"2026-10-28T10:00:00.000Z","cwd":"/home/agent/git-repos/daybook"}
+{"type":"session_info","id":"x1","parentId":null,"timestamp":"2026-10-28T10:00:01.000Z","name":"Pi fixture session"}
+{"type":"message","id":"m1","parentId":"x1","timestamp":"2026-10-28T10:00:02.000Z","message":{"role":"user","content":[{"type":"text","text":"Fix the login bug in the auth module"}]}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-10-28T10:00:03.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"plan"},{"type":"toolCall","id":"t1","name":"write","arguments":{"path":"/home/agent/git-repos/daybook/src/lib.rs","content":"pub fn login() {}"}}]}}
+{"type":"message","id":"m3","parentId":"m2","timestamp":"2026-10-28T10:00:04.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Done"}]}}
+{"type":"message","id":"m4","parentId":"m3","timestamp":"2026-10-28T10:00:05.000Z","message":{"role":"toolResult","toolCallId":"t1","toolName":"write","content":[{"type":"text","text":"ok"}]}}
+{"type":"model_change","id":"mc1","parentId":null,"timestamp":"2026-10-28T10:00:00.500Z","provider":"openai-codex","modelId":"gpt-6.1-sol"}
+{"type":"message","id":"m5","parentId":"m4","timestamp":"2026-10-28T10:00:06.000Z","message":{"role":"assistant","content":[{"type":"text","text":"final"}],"usage":{"input":2720,"output":257,"cacheRead":65536,"cacheWrite":0,"totalTokens":68513}}}

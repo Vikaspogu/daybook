@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"01abc-pi-scratch","timestamp":"2026-10-28T15:00:00.000Z","cwd":"/home/agent/.t3/scratch/2026-10-28-some-scratch-idea"}
+{"type":"message","id":"s1","parentId":null,"timestamp":"2026-10-28T15:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"Scratch session with no project marker"}]}}

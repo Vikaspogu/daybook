@@ -1,0 +1,3 @@
+{"type":"session","version":3,"id":"01abc-pi-unknown","timestamp":"2026-10-28T11:00:00.000Z","cwd":"/home/agent/git-repos/daybook"}
+{"type":"totally_new_event_type","id":"u1","parentId":null,"timestamp":"2026-10-28T11:00:01.000Z","payload":{"whatever":true}}
+{"type":"message","id":"u2","parentId":null,"timestamp":"2026-10-28T11:00:02.000Z","message":{"role":"user","content":[{"type":"text","text":"Real message after unknown event"}]}}

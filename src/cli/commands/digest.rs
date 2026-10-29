@@ -108,7 +108,10 @@ pub async fn run(
     match engine.update_daily_summary(&target_date).await {
         Ok(summary) => {
             let summary_path = summary.save(&config)?;
-            eprintln!("[daybook] Daily summary created: {}", summary_path.display());
+            eprintln!(
+                "[daybook] Daily summary created: {}",
+                summary_path.display()
+            );
             // Session files are preserved for reference
         }
         Err(e) => {

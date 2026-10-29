@@ -95,6 +95,20 @@ pub enum Commands {
         job_id: Option<String>,
     },
 
+    /// Discover sessions from all agent runtimes and list them (no archiving)
+    Scan {
+        /// Accepted for gate compatibility; S2 scans are always non-LLM
+        #[arg(long)]
+        no_llm: bool,
+
+        /// Accepted for gate compatibility; S2 scans are always local
+        #[arg(long)]
+        local: bool,
+
+        /// Which day to list: today, yesterday, all, or YYYY-MM-DD (default: today)
+        #[arg(long)]
+        day: Option<String>,
+    },
     /// Generate daily digest from sessions (consolidate sessions into daily.md)
     Digest {
         /// Relative date (e.g., "yest" or "yesterday" for yesterday)
@@ -190,7 +204,6 @@ pub enum Commands {
         #[arg(short, long)]
         interactive: bool,
     },
-
 
     /// Generate insights and trend analysis from archives
     Insights {

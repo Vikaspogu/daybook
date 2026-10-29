@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"01abc-pi-worktree","timestamp":"2026-10-28T14:00:00.000Z","cwd":"/home/agent/.t3/worktrees/t3code-orbit/orbit-voice-extension"}
+{"type":"message","id":"w1","parentId":null,"timestamp":"2026-10-28T14:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"Work inside a T3 worktree"}]}}
