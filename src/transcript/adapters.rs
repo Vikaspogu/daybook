@@ -112,6 +112,29 @@ pub struct ParsedSession {
     pub end: Option<String>,
     pub model: Option<String>,
     pub usage: Option<SessionUsage>,
+    /// True when this session is a daybook summarizer run itself (claude -p
+    /// or codex exec spawned by daybook). Discovered via the first user
+    /// message; without this, every scan feeds its own LLM calls back into
+    /// the next scan (self-amplifying transcript growth).
+    pub internal: bool,
+}
+
+impl ParsedSession {
+    /// Marker detection: daybook prompts always start with one of these
+    /// fixed template lines (EN + ZH defaults; a fully custom prompt
+    /// template would need its own first line here).
+    fn from_daybook_prompt(data: &TranscriptData) -> bool {
+        const MARKERS: [&str; 2] = [
+            "You are analyzing a Claude Code session transcript",
+            "你正在分析一个 Claude Code 会话记录",
+        ];
+        // codex exec prepends AGENTS.md as a user message, so the prompt is
+        // not always first — check the first few user messages.
+        data.user_messages
+            .iter()
+            .take(3)
+            .any(|m| MARKERS.iter().any(|mk| m.trim_start().starts_with(mk)))
+    }
 }
 
 impl ParsedSession {
@@ -159,8 +182,8 @@ pub fn discover_sessions(home: &Path) -> Vec<SessionMeta> {
 pub fn meta_for_path(path: &Path) -> Option<SessionMeta> {
     let s = path.to_string_lossy();
     if s.contains("/.claude/projects/") {
-        let cwd =
-            first_line_json(path).and_then(|h| h.get("cwd").and_then(|v| v.as_str()).map(String::from));
+        let cwd = first_line_json(path)
+            .and_then(|h| h.get("cwd").and_then(|v| v.as_str()).map(String::from));
         return Some(SessionMeta {
             session_id: path
                 .file_stem()
@@ -386,7 +409,9 @@ pub fn parse_session(meta: &SessionMeta) -> Result<ParsedSession> {
                 }
             }
             let usage = (usage.input.saturating_add(usage.output) > 0).then_some(usage);
+            let internal = ParsedSession::from_daybook_prompt(&data);
             Ok(ParsedSession {
+                internal,
                 data,
                 title: None,
                 start,
@@ -528,7 +553,9 @@ fn parse_pi(path: &Path) -> Result<ParsedSession> {
     }
 
     let usage = (usage.input.saturating_add(usage.output) > 0).then_some(usage);
+    let internal = ParsedSession::from_daybook_prompt(&data);
     Ok(ParsedSession {
+        internal,
         data,
         title,
         start,
@@ -743,7 +770,9 @@ fn parse_codex(path: &Path) -> Result<ParsedSession> {
     } else {
         count_usage
     };
+    let internal = ParsedSession::from_daybook_prompt(&data);
     Ok(ParsedSession {
+        internal,
         data,
         title: None,
         start,
@@ -798,8 +827,6 @@ fn track_file_modified(data: &mut TranscriptData, tool_name: &str, input: &Value
 mod tests {
     use super::*;
 
-    fn fixture(name: &str) -> PathBuf {
-
     #[test]
     fn test_meta_for_path_all_runtimes_and_unknown() {
         let base = std::env::temp_dir().join(format!("daybook-mfp-{}", std::process::id()));
@@ -840,9 +867,44 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
             .join(name)
+    }
+
+    #[test]
+    fn test_internal_marker_after_agents_md() {
+        let mk = |first: Option<&str>, prompt: &str| ParsedSession {
+            data: TranscriptData {
+                user_messages: {
+                    let mut v = Vec::new();
+                    if let Some(f) = first {
+                        v.push(f.to_string());
+                    }
+                    v.push(prompt.to_string());
+                    v
+                },
+                ..Default::default()
+            },
+            title: None,
+            model: None,
+            start: None,
+            end: None,
+            usage: None,
+            internal: false,
+        };
+        let prompt = "You are analyzing a Claude Code session transcript. Generate a summary.";
+        // codex exec prepends AGENTS.md instructions as a user message
+        let codex = mk(Some("# AGENTS.md instructions\n<INSTRUCTIONS>"), prompt);
+        assert!(ParsedSession::from_daybook_prompt(&codex.data));
+        // claude -p has the prompt as the first user message
+        let claude = mk(None, prompt);
+        assert!(ParsedSession::from_daybook_prompt(&claude.data));
+        // a real interactive session does not match
+        let real = mk(None, "Fix the login bug in daybook please");
+        assert!(!ParsedSession::from_daybook_prompt(&real.data));
     }
 
     #[test]

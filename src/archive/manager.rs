@@ -143,7 +143,19 @@ impl ArchiveManager {
     /// Write a session archive file
     pub fn write_session(&self, date: &str, task_name: &str, content: &str) -> Result<PathBuf> {
         self.ensure_date_dir(date)?;
-        let path = self.session_archive_path(date, task_name);
+        let mut path = self.session_archive_path(date, task_name);
+        // Two sessions that start in the same minute can share an
+        // HH_MM-topic title; never clobber a different session's archive —
+        // disambiguate with a short session-id suffix instead.
+        if path.exists() {
+            let existing = fs::read_to_string(&path).unwrap_or_default();
+            if let Some(id) = frontmatter_id(content) {
+                if !existing.contains(&format!("session_id: {}", id)) {
+                    let short: String = id.chars().take(8).collect();
+                    path = self.session_archive_path(date, &format!("{}-{}", task_name, short));
+                }
+            }
+        }
         fs::write(&path, content).context(format!(
             "Failed to write session archive: {}",
             path.display()
@@ -169,6 +181,14 @@ impl ArchiveManager {
     }
 }
 
+/// Pull `session_id: <id>` out of archive frontmatter.
+fn frontmatter_id(content: &str) -> Option<&str> {
+    content
+        .lines()
+        .find_map(|l| l.strip_prefix("session_id: "))
+        .map(str::trim)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +198,34 @@ mod tests {
         let mut config = Config::default();
         config.storage.path = temp_dir.path().to_path_buf();
         config
+    }
+
+    #[test]
+    fn test_write_session_collision_keeps_both() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let manager = ArchiveManager::new(config);
+
+        let first = "---\nsession_id: aaaa1111\n---\nfirst";
+        let second = "---\nsession_id: bbbb2222\n---\nsecond";
+        manager
+            .write_session("2026-10-29", "01_22-topic", first)
+            .unwrap();
+        let p2 = manager
+            .write_session("2026-10-29", "01_22-topic", second)
+            .unwrap();
+
+        // Different session with the same title must not clobber the first.
+        assert!(p2.to_string_lossy().contains("01_22-topic-bbbb2222"));
+        let dir = tmp.path().join("2026-10-29");
+        // daily.md (seeded) + two session archives, first not clobbered.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().flatten().count(), 3);
+
+        // Same session written again stays idempotent (same name).
+        let again = manager
+            .write_session("2026-10-29", "01_22-topic", second)
+            .unwrap();
+        assert_eq!(again, p2);
     }
 
     #[test]

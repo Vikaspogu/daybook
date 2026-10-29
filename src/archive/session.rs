@@ -110,8 +110,20 @@ impl SessionArchive {
 
 /// Get git branch from working directory
 pub fn get_git_branch(cwd: &str) -> Option<String> {
+    // cwd can originate from a transcript header, so neutralize repo-config
+    // code-exec vectors before reading the branch.
+    // ponytail: covers the known read-command vectors (fsmonitor); a fully
+    // untrusted cwd would need a bare --git-dir invocation instead.
     std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=",
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+        ])
         .current_dir(cwd)
         .output()
         .ok()

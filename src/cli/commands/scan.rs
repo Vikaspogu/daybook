@@ -3,9 +3,10 @@ use anyhow::{Context, Result};
 use crate::transcript::adapters;
 
 /// `daybook scan --no-llm --local --day <d>`: discovery + parse only.
-/// In S2 every scan is local and non-LLM; the flags exist so the S2 gate
-/// command runs as specified. LLM-backed summaries arrive in S3.
-pub async fn run(day: Option<String>, _no_llm: bool, _local: bool) -> Result<()> {
+/// Without --no-llm, also runs the LLM summarization pass over every
+/// listed session, skipping ones already archived (incremental).
+/// --local is accepted for CLI compatibility and currently unused.
+pub async fn run(day: Option<String>, no_llm: bool, _local: bool) -> Result<()> {
     let home = dirs::home_dir().context("Failed to get home directory")?;
     let sessions = adapters::discover_sessions(&home);
 
@@ -36,6 +37,7 @@ pub async fn run(day: Option<String>, _no_llm: bool, _local: bool) -> Result<()>
     );
 
     let mut rows = Vec::new();
+    let mut internal = 0;
     let mut skipped = 0;
     for meta in &sessions {
         if let Some(window) = &window {
@@ -57,6 +59,10 @@ pub async fn run(day: Option<String>, _no_llm: bool, _local: bool) -> Result<()>
                 continue;
             }
         };
+        if parsed.internal {
+            internal += 1;
+            continue;
+        }
 
         // D6: the session's journal date is its transcript start date,
         // never the scan time.
@@ -93,11 +99,99 @@ pub async fn run(day: Option<String>, _no_llm: bool, _local: bool) -> Result<()>
     }
 
     eprintln!(
-        "[daybook] Scan complete: {} sessions listed, {} skipped",
+        "[daybook] Scan complete: {} sessions listed, {} skipped, {} daybook-internal",
         rows.len(),
-        skipped
+        skipped,
+        internal
     );
+    // S3: with --no-llm absent, run the LLM pass over every session
+    // listed above (D4: codex fallback makes it work without claude).
+    // S3: with --no-llm absent, run the LLM pass over every session
+    // listed above (D4: codex fallback makes it work without claude).
+    // Sessions already archived for their journal date are skipped, so
+    // repeated scans are incremental, not duplicate-creating.
+    if !no_llm {
+        let config = crate::config::load_config()?;
+        let mut ok = 0;
+        let total = rows.len();
+        for (i, (meta, parsed)) in rows.iter().enumerate() {
+            if parsed.data.is_empty() {
+                continue;
+            }
+            if !is_stale(&meta.path) {
+                eprintln!(
+                    "[daybook] Session looks live or just finished, skipping for now: {}",
+                    clean(&meta.session_id)
+                );
+                continue;
+            }
+            let journal_date = parsed
+                .start_date()
+                .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
+            if already_archived(&config, &journal_date, &meta.session_id) {
+                eprintln!(
+                    "[daybook] Already archived, skipping: {}",
+                    clean(&meta.session_id)
+                );
+                continue;
+            }
+            eprintln!(
+                "[daybook] Summarizing {}/{}: {}",
+                i + 1,
+                total,
+                clean(parsed.title.as_deref().unwrap_or(&meta.session_id))
+            );
+            let task_name = format!("session-{}", meta.session_id);
+            let cwd = meta
+                .cwd
+                .clone()
+                .unwrap_or_else(|| home.display().to_string());
+            match crate::cli::commands::summarize::run_summarization(
+                &config, &meta.path, &task_name, &cwd,
+            )
+            .await
+            {
+                Ok(_) => ok += 1,
+                Err(e) => eprintln!(
+                    "[daybook] Summarize failed for {}: {}",
+                    clean(&meta.session_id),
+                    clean(&e.to_string())
+                ),
+            }
+        }
+        eprintln!("[daybook] Summarized {} session(s) into the archive", ok);
+    }
+
     Ok(())
+}
+
+/// True when the transcript looks finished: last modified more than
+/// STALE_SECS ago. Freshly modified files are likely still-live sessions;
+/// summarizing them produces partial archives that dedup then protects.
+fn is_stale(path: &std::path::Path) -> bool {
+    const STALE_SECS: u64 = 600;
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(|t| match t.elapsed() {
+            Ok(e) => e.as_secs() > STALE_SECS,
+            // mtime in the future (clock skew or live write): treat as live
+            Err(_) => false,
+        })
+        .unwrap_or(false)
+}
+
+/// True if an archive for this session already exists for the journal date.
+fn already_archived(config: &crate::config::Config, date: &str, session_id: &str) -> bool {
+    let dir = config.storage.path.join(date);
+    std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries.flatten().any(|e| {
+                std::fs::read_to_string(e.path())
+                    .map(|c| c.contains(&format!("session_id: {}", session_id)))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Resolve `--day`: "today", "yesterday", "all", or a literal YYYY-MM-DD.

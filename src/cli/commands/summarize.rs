@@ -123,7 +123,7 @@ pub async fn run(
 }
 
 /// Run the actual summarization logic
-async fn run_summarization(
+pub(crate) async fn run_summarization(
     config: &crate::config::Config,
     transcript: &PathBuf,
     task_name: &str,
@@ -141,21 +141,27 @@ async fn run_summarization(
     // Runtime-aware parse: known session trees go through the runtime
     // adapters (Claude Code, Pi, Codex); any other explicit path falls
     // back to the legacy Claude-format parser (upstream CLI contract).
-    let (data, session_id, agent) =
+    let (data, session_id, agent, start) =
         match crate::transcript::adapters::meta_for_path(transcript) {
             Some(meta) => {
                 let parsed = crate::transcript::adapters::parse_session(&meta)
                     .context("Failed to parse transcript")?;
-                (parsed.data, meta.session_id, Some(meta.agent.as_str().to_string()))
+                let start = parsed.start.clone();
+                (
+                    parsed.data,
+                    meta.session_id,
+                    Some(meta.agent.as_str().to_string()),
+                    start,
+                )
             }
             None => {
-                let parsed = TranscriptParser::parse(transcript)
-                    .context("Failed to parse transcript")?;
+                let parsed =
+                    TranscriptParser::parse(transcript).context("Failed to parse transcript")?;
                 let session_id = transcript
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                (parsed, session_id, None)
+                (parsed, session_id, None, None)
             }
         };
 
@@ -168,7 +174,14 @@ async fn run_summarization(
 
     // Summarize the session
     let mut archive = engine
-        .summarize_session(transcript, task_name, cwd, &data, &session_id)
+        .summarize_session(
+            transcript,
+            task_name,
+            cwd,
+            &data,
+            &session_id,
+            start.as_deref(),
+        )
         .await
         .context("Failed to summarize session")?;
     archive.agent = agent;
@@ -247,6 +260,20 @@ async fn auto_extract_skill(
 
     // Extract skill name from content
     let skill_name = extract_skill_name(&skill_content);
+    let skill_name = extract_skill_name(&skill_content);
+    // Path traversal guard: the LLM-derived name must stay a single path
+    // segment inside pending-skills, never escape it.
+    if skill_name.contains('/')
+        || skill_name.contains('\\')
+        || skill_name.contains("..")
+        || skill_name.contains('\0')
+    {
+        eprintln!(
+            "[daybook] Skipping skill with unsafe name: {}",
+            skill_name.replace(char::is_control, "?")
+        );
+        return Ok(None);
+    }
     let skill_file = pending_dir.join(format!("{}.md", skill_name));
 
     fs::write(&skill_file, &skill_content)?;

@@ -252,7 +252,18 @@ mod tests {
     #[test]
     fn test_session_archive_agent_tag() {
         let content = Templates::session_archive(
-            "T", "2026-01-16", "id", "/x", None, None, "s", "d", "c", "l", "h", Some("codex"),
+            "T",
+            "2026-01-16",
+            "id",
+            "/x",
+            None,
+            None,
+            "s",
+            "d",
+            "c",
+            "l",
+            "h",
+            Some("codex"),
         );
         assert!(content.contains("tags: [codex, session-archive]"));
     }

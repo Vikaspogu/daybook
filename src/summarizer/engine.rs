@@ -61,8 +61,8 @@ impl SummarizerEngine {
 
     /// Codex CLI fallback: prompt via stdin, final message via -o file.
     fn invoke_codex(&self, prompt: &str) -> Result<String> {
-        let model = std::env::var("DAYBOOK_CODEX_MODEL")
-            .unwrap_or_else(|_| "gpt-6.1-sol".to_string());
+        let model =
+            std::env::var("DAYBOOK_CODEX_MODEL").unwrap_or_else(|_| "gpt-6.1-sol".to_string());
         let out_file = std::env::temp_dir().join(format!(
             "daybook-codex-{}-{}.md",
             std::process::id(),
@@ -185,7 +185,11 @@ impl SummarizerEngine {
         cwd: &str,
         data: &crate::transcript::TranscriptData,
         session_id: &str,
+        start: Option<&str>,
     ) -> Result<SessionArchive> {
+        let start_dt = start
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.with_timezone(&chrono::Local));
         let transcript_data = TranscriptParser::to_condensed_text(data);
         // Get git branch
         let git_branch = crate::archive::session::get_git_branch(cwd);
@@ -209,7 +213,10 @@ impl SummarizerEngine {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[daybook] Failed to parse JSON: {}", e);
-                eprintln!("[daybook] Raw JSON: {}", json_str);
+                // Transcript text can steer the model, so strip control
+                // characters before echoing LLM output to the terminal.
+                let printable: String = json_str.chars().filter(|c| !c.is_control()).collect();
+                eprintln!("[daybook] Raw JSON: {}", printable);
                 // Try flexible parsing: convert array fields to strings
                 let mut v: serde_json::Value =
                     serde_json::from_str(&json_str).context("Failed to parse as JSON Value")?;
@@ -239,13 +246,16 @@ impl SummarizerEngine {
 
         // Build title from time + AI-generated topic
         // Format: HH_MM-topic (e.g., "14_55-fix-auth-bug")
-        let now = chrono::Local::now();
-        let time_prefix = now.format("%H_%M").to_string();
+        // D6: date and title time come from the session's own start
+        // timestamp, never from scan time; fall back to now only when the
+        // transcript carries no parseable start.
+        let stamp = start_dt.unwrap_or_else(chrono::Local::now);
+        let time_prefix = stamp.format("%H_%M").to_string();
         let topic = sanitize_topic(&summary_response.topic);
         let title = format!("{}-{}", time_prefix, topic);
 
         // Build archive
-        let today = now.format("%Y-%m-%d").to_string();
+        let today = stamp.format("%Y-%m-%d").to_string();
         let archive = SessionArchive::new(title, today, session_id.to_string(), cwd.to_string())
             .with_transcript_path(transcript_path.to_string_lossy().to_string())
             .with_transcript_data(data)
