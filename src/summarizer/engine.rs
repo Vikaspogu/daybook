@@ -40,6 +40,73 @@ impl SummarizerEngine {
         Self { config }
     }
 
+    /// Invoke an LLM with a prompt and return the response.
+    /// Prefers the Claude Code CLI (upstream behavior); falls back to
+    /// `codex exec` when claude is not installed (D4: verified noninteractive
+    /// in the workspace VMs).
+    fn invoke_llm(&self, prompt: &str) -> Result<String> {
+        let claude_available = Command::new("claude")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if claude_available {
+            self.invoke_claude(prompt)
+        } else {
+            self.invoke_codex(prompt)
+        }
+    }
+
+    /// Codex CLI fallback: prompt via stdin, final message via -o file.
+    fn invoke_codex(&self, prompt: &str) -> Result<String> {
+        let model = std::env::var("DAYBOOK_CODEX_MODEL")
+            .unwrap_or_else(|_| "gpt-6.1-sol".to_string());
+        let out_file = std::env::temp_dir().join(format!(
+            "daybook-codex-{}-{}.md",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let mut child = Command::new("codex")
+            .args([
+                "exec",
+                // Read-only sandbox: the summarizer must never execute
+                // commands from transcript-controlled prompt content.
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "-m",
+                &model,
+                "-o",
+            ])
+            .arg(&out_file)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("Failed to spawn codex CLI. Is it installed?")?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(prompt.as_bytes())
+                .context("Failed to write prompt to codex")?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .context("Failed to wait for codex")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Codex CLI failed: {}", stderr);
+        }
+
+        let response = std::fs::read_to_string(&out_file)
+            .with_context(|| format!("Failed to read codex output file {}", out_file.display()))?;
+        let _ = std::fs::remove_file(&out_file);
+        Ok(response)
+    }
+
     /// Invoke Claude CLI with a prompt and return the response
     fn invoke_claude(&self, prompt: &str) -> Result<String> {
         let mut child = Command::new("claude")
@@ -116,11 +183,10 @@ impl SummarizerEngine {
         transcript_path: &std::path::Path,
         _task_name: &str,
         cwd: &str,
+        data: &crate::transcript::TranscriptData,
+        session_id: &str,
     ) -> Result<SessionArchive> {
-        // Parse transcript
-        let transcript_data = TranscriptParser::parse(transcript_path)?;
-        let transcript_text = TranscriptParser::to_condensed_text(&transcript_data);
-
+        let transcript_data = TranscriptParser::to_condensed_text(data);
         // Get git branch
         let git_branch = crate::archive::session::get_git_branch(cwd);
 
@@ -129,13 +195,13 @@ impl SummarizerEngine {
         let custom_template = self.config.prompt_templates.session_summary.as_deref();
         let prompt = Prompts::session_summary_with_template(
             custom_template,
-            &transcript_text,
+            &transcript_data,
             cwd,
             git_branch.as_deref(),
             language,
         );
 
-        let response = self.invoke_claude(&prompt)?;
+        let response = self.invoke_llm(&prompt)?;
         let json_str = self.extract_json(&response)?;
 
         // Parse response - use Value first for debugging on failure
@@ -180,14 +246,9 @@ impl SummarizerEngine {
 
         // Build archive
         let today = now.format("%Y-%m-%d").to_string();
-        let session_id = transcript_path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let archive = SessionArchive::new(title, today, session_id, cwd.to_string())
+        let archive = SessionArchive::new(title, today, session_id.to_string(), cwd.to_string())
             .with_transcript_path(transcript_path.to_string_lossy().to_string())
-            .with_transcript_data(&transcript_data)
+            .with_transcript_data(data)
             .with_summary(
                 summary_response.summary,
                 summary_response.decisions,
@@ -245,7 +306,7 @@ impl SummarizerEngine {
             existing_summary.as_deref(),
             language,
         );
-        let response = self.invoke_claude(&prompt)?;
+        let response = self.invoke_llm(&prompt)?;
         let json_str = self.extract_json(&response)?;
 
         // Parse response
@@ -274,7 +335,7 @@ impl SummarizerEngine {
         let custom_template = self.config.prompt_templates.skill_extract.as_deref();
         let prompt =
             Prompts::extract_skill_with_template(custom_template, session_content, hint, language);
-        let response = self.invoke_claude(&prompt)?;
+        let response = self.invoke_llm(&prompt)?;
 
         // Extract markdown from response
         extract_markdown_from_response(&response)
@@ -294,7 +355,7 @@ impl SummarizerEngine {
             hint,
             language,
         );
-        let response = self.invoke_claude(&prompt)?;
+        let response = self.invoke_llm(&prompt)?;
 
         // Extract markdown from response
         extract_markdown_from_response(&response)

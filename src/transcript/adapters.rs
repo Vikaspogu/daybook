@@ -153,6 +153,33 @@ pub fn discover_sessions(home: &Path) -> Vec<SessionMeta> {
     sessions
 }
 
+/// Build a SessionMeta for an explicit transcript path, inferring the
+/// runtime from its location under the home directory. Returns None for
+/// paths outside the known session trees.
+pub fn meta_for_path(path: &Path) -> Option<SessionMeta> {
+    let s = path.to_string_lossy();
+    if s.contains("/.claude/projects/") {
+        let cwd =
+            first_line_json(path).and_then(|h| h.get("cwd").and_then(|v| v.as_str()).map(String::from));
+        return Some(SessionMeta {
+            session_id: path
+                .file_stem()
+                .map(|x| x.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            path: path.to_path_buf(),
+            agent: AgentKind::ClaudeCode,
+            cwd,
+        });
+    }
+    if s.contains("/.pi/agent/sessions/") {
+        return pi_meta(path);
+    }
+    if s.contains("/.codex/sessions/") {
+        return codex_meta(path);
+    }
+    None
+}
+
 /// Claude Code: ~/.claude/projects/<project-dir>/<session-id>.jsonl
 fn discover_claude(home: &Path) -> Vec<SessionMeta> {
     let mut out = Vec::new();
@@ -772,6 +799,47 @@ mod tests {
     use super::*;
 
     fn fixture(name: &str) -> PathBuf {
+
+    #[test]
+    fn test_meta_for_path_all_runtimes_and_unknown() {
+        let base = std::env::temp_dir().join(format!("daybook-mfp-{}", std::process::id()));
+        let mk = |rel: &str, line: &str| {
+            let p = base.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, line).unwrap();
+            p
+        };
+
+        let claude = mk(
+            ".claude/projects/p/sess.jsonl",
+            r#"{"cwd":"/home/agent/git-repos/daybook"}"#,
+        );
+        let m = meta_for_path(&claude).expect("claude meta");
+        assert_eq!(m.agent, AgentKind::ClaudeCode);
+        assert_eq!(m.session_id, "sess");
+        assert_eq!(m.cwd.as_deref(), Some("/home/agent/git-repos/daybook"));
+
+        let pi = mk(
+            ".pi/agent/sessions/p/sess.jsonl",
+            r#"{"type":"session","id":"01a-pi","cwd":"/home/agent/git-repos/daybook"}"#,
+        );
+        let m = meta_for_path(&pi).expect("pi meta");
+        assert_eq!(m.agent, AgentKind::Pi);
+        assert_eq!(m.session_id, "01a-pi");
+
+        let codex = mk(
+            ".codex/sessions/2026/10/28/sess.jsonl",
+            r#"{"type":"session_meta","payload":{"id":"01a-codex","cwd":"/home/agent/git-repos/daybook"}}"#,
+        );
+        let m = meta_for_path(&codex).expect("codex meta");
+        assert_eq!(m.agent, AgentKind::Codex);
+        assert_eq!(m.session_id, "01a-codex");
+
+        let outside = mk("plain/sess.jsonl", "{}");
+        assert!(meta_for_path(&outside).is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
             .join(name)

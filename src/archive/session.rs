@@ -20,6 +20,9 @@ pub struct SessionArchive {
     pub code_changes: String,
     pub learnings: String,
     pub skill_hints: String,
+    /// Runtime that produced the transcript (e.g. "claude-code", "pi", "codex").
+    /// None falls back to the upstream default tag.
+    pub agent: Option<String>,
 }
 
 impl SessionArchive {
@@ -37,6 +40,7 @@ impl SessionArchive {
             code_changes: String::new(),
             learnings: String::new(),
             skill_hints: String::new(),
+            agent: None,
         }
     }
 
@@ -92,6 +96,7 @@ impl SessionArchive {
             &self.code_changes,
             &self.learnings,
             &self.skill_hints,
+            self.agent.as_deref(),
         )
     }
 

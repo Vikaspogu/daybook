@@ -138,11 +138,28 @@ async fn run_summarization(
         return Ok(());
     }
 
-    // Check if session is empty before summarizing
-    let transcript_data =
-        TranscriptParser::parse(transcript).context("Failed to parse transcript")?;
+    // Runtime-aware parse: known session trees go through the runtime
+    // adapters (Claude Code, Pi, Codex); any other explicit path falls
+    // back to the legacy Claude-format parser (upstream CLI contract).
+    let (data, session_id, agent) =
+        match crate::transcript::adapters::meta_for_path(transcript) {
+            Some(meta) => {
+                let parsed = crate::transcript::adapters::parse_session(&meta)
+                    .context("Failed to parse transcript")?;
+                (parsed.data, meta.session_id, Some(meta.agent.as_str().to_string()))
+            }
+            None => {
+                let parsed = TranscriptParser::parse(transcript)
+                    .context("Failed to parse transcript")?;
+                let session_id = transcript
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                (parsed, session_id, None)
+            }
+        };
 
-    if transcript_data.is_empty() {
+    if data.is_empty() {
         eprintln!("[daybook] Session is empty, skipping summarization");
         return Ok(());
     }
@@ -150,10 +167,11 @@ async fn run_summarization(
     let engine = SummarizerEngine::new(config.clone());
 
     // Summarize the session
-    let archive = engine
-        .summarize_session(transcript, task_name, cwd)
+    let mut archive = engine
+        .summarize_session(transcript, task_name, cwd, &data, &session_id)
         .await
         .context("Failed to summarize session")?;
+    archive.agent = agent;
 
     // Save the archive
     let archive_path = archive.save(config)?;

@@ -20,10 +20,12 @@ impl Templates {
         code_changes: &str,
         learnings: &str,
         skill_hints: &str,
+        agent: Option<&str>,
     ) -> String {
         let created = Local::now().to_rfc3339();
         let git_branch_str = git_branch.unwrap_or("N/A");
         let transcript_path_str = transcript_path.unwrap_or("N/A");
+        let agent_str = agent.unwrap_or("claude-code");
 
         format!(
             r#"---
@@ -33,7 +35,7 @@ session_id: {session_id}
 cwd: "{cwd}"
 git_branch: "{git_branch_str}"
 transcript_path: "{transcript_path_str}"
-tags: [claude-code, session-archive]
+tags: [{agent_str}, session-archive]
 created: {created}
 ---
 
@@ -248,6 +250,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_session_archive_agent_tag() {
+        let content = Templates::session_archive(
+            "T", "2026-01-16", "id", "/x", None, None, "s", "d", "c", "l", "h", Some("codex"),
+        );
+        assert!(content.contains("tags: [codex, session-archive]"));
+    }
+
+    #[test]
     fn test_session_archive_template() {
         let content = Templates::session_archive(
             "Test Session",
@@ -261,6 +271,7 @@ mod tests {
             "Test changes",
             "Test learnings",
             "Test hints",
+            None,
         );
 
         assert!(content.contains("title: \"Test Session\""));
