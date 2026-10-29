@@ -89,7 +89,7 @@ Follows the home-ops AGENTS.md application pattern exactly:
 | S1: Fork & hygiene | Own the codebase | Clone builds (frontend + Rust), passes upstream tests, renamed |
 | S2: Transcript adapters + discovery | Data in from all runtimes | Non-LLM scan lists Pi + Codex + Claude Code sessions with metadata-derived attribution |
 | S3: Journal + server core | Summarize, push, store | Revision-aware push against a running server; VM-local routes stripped |
-| S4: Stats & insights | R4 | `daybook stats --week` answers struggle/test-frequency questions against fixtures with expected values |
+| S4: Stats | S4: Stats & insights | R4 | insights ✅ | R4 | `daybook stats --week` answers struggle/test-frequency questions against fixtures with expected values |
 | S5: Recall surfaces + auth | R2/R3 | Both runtimes answer cross-project recall via the server; auth enforced incl. browser |
 | S6: Deploy to cluster | D3 | Pod running in `ai`, UI reachable internally, data survives pod restart |
 | S7: Automation & soak | Freshness + real-data proof | Two VMs covered; 9pm digests in journal thread unattended ≥7 days |
@@ -132,7 +132,7 @@ Follows the home-ops AGENTS.md application pattern exactly:
   - [ ] `daybook scan --local` dev mode that skips push and writes to `~/.daybook` directly
 - **Verification Gate:** run against yesterday → records land in the ledger via real HTTP push with persisted markdown summary, all 11 facet fields, and runtime/project metadata columns; (a) second push of unchanged sessions = no-op (row count + content unchanged), (b) push of a session whose transcript grew = updated record, (c) deliver newer revision B, then retry older queued revision A → A is rejected, B remains; kill the server mid-push → record lands in `~/.daybook/pending/` and uploads on the next scan; condensation test: a decision stated only in an assistant message appears in the summary.
 
-### [ ] Slice 4 (S4): Stats & insights
+### [x] Slice 4 (S4): Stats ### [ ] Slice 4 (S4): Stats & insights insights
 
 - **Purpose / Done when:** R4 answered from the ledger: daily series, distributions, 30-day trend, plus free transcript metrics (thrash, interruptions, test runs/day, cache hit rate) — computed against fixtures with expected values.
 - **Blocked by:** S3
