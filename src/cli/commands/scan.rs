@@ -163,7 +163,6 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
                         meta,
                         parsed,
                         &journal_date,
-                        &format!("session-{}", meta.session_id),
                         pricing.as_ref(),
                     )
                     .await;
@@ -195,7 +194,6 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
                             meta,
                             parsed,
                             &journal_date,
-                            &task_name,
                             pricing.as_ref(),
                         )
                         .await;
@@ -223,14 +221,20 @@ async fn push_after_archive(
     meta: &adapters::SessionMeta,
     parsed: &adapters::ParsedSession,
     journal_date: &str,
-    task_name: &str,
     pricing: Option<&crate::usage::pricing::PricingData>,
 ) {
     if config.push.url.is_none() {
         return;
     }
-    let archive_path = crate::archive::ArchiveManager::new(config.clone())
-        .session_archive_path(journal_date, task_name);
+    // Archives are written under their HH_MM-topic title, not the scan
+    // task name — locate the file by its session_id frontmatter line.
+    let Some(archive_path) = find_session_archive(config, journal_date, &meta.session_id) else {
+        eprintln!(
+            "[daybook] Archive missing, not pushing: {}",
+            clean(&meta.session_id)
+        );
+        return;
+    };
     let Ok(summary_md) = std::fs::read_to_string(&archive_path) else {
         eprintln!(
             "[daybook] Archive missing, not pushing: {}",
@@ -321,23 +325,34 @@ fn is_stale(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// True if an archive for this session already exists for the journal date.
-fn already_archived(config: &crate::config::Config, date: &str, session_id: &str) -> bool {
+/// Find this session's archive file for the journal date. Archives are
+/// named by HH_MM-topic title (plus id-suffix variants), so the only
+/// stable handle is the `session_id:` frontmatter line.
+fn find_session_archive(
+    config: &crate::config::Config,
+    date: &str,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
     let dir = config.storage.path.join(date);
     std::fs::read_dir(&dir)
-        .map(|entries| {
-            entries.flatten().any(|e| {
-                std::fs::read_to_string(e.path())
-                    // Exact-line match: a substring match would also hit
-                    // ids that merely start with session_id (prefix collision).
-                    .map(|c| {
-                        c.lines()
-                            .any(|l| l.trim() == format!("session_id: {}", session_id))
-                    })
-                    .unwrap_or(false)
-            })
+        .ok()?
+        .flatten()
+        .find(|e| {
+            std::fs::read_to_string(e.path())
+                // Exact-line match: a substring match would also hit
+                // ids that merely start with session_id (prefix collision).
+                .map(|c| {
+                    c.lines()
+                        .any(|l| l.trim() == format!("session_id: {}", session_id))
+                })
+                .unwrap_or(false)
         })
-        .unwrap_or(false)
+        .map(|e| e.path())
+}
+
+/// True if an archive for this session already exists for the journal date.
+fn already_archived(config: &crate::config::Config, date: &str, session_id: &str) -> bool {
+    find_session_archive(config, date, session_id).is_some()
 }
 
 /// Resolve `--day`: "today", "yesterday", "all", or a literal YYYY-MM-DD.
