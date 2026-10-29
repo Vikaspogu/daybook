@@ -515,8 +515,16 @@ impl Ledger {
     // ---- machine tokens (D7) ----
 
     pub fn mint_token(&self, label: &str, token_hash: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        // A token value identifies one credential. When the GitOps label for
+        // the same stored value changes (e.g. vm-push -> vm), re-home the hash
+        // instead of tripping UNIQUE(token_hash) against the old row.
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM tokens WHERE token_hash = ?2 AND label <> ?1",
+            rusqlite::params![label, token_hash],
+        )?;
+        tx.execute(
             "INSERT INTO tokens (label, token_hash, created_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(label) DO UPDATE SET
                  token_hash = excluded.token_hash,
@@ -525,6 +533,7 @@ impl Ledger {
                  last_used_at = NULL",
             rusqlite::params![label, token_hash, chrono::Utc::now().to_rfc3339()],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -812,6 +821,24 @@ mod tests {
             ledger.check_token("secret2").unwrap().as_deref(),
             Some("vm1")
         );
+    }
+
+    #[test]
+    fn test_token_rehome_on_label_change() {
+        // GitOps ensure with a renamed label (vm-push -> vm) and the same
+        // stored value: the hash re-homes instead of hitting UNIQUE.
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&dir.path().join("t.db3")).unwrap();
+        ledger.mint_token("vm-push", &sha256_hex(b"secret1")).unwrap();
+        ledger.mint_token("vm", &sha256_hex(b"secret1")).unwrap();
+        assert_eq!(
+            ledger.check_token("secret1").unwrap().as_deref(),
+            Some("vm")
+        );
+        // The old row is gone; only one active token remains.
+        let rows = ledger.list_tokens().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "vm");
     }
 
     #[test]
