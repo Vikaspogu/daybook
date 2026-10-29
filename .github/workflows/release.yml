@@ -20,19 +20,19 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: daily-linux-amd64
+            artifact: daybook-linux-amd64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: daily-linux-arm64
+            artifact: daybook-linux-arm64
           - target: x86_64-apple-darwin
             os: macos-latest
-            artifact: daily-darwin-amd64
+            artifact: daybook-darwin-amd64
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact: daily-darwin-arm64
+            artifact: daybook-darwin-arm64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            artifact: daily-windows-amd64.exe
+            artifact: daybook-windows-amd64.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -69,13 +69,13 @@ jobs:
       - name: Prepare artifact (Unix)
         if: runner.os != 'Windows'
         run: |
-          cp target/${{ matrix.target }}/release/daily ${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/daybook ${{ matrix.artifact }}
           chmod +x ${{ matrix.artifact }}
 
       - name: Prepare artifact (Windows)
         if: runner.os == 'Windows'
         run: |
-          cp target/${{ matrix.target }}/release/daily.exe ${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/daybook.exe ${{ matrix.artifact }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

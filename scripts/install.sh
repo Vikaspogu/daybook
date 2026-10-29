@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# Daily - Context Archive System for Claude Code
+# Daybook - cross-runtime work journal
 # Installation Script
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/oanakiaja/claude-daily/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Vikaspogu/daybook/main/scripts/install.sh | bash
 #
 # Options:
-#   DAILY_VERSION - Install specific version (default: latest)
-#   DAILY_INSTALL_DIR - Installation directory (default: ~/.local/bin)
+#   DAYBOOK_VERSION - Install specific version (default: latest)
+#   DAYBOOK_INSTALL_DIR - Installation directory (default: ~/.local/bin)
 #   GITHUB_TOKEN - GitHub token to bypass rate limiting
 
 set -euo pipefail
 
 # Configuration
-REPO="oanakiaja/claude-daily"
-BINARY_NAME="daily"
+REPO="Vikaspogu/daybook"
+BINARY_NAME="daybook"
 DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
 
 # Colors
@@ -109,19 +109,21 @@ get_latest_version() {
 }
 
 # Download and install binary
-install_daily() {
+install_daybook() {
     local platform="$1"
     local version="$2"
     local install_dir="$3"
 
     local artifact_name="${BINARY_NAME}-${platform}"
+    local target_name="${BINARY_NAME}"
     if [[ "$platform" == "windows"* ]]; then
         artifact_name="${artifact_name}.exe"
+        target_name="${target_name}.exe"
     fi
 
     local download_url="https://github.com/${REPO}/releases/download/${version}/${artifact_name}"
 
-    info "Downloading Daily ${version} for ${platform}..."
+    info "Downloading Daybook ${version} for ${platform}..."
     info "URL: ${download_url}"
 
     # Create temp directory
@@ -151,10 +153,11 @@ install_daily() {
     mkdir -p "$install_dir"
 
     # Move to install directory
-    local target="${install_dir}/${BINARY_NAME}"
+    local target="${install_dir}/${target_name}"
     mv "$tmp_file" "$target"
+    INSTALLED_PATH="${target}"
 
-    success "Installed Daily to ${target}"
+    success "Installed Daybook to ${target}"
 }
 
 # Run post-install setup
@@ -162,7 +165,7 @@ post_install() {
     local install_dir="$1"
 
     echo ""
-    success "Daily has been installed successfully!"
+    success "Daybook has been installed successfully!"
     echo ""
 
     # Check if directory is in PATH
@@ -180,11 +183,13 @@ post_install() {
         echo ""
     fi
 
-    # Run daily init (interactive by default)
-    echo ""
-    info "Running initial setup..."
-    echo ""
-    "${install_dir}/${BINARY_NAME}" init
+    # Interactive setup only when stdin is a tty (curl | bash is not)
+    if [[ -t 0 ]]; then
+        info "Running initial setup..."
+        "${INSTALLED_PATH}" init
+    else
+        info "Run '${INSTALLED_PATH} init' to set up daybook on this machine."
+    fi
 
     echo ""
     echo "For more information, visit:"
@@ -194,8 +199,8 @@ post_install() {
 main() {
     echo ""
     echo "  ╔═══════════════════════════════════════════════════╗"
-    echo "  ║          Daily Installation Script                ║"
-    echo "  ║    Context Archive System for Claude Code         ║"
+    echo "  ║          Daybook Installation Script              ║"
+    echo "  ║    Cross-runtime work journal for agent sessions  ║"
     echo "  ╚═══════════════════════════════════════════════════╝"
     echo ""
 
@@ -205,7 +210,7 @@ main() {
     info "Detected platform: ${platform}"
 
     # Get version
-    local version="${DAILY_VERSION:-}"
+    local version="${DAYBOOK_VERSION:-}"
     if [[ -z "$version" ]]; then
         info "Fetching latest version..."
         version=$(get_latest_version) || true
@@ -214,17 +219,17 @@ main() {
             exit 1
         fi
         if [[ -z "$version" ]]; then
-            error "Failed to get latest version. Please specify DAILY_VERSION."
+            error "Failed to get latest version. Please specify DAYBOOK_VERSION."
         fi
     fi
     info "Version: ${version}"
 
     # Get install directory
-    local install_dir="${DAILY_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
+    local install_dir="${DAYBOOK_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
     info "Install directory: ${install_dir}"
 
     # Install
-    install_daily "$platform" "$version" "$install_dir"
+    install_daybook "$platform" "$version" "$install_dir"
 
     # Post-install instructions (includes PATH check)
     post_install "$install_dir"

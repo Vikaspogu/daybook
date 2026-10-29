@@ -31,14 +31,14 @@ Every session holds valuable insights — problem-solving patterns, workflow opt
 ### One-line Install (Recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/oanakiaja/claude-daily/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Vikaspogu/daybook/main/scripts/install.sh | bash
 ```
 
 ### Build from Source
 
 ```bash
-git clone https://github.com/oanakiaja/claude-daily.git
-cd claude-daily
+git clone https://github.com/Vikaspogu/daybook.git
+cd daybook
 cargo install --path .
 ```
 
