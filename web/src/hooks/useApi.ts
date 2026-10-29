@@ -286,13 +286,26 @@ export function useApi() {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch(`${API_BASE}${endpoint}`, {
-        headers: {
-          'Content-Type': 'application/json',
-          ...options.headers,
-        },
-        ...options,
-      })
+      const fetchWithAuth = (token: string | null, headers: Record<string, string>) =>
+        fetch(`${API_BASE}${endpoint}`, {
+          ...options,
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token ?? ''}`,
+            ...options.headers,
+            ...headers,
+          },
+        })
+
+      let res = await fetchWithAuth(localStorage.getItem('daybook_token'), {})
+      if (res.status === 401) {
+        // ponytail: window.prompt gate — replace with a login screen if the dashboard is ever shared
+        const token = window.prompt('Daybook: enter your ingest token (dbk_...)')
+        if (token) {
+          res = await fetchWithAuth(token.trim(), {})
+          if (res.ok) localStorage.setItem('daybook_token', token.trim())
+        }
+      }
       const data: ApiResponse<T> = await res.json()
       if (!data.success) {
         throw new Error(data.error || 'Request failed')

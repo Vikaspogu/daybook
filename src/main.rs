@@ -98,6 +98,7 @@ async fn main() -> Result<()> {
             list,
             revoke,
             label,
-        } => cli::commands::token::run(list, revoke, label),
+            value,
+        } => cli::commands::token::run(list, revoke, label, value),
     }
 }

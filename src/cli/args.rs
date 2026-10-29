@@ -59,6 +59,13 @@ pub enum Commands {
         /// Label for a newly minted token (default: machine hostname)
         #[arg(long)]
         label: Option<String>,
+
+        /// Use a known token value (dbk_... 68 hex chars) instead of minting a
+        /// random one. For GitOps init containers: ensures the token from the
+        /// secret store exists in the ledger. Idempotent (upsert by label).
+        /// Reads DAYBOOK_TOKEN_VALUE from the environment when --value is absent.
+        #[arg(long, requires = "label", conflicts_with_all = ["list", "revoke"], env = "DAYBOOK_TOKEN_VALUE")]
+        value: Option<String>,
     },
 
     /// View archives (interactive date selection if no date specified)

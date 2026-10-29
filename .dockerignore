@@ -1,0 +1,10 @@
+target/
+web/node_modules/
+web/dist/
+.git/
+node_modules/
+site/
+assets/
+.env*
+*.db*
+.claude/

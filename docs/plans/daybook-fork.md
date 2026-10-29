@@ -141,7 +141,7 @@ Follows the home-ops AGENTS.md application pattern exactly:
   - [ ] Seed a fixture ledger with known values; stats tests assert expected totals, not just field presence, covering every promised metric: sessions/day, tokens, cost, friction distribution, test runs/day, thrash, interruptions, cache-hit rate, 30-day trend
 - **Verification Gate:** `daybook stats --week` (CLI against server) prints sessions/day, tokens, cost, friction distribution, tests/day, and matches the fixture's expected numbers.
 
-### [ ] Slice 5 (S5): Recall surfaces + auth
+### [x] Slice 5 (S5): Recall surfaces + auth
 
 - **Purpose / Done when:** both runtimes can query the ledger natively; auth is enforced everywhere including the browser.
 - **Blocked by:** S3
