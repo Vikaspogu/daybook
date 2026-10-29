@@ -215,7 +215,7 @@ impl DateInsights {
         );
 
         let mut model_distribution: Vec<(String, usize)> = day_model_counts.into_iter().collect();
-        model_distribution.sort_by(|a, b| b.1.cmp(&a.1));
+        model_distribution.sort_by_key(|a| std::cmp::Reverse(a.1));
 
         let day_summary = DayInsightSummary {
             total_sessions: session_names.len(),

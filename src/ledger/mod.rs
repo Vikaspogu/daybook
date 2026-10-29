@@ -829,7 +829,9 @@ mod tests {
         // stored value: the hash re-homes instead of hitting UNIQUE.
         let dir = tempfile::tempdir().unwrap();
         let ledger = Ledger::open(&dir.path().join("t.db3")).unwrap();
-        ledger.mint_token("vm-push", &sha256_hex(b"secret1")).unwrap();
+        ledger
+            .mint_token("vm-push", &sha256_hex(b"secret1"))
+            .unwrap();
         ledger.mint_token("vm", &sha256_hex(b"secret1")).unwrap();
         assert_eq!(
             ledger.check_token("secret1").unwrap().as_deref(),

@@ -468,7 +468,7 @@ fn parse_pi(path: &Path) -> Result<ParsedSession> {
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+        let Ok(entry) = serde_json::from_str::<Value>(line) else {
             continue;
         };
         if let Some(ts) = entry.get("timestamp").and_then(|t| t.as_str()) {
@@ -619,7 +619,7 @@ fn parse_codex(path: &Path) -> Result<ParsedSession> {
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+        let Ok(entry) = serde_json::from_str::<Value>(line) else {
             continue;
         };
         if let Some(ts) = entry.get("timestamp").and_then(|t| t.as_str()) {
@@ -690,14 +690,12 @@ fn parse_codex(path: &Path) -> Result<ParsedSession> {
                     });
                 }
             }
-            Some("turn_context") => {
-                if model.is_none() {
-                    model = entry
-                        .get("payload")
-                        .and_then(|p| p.get("model"))
-                        .and_then(|m| m.as_str())
-                        .map(String::from);
-                }
+            Some("turn_context") if model.is_none() => {
+                model = entry
+                    .get("payload")
+                    .and_then(|p| p.get("model"))
+                    .and_then(|m| m.as_str())
+                    .map(String::from);
             }
             _ => {}
         }

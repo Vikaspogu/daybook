@@ -38,11 +38,9 @@ pub async fn run(days: usize) -> Result<()> {
             .max()
             .unwrap_or(1);
         for stat in &data.daily_stats {
-            let bar_len = if max_count > 0 {
-                (stat.session_count * 30) / max_count
-            } else {
-                0
-            };
+            let bar_len = (stat.session_count * 30)
+                .checked_div(max_count)
+                .unwrap_or(0);
             let bar: String = "\u{2588}".repeat(bar_len);
             let digest_marker = if stat.has_digest { "\u{2713}" } else { " " };
             println!(

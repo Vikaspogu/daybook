@@ -5,11 +5,18 @@ use anyhow::Result;
 fn validate_token_value(v: &str) -> Result<()> {
     match v.strip_prefix("dbk_") {
         Some(body) if body.len() == 64 && body.bytes().all(|c| c.is_ascii_hexdigit()) => Ok(()),
-        _ => anyhow::bail!("--value must be a dbk_ token (68 hex chars; mint one with `daybook token`)"),
+        _ => anyhow::bail!(
+            "--value must be a dbk_ token (68 hex chars; mint one with `daybook token`)"
+        ),
     }
 }
 
-pub fn run(list: bool, revoke: Option<String>, label: Option<String>, value: Option<String>) -> Result<()> {
+pub fn run(
+    list: bool,
+    revoke: Option<String>,
+    label: Option<String>,
+    value: Option<String>,
+) -> Result<()> {
     let config = crate::config::load_config()?;
     let ledger = crate::ledger::Ledger::open(&config.server.db_path)?;
 
@@ -62,7 +69,9 @@ pub fn run(list: bool, revoke: Option<String>, label: Option<String>, value: Opt
         eprintln!("[daybook] Token '{label}' ensured in the ledger.");
     } else {
         println!("{secret}");
-        eprintln!("[daybook] Token '{label}' minted. Store it now — the secret is never shown again.");
+        eprintln!(
+            "[daybook] Token '{label}' minted. Store it now — the secret is never shown again."
+        );
     }
     Ok(())
 }

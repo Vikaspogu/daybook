@@ -239,7 +239,7 @@ where
         .into_iter()
         .map(|(name, count)| CategoryCount { name, count })
         .collect();
-    result.sort_by(|a, b| b.count.cmp(&a.count));
+    result.sort_by_key(|a| std::cmp::Reverse(a.count));
     result
 }
 
@@ -258,7 +258,7 @@ where
         .into_iter()
         .map(|(name, count)| CategoryCount { name, count })
         .collect();
-    result.sort_by(|a, b| b.count.cmp(&a.count));
+    result.sort_by_key(|a| std::cmp::Reverse(a.count));
     result
 }
 

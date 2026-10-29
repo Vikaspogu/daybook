@@ -127,7 +127,7 @@ pub fn aggregate_usage(
             total_cost_usd: cost,
         })
         .collect();
-    model_distribution.sort_by(|a, b| b.count.cmp(&a.count));
+    model_distribution.sort_by_key(|a| std::cmp::Reverse(a.count));
 
     let mut daily_usage: Vec<DailyUsage> = daily_map
         .into_values()
