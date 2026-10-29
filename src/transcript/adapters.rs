@@ -128,11 +128,14 @@ impl ParsedSession {
         // EN + ZH. ZH daily renders "你正在分析 {{date}}...", so only the
         // short prefix is stable; a real ZH session quoting it is the
         // accepted dev-only edge (same trade-off as a custom template).
-        const MARKERS: [&str; 4] = [
+        const MARKERS: [&str; 7] = [
             "You are analyzing a Claude Code session transcript",
             "You are extracting a reusable skill from a Claude Code session",
             "You are analyzing Claude Code sessions from",
             "你正在分析",
+            "你正在从一个 Claude Code 会话中提取可复用的技能",
+            "Generate a complete slash command file for Claude Code based on this session",
+            "基于此会话生成一个完整的 Claude Code 斜杠命令文件",
         ];
         // codex exec prepends AGENTS.md as a user message, so the prompt is
         // not always first — check the first few user messages.
