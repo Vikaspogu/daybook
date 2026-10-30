@@ -5,7 +5,7 @@ import { ThemeToggle } from './ThemeToggle'
 import { LanguageToggle } from './LanguageToggle'
 import { useLanguage } from '../contexts/LanguageContext'
 
-const TABS = ['/', '/insights', '/jobs', '/settings'] as const
+const TABS = ['/', '/insights', '/settings'] as const
 
 export function Layout() {
   const location = useLocation()
@@ -17,8 +17,7 @@ export function Layout() {
     const path = location.pathname
     if (path === '/' || path.startsWith('/day')) return 0
     if (path === '/insights') return 1
-    if (path === '/jobs') return 2
-    if (path === '/settings') return 3
+    if (path === '/settings') return 2
     return 0
   }, [location.pathname])
 
@@ -86,19 +85,6 @@ export function Layout() {
               }
             >
               {t('nav.insights')}
-            </NavLink>
-            <NavLink
-              to="/jobs"
-              className={({ isActive }) =>
-                cn(
-                  'text-sm transition-colors',
-                  isActive
-                    ? 'text-orange-500 dark:text-orange-400'
-                    : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
-                )
-              }
-            >
-              {t('nav.jobs')}
             </NavLink>
             <NavLink
               to="/settings"

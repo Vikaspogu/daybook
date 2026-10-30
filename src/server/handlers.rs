@@ -409,22 +409,52 @@ pub async fn get_daily_summary(
                     tally.join(", ")
                 )
             };
-            let raw_content = rows
-                .iter()
-                .map(|r| r.summary_md.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n---\n\n");
+            // Deterministic summary, no LLM on the pod: one insight card per
+            // session plus its "Potential Skills/Commands" hints collected as
+            // command cards. raw_content stays empty so the web UI renders the
+            // structured cards instead of a wall of raw markdown.
+            let mut insights = Vec::new();
+            let mut commands = Vec::new();
+            for r in &rows {
+                let title = session_display_title(r);
+                let preview = summary_preview(&r.summary_md);
+                let preview = if preview.chars().count() >= 400 {
+                    format!("{}...", preview.chars().take(400).collect::<String>())
+                } else {
+                    preview
+                };
+                if !preview.is_empty() {
+                    insights.push(SummaryCardDto {
+                        title: title.clone(),
+                        content: preview,
+                    });
+                }
+                if let Some(start) = r.summary_md.find("## Potential Skills/Commands\n") {
+                    let rest = &r.summary_md[start..];
+                    let end = rest.find("\n## ").map(|i| start + i).unwrap_or(r.summary_md.len());
+                    for line in r.summary_md[start..end].lines().skip(1) {
+                        let line = line.trim().trim_start_matches("- ").trim();
+                        if line.is_empty() || line.starts_with('#') {
+                            continue;
+                        }
+                        commands.push(SummaryCardDto {
+                            title: format!("{} — {}", r.project, line),
+                            content: line.to_string(),
+                        });
+                    }
+                }
+            }
             let summary = DailySummaryDto {
                 date: date.clone(),
                 overview,
                 session_count,
                 sessions,
-                insights: Vec::new(),
+                insights,
                 skills: Vec::new(),
-                commands: Vec::new(),
+                commands,
                 reflections: None,
                 tomorrow_focus: Vec::new(),
-                raw_content,
+                raw_content: String::new(),
                 file_path: String::new(),
             };
             Json(ApiResponse::success(summary))
@@ -452,11 +482,7 @@ pub async fn list_sessions(
                 .iter()
                 .map(|r| SessionBrief {
                     name: session_name(r),
-                    title: if r.title.is_empty() {
-                        r.session_id.clone()
-                    } else {
-                        r.title.clone()
-                    },
+                    title: session_display_title(r),
                     summary_preview: summary_preview(&r.summary_md),
                 })
                 .collect();
@@ -495,11 +521,7 @@ pub async fn get_session(
     match row {
         Some(r) => {
             let metadata = SessionMetadata {
-                title: if r.title.is_empty() {
-                    r.session_id.clone()
-                } else {
-                    r.title.clone()
-                },
+                title: session_display_title(&r),
                 date: date.clone(),
                 session_id: Some(r.session_id.clone()),
                 cwd: None,
@@ -773,7 +795,32 @@ fn split_session_name(name: &str) -> Option<(String, String)> {
     Some((machine.to_string(), session_id.to_string()))
 }
 
-/// First ~200 chars of the "## Summary" section for session list previews.
+/// Title from the transcript archive's frontmatter, if present.
+fn frontmatter_title(summary_md: &str) -> Option<String> {
+    if !summary_md.starts_with("---\n") {
+        return None;
+    }
+    for line in summary_md[4..].lines() {
+        if line.trim() == "---" {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("title: ") {
+            let t = rest.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn session_display_title(record: &crate::ledger::SessionBriefRow) -> String {
+    if record.title.trim().is_empty() {
+        frontmatter_title(&record.summary_md).unwrap_or_else(|| record.session_id.clone())
+    } else {
+        record.title.trim().to_string()
+    }
+}
 fn summary_preview(summary_md: &str) -> String {
     let Some(start) = summary_md.find("## Summary\n").map(|i| i + 11) else {
         return String::new();

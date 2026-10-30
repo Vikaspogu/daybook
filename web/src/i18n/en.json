@@ -1,9 +1,7 @@
 {
   "nav.archives": "Archives",
   "nav.insights": "Insights",
-  "nav.jobs": "Jobs",
   "nav.settings": "Settings",
-
   "welcome.title": "Daily",
   "welcome.titleSuffix": "Archives",
   "welcome.subtitle": "{count} {dayWord} of Claude Code sessions",
@@ -16,7 +14,6 @@
   "welcome.today": "Today",
   "welcome.autoSummarizing": "Auto-summarizing {count} missed session{plural}",
   "welcome.autoSummarizingDesc": "Sessions without session_end hook are being summarized automatically",
-
   "weekdays.mon": "Mon",
   "weekdays.tue": "Tue",
   "weekdays.wed": "Wed",
@@ -24,7 +21,6 @@
   "weekdays.fri": "Fri",
   "weekdays.sat": "Sat",
   "weekdays.sun": "Sun",
-
   "dayDetail.breadcrumbArchives": "Archives",
   "dayDetail.tabSummary": "Summary",
   "dayDetail.tabFocus": "Focus",
@@ -55,25 +51,21 @@
   "dayDetail.regenerated": "Daily summary regenerated successfully!",
   "dayDetail.regenerationSlow": "Regeneration is taking longer than expected. Please refresh the page later.",
   "dayDetail.friction": "Friction:",
-
   "dayDetail.skill": "Skill",
   "dayDetail.cmd": "Cmd",
   "dayDetail.installing": "Installing...",
   "dayDetail.installed": "Installed",
   "dayDetail.install": "Install",
-
   "dayDetail.happy": "Happy",
   "dayDetail.satisfied": "Satisfied",
   "dayDetail.neutral": "Neutral",
   "dayDetail.frustrated": "Frustrated",
   "dayDetail.unknown": "Unknown",
-
   "sessionDetail.breadcrumbSessions": "Sessions",
   "sessionDetail.tabSummary": "Summary",
   "sessionDetail.tabConversation": "Conversation",
   "sessionDetail.copy": "Copy",
   "sessionDetail.copied": "Copied!",
-
   "chatView.noTranscript": "No transcript available for this session",
   "chatView.noMessages": "No conversation messages found",
   "chatView.loadMore": "Load more ({count} remaining)",
@@ -81,25 +73,12 @@
   "chatView.you": "You",
   "chatView.claude": "Claude",
   "chatView.result": "Result",
-
-  "jobs.title": "Jobs Monitor",
-  "jobs.running": "Running",
-  "jobs.completed": "Completed",
-  "jobs.noRunning": "No running jobs",
-  "jobs.noCompleted": "No completed jobs",
-  "jobs.kill": "Kill",
-  "jobs.started": "Started:",
-  "jobs.sessionEnd": "Session End",
-  "jobs.autoSummarize": "Auto Summarize",
-  "jobs.manual": "Manual",
-
   "settings.title": "Settings",
   "settings.subtitle": "Configure Daily options",
   "settings.general": "General",
   "settings.templates": "Templates",
   "settings.loading": "Loading...",
   "settings.saved": "Settings saved",
-
   "settings.nav.language": "Summary Language",
   "settings.nav.model": "Model",
   "settings.nav.features": "Features",
@@ -110,17 +89,14 @@
   "settings.nav.dailyTemplate": "Daily Template",
   "settings.nav.skillTemplate": "Skill Template",
   "settings.nav.commandTemplate": "Command Template",
-
   "settings.language.title": "Summary Language",
   "settings.language.desc": "Choose the language for AI-generated summaries and digests",
   "settings.language.english": "English",
   "settings.language.chinese": "Chinese / 中文",
-
   "settings.model.title": "Summarization Model",
   "settings.model.desc": "Choose the Claude model for generating summaries",
   "settings.model.sonnet": "Sonnet (smarter)",
   "settings.model.haiku": "Haiku (faster, cheaper)",
-
   "settings.features.title": "Features",
   "settings.features.dailySummary": "Enable Daily Summary",
   "settings.features.dailySummaryDesc": "Generate daily digest from session summaries",
@@ -136,18 +112,14 @@
   "settings.features.triggerOnShowDesc": "Check for missed sessions every time daily show is opened",
   "settings.features.inactiveThreshold": "Inactive Threshold",
   "settings.features.inactiveThresholdDesc": "Minutes of inactivity before a session is considered ended",
-
   "settings.digestTime.title": "Digest Time",
   "settings.digestTime.desc": "Time to auto-digest previous day's sessions (format: HH:MM)",
-
   "settings.author.title": "Author",
   "settings.author.desc": "Author name for archive metadata (optional)",
   "settings.author.placeholder": "Enter author name...",
-
   "settings.info.title": "Storage Info",
   "settings.info.storagePath": "Storage Path",
   "settings.info.cliHint": "Storage path can only be changed via CLI:",
-
   "template.useDefault": "Use Default",
   "template.custom": "Custom",
   "template.resetToDefault": "Reset to Default",
@@ -170,7 +142,6 @@
   "template.skillDesc": "Template for extracting reusable skills from session summaries",
   "template.commandTitle": "Command Extraction Template",
   "template.commandDesc": "Template for extracting slash commands from session summaries",
-
   "insights.title": "Insights",
   "insights.subtitle": "Work pattern analysis across your sessions",
   "insights.failed": "Failed to load insights data.",
@@ -194,7 +165,6 @@
   "insights.languages": "Languages",
   "insights.sessionTypes": "Session Types",
   "insights.noSessionDetails": "No session details available yet",
-
   "insights.trendAnalysis": "Trend Analysis",
   "insights.trendNoData": "Not enough data for trend analysis. Need at least 2 days of history.",
   "insights.trendSessions": "Sessions",
@@ -206,26 +176,21 @@
   "insights.weeklySessions": "Sessions",
   "insights.weeklyFriction": "Friction",
   "insights.weeklySuccess": "Success",
-
   "insights.problemAll": "All",
   "insights.problemFriction": "With Friction",
   "insights.problemNotAchieved": "Not Achieved",
   "insights.problemLowSatisfaction": "Low Satisfaction",
   "insights.problemSessionDetails": "Session Details",
   "insights.problemNoIssues": "No issues detected in this period",
-
   "insights.outcomeAchieved": "Achieved",
   "insights.outcomePartial": "Partial",
   "insights.outcomeNotAchieved": "Not Achieved",
-
   "insights.satisfactionHappy": "Happy",
   "insights.satisfactionSatisfied": "Satisfied",
   "insights.satisfactionNeutral": "Neutral",
   "insights.satisfactionFrustrated": "Frustrated",
-
   "theme.switchToLight": "Switch to light mode",
   "theme.switchToDark": "Switch to dark mode",
-
   "archive.title": "Archives",
   "archive.today": "Today",
   "archive.yesterday": "Yesterday",

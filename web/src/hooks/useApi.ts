@@ -40,20 +40,6 @@ export interface SessionDetail {
   file_path?: string
 }
 
-export interface Job {
-  id: string
-  task_name: string
-  status: string
-  status_type: 'running' | 'completed' | 'failed'
-  job_type: 'session_end' | 'auto_summarize' | 'manual'
-  started_at: string
-  elapsed: string
-}
-
-export interface DigestResponse {
-  message: string
-  session_count: number
-}
 
 export interface PromptTemplates {
   session_summary: string | null
@@ -337,27 +323,6 @@ export function useApi() {
     [request]
   )
 
-  const fetchJobs = useCallback(() => request<Job[]>('/jobs'), [request])
-
-  const fetchJob = useCallback(
-    (id: string) => request<Job>(`/jobs/${id}`),
-    [request]
-  )
-
-  const fetchJobLog = useCallback(
-    (id: string) => request<string>(`/jobs/${id}/log`),
-    [request]
-  )
-
-  const killJob = useCallback(
-    (id: string) => request<void>(`/jobs/${id}/kill`, { method: 'POST' }),
-    [request]
-  )
-
-  const triggerDigest = useCallback(
-    (date: string) => request<DigestResponse>(`/dates/${date}/digest`, { method: 'POST' }),
-    [request]
-  )
 
   const fetchConfig = useCallback(() => request<Config>('/config'), [request])
 
@@ -409,11 +374,6 @@ export function useApi() {
     fetchDailySummary,
     fetchSessions,
     fetchSession,
-    fetchJobs,
-    fetchJob,
-    fetchJobLog,
-    killJob,
-    triggerDigest,
     fetchConfig,
     updateConfig,
     fetchDefaultTemplates,

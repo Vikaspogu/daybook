@@ -14,7 +14,7 @@ import {
   subMonths,
 } from 'date-fns'
 import { useApi } from '../hooks/useApi'
-import type { DateItem, DailySummary, Job, DailyUsageData } from '../hooks/useApi'
+import type { DateItem, DailySummary } from '../hooks/useApi'
 import { cn } from '../lib/utils'
 import { formatCost } from '../components/UsageCharts'
 import { useLanguage } from '../contexts/LanguageContext'
@@ -24,10 +24,9 @@ export function Welcome() {
   const [summaries, setSummaries] = useState<Map<string, DailySummary>>(new Map())
   const [dailyCostMap, setDailyCostMap] = useState<Map<string, number>>(new Map())
   const [loading, setLoading] = useState(true)
-  const [autoSummarizeJobs, setAutoSummarizeJobs] = useState<Job[]>([])
   const [currentMonth, setCurrentMonth] = useState(new Date())
   const [slideDirection, setSlideDirection] = useState<'left' | 'right'>('left')
-  const { fetchDates, fetchDailySummary, fetchJobs, fetchInsights } = useApi()
+  const { fetchDates, fetchDailySummary, fetchInsights } = useApi()
   const navigate = useNavigate()
   const { t } = useLanguage()
 
@@ -84,25 +83,6 @@ export function Welcome() {
 
     loadData()
   }, [fetchDates, fetchDailySummary, fetchInsights])
-
-  // Poll for auto-summarize jobs
-  useEffect(() => {
-    const loadJobs = async () => {
-      try {
-        const jobs = await fetchJobs()
-        const runningAutoJobs = jobs.filter(
-          (j) => j.job_type === 'auto_summarize' && j.status_type === 'running'
-        )
-        setAutoSummarizeJobs(runningAutoJobs)
-      } catch {
-        // Silently ignore job fetch errors
-      }
-    }
-
-    loadJobs()
-    const interval = setInterval(loadJobs, 3000)
-    return () => clearInterval(interval)
-  }, [fetchJobs])
 
   const archiveMap = useMemo(() => {
     const map = new Map<string, DateItem>()
@@ -229,33 +209,6 @@ export function Welcome() {
         </p>
       </div>
 
-      {/* Auto-summarize notification */}
-      <AnimatePresence>
-        {autoSummarizeJobs.length > 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            className="mb-6 p-4 rounded-lg border border-blue-500/30 bg-blue-500/10"
-          >
-            <div className="flex items-center gap-3">
-              <span className="text-blue-400 text-lg">🤖</span>
-              <div className="flex-1">
-                <p className="text-blue-400 font-medium">
-                  {t('welcome.autoSummarizing', {
-                    count: autoSummarizeJobs.length,
-                    plural: autoSummarizeJobs.length > 1 ? 's' : '',
-                  })}
-                </p>
-                <p className="text-blue-400/70 text-sm mt-1">
-                  {t('welcome.autoSummarizingDesc')}
-                </p>
-              </div>
-              <div className="size-2 bg-blue-400 rounded-full animate-pulse" />
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
       {/* Month navigation */}
       <div className="flex items-center justify-between mb-4">

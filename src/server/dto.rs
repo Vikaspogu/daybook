@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::jobs::{JobInfo, JobStatus, JobType};
 
 /// Generic API response wrapper
 #[derive(Serialize)]
@@ -89,61 +88,11 @@ pub struct SessionMetadata {
     pub duration: Option<String>,
 }
 
-/// Job DTO for API responses
-#[derive(Serialize, Deserialize, Clone)]
-pub struct JobDto {
-    pub id: String,
-    pub pid: u32,
-    pub task_name: String,
-    pub status: String,
-    pub status_type: String,
-    pub job_type: String,
-    pub started_at: String,
-    pub finished_at: Option<String>,
-    pub elapsed: String,
-}
-
-impl From<JobInfo> for JobDto {
-    fn from(info: JobInfo) -> Self {
-        let (status, status_type) = match &info.status {
-            JobStatus::Running => ("Running".to_string(), "running".to_string()),
-            JobStatus::Completed => ("Completed".to_string(), "completed".to_string()),
-            JobStatus::Failed { error } => (format!("Failed: {}", error), "failed".to_string()),
-        };
-
-        let job_type = match &info.job_type {
-            JobType::SessionEnd => "session_end".to_string(),
-            JobType::AutoSummarize => "auto_summarize".to_string(),
-            JobType::Manual => "manual".to_string(),
-        };
-
-        // Compute elapsed before moving fields
-        let elapsed = info.elapsed_human();
-        let started_at = info.started_at.format("%Y-%m-%d %H:%M:%S").to_string();
-        let finished_at = info
-            .finished_at
-            .map(|t: chrono::DateTime<chrono::Local>| t.format("%Y-%m-%d %H:%M:%S").to_string());
-
-        Self {
-            id: info.id,
-            pid: info.pid,
-            task_name: info.task_name,
-            status,
-            status_type,
-            job_type,
-            started_at,
-            finished_at,
-            elapsed,
-        }
-    }
-}
-
 /// WebSocket message types
 #[allow(dead_code)]
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WsMessage {
-    JobUpdated(JobDto),
     NewSession { date: String, name: String },
     DigestCompleted { date: String },
     Connected,
