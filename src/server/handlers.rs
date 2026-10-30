@@ -368,10 +368,36 @@ pub async fn list_dates(State(state): State<Arc<AppState>>) -> impl IntoResponse
         Ok(infos) => {
             let date_infos: Vec<DateInfo> = infos
                 .into_iter()
-                .map(|r| DateInfo {
-                    date: r.date,
-                    session_count: r.session_count as usize,
-                    has_digest: r.md_count > 0,
+                .map(|r| {
+                    // ponytail: one lean (project,title) query per date,
+                    // SQLite-local; collapses the web client's N+1 summary
+                    // fan-out into a single /api/dates call.
+                    match state.ledger.session_project_titles(&r.date) {
+                        Ok(pairs) => DateInfo {
+                            preview: format_day_overview(
+                                &pairs.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
+                            ),
+                            session_titles: pairs
+                                .iter()
+                                .filter(|(_, t)| !t.trim().is_empty())
+                                .take(3)
+                                .map(|(_, t)| t.trim().to_string())
+                                .collect(),
+                            date: r.date,
+                            session_count: r.session_count as usize,
+                            has_digest: r.md_count > 0,
+                        },
+                        Err(e) => {
+                            eprintln!("[daybook] list_dates preview failed for {}: {e:#}", r.date);
+                            DateInfo {
+                                preview: "Preview unavailable.".to_string(),
+                                session_titles: Vec::new(),
+                                date: r.date,
+                                session_count: r.session_count as usize,
+                                has_digest: r.md_count > 0,
+                            }
+                        }
+                    }
                 })
                 .collect();
             Json(ApiResponse::success(date_infos))
@@ -381,6 +407,64 @@ pub async fn list_dates(State(state): State<Arc<AppState>>) -> impl IntoResponse
             Json(ApiResponse::<Vec<DateInfo>>::error("internal server error"))
         }
     }
+}
+
+/// Deterministic one-line day overview, shared by the dates list and the
+/// day digest so both surfaces say the same thing.
+fn format_day_overview(projects: &[&str]) -> String {
+    if projects.is_empty() {
+        return "No sessions recorded yet.".to_string();
+    }
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for p in projects {
+        *counts.entry(p).or_default() += 1;
+    }
+    let tally: Vec<String> = counts.iter().map(|(p, n)| format!("{p} ({n})")).collect();
+    format!(
+        "{} session(s) across {} project(s): {}",
+        projects.len(),
+        counts.len(),
+        tally.join(", ")
+    )
+}
+
+/// Decorative/empty extraction-hint lines must not become cards
+/// (serves the "None identified in this session." noise visible in the Skills tab).
+fn is_junk_hint(line: &str) -> bool {
+    let t = line
+        .trim()
+        .trim_matches(|c: char| c == '*' || c == '_' || c == '`')
+        .trim();
+    if t.len() < 4 || t.starts_with('#') {
+        return true;
+    }
+    if t.chars().all(|c| matches!(c, '-' | '=' | '*' | ' ')) {
+        return true;
+    }
+    let lower = t.to_lowercase();
+    lower.starts_with("none identified")
+        || lower.starts_with("(none")
+        || lower == "none"
+        || lower == "none."
+        || lower.starts_with("none found")
+        || lower.starts_with("n/a")
+        || lower.contains("archived by daily context archive system")
+}
+
+/// "1h 23m" from two RFC3339 timestamps; None when either is missing/unparseable.
+fn session_duration(started: Option<&str>, ended: Option<&str>) -> Option<String> {
+    let s = chrono::DateTime::parse_from_rfc3339(started?).ok()?;
+    let e = chrono::DateTime::parse_from_rfc3339(ended?).ok()?;
+    let secs = (e - s).num_seconds();
+    if secs < 0 {
+        return None;
+    }
+    let mins = secs / 60;
+    Some(if mins >= 60 {
+        format!("{}h {}m", mins / 60, mins % 60)
+    } else {
+        format!("{mins}m")
+    })
 }
 
 /// Get daily summary for a specific date, synthesized from the ledger's
@@ -393,22 +477,8 @@ pub async fn get_daily_summary(
         Ok(rows) => {
             let session_count = rows.len();
             let sessions: Vec<String> = rows.iter().map(session_name).collect();
-            let mut projects: std::collections::BTreeMap<&str, usize> =
-                std::collections::BTreeMap::new();
-            for r in &rows {
-                *projects.entry(r.project.as_str()).or_default() += 1;
-            }
-            let overview = if session_count == 0 {
-                "No sessions recorded yet.".to_string()
-            } else {
-                let tally: Vec<String> =
-                    projects.iter().map(|(p, n)| format!("{p} ({n})")).collect();
-                format!(
-                    "{session_count} session(s) across {} project(s): {}",
-                    projects.len(),
-                    tally.join(", ")
-                )
-            };
+            let overview =
+                format_day_overview(&rows.iter().map(|r| r.project.as_str()).collect::<Vec<_>>());
             // Deterministic summary, no LLM on the pod: one insight card per
             // session plus its "Potential Skills/Commands" hints collected as
             // command cards. raw_content stays empty so the web UI renders the
@@ -437,7 +507,7 @@ pub async fn get_daily_summary(
                         .unwrap_or(r.summary_md.len());
                     for line in r.summary_md[start..end].lines().skip(1) {
                         let line = line.trim().trim_start_matches("- ").trim();
-                        if line.is_empty() || line.starts_with('#') {
+                        if is_junk_hint(line) {
                             continue;
                         }
                         commands.push(SummaryCardDto {
@@ -487,6 +557,11 @@ pub async fn list_sessions(
                     name: session_name(r),
                     title: session_display_title(r),
                     summary_preview: summary_preview(&r.summary_md),
+                    runtime: r.runtime.clone(),
+                    project: r.project.clone(),
+                    started_utc: r.started_utc.clone(),
+                    ended_utc: r.ended_utc.clone(),
+                    cost_usd: r.cost_usd,
                 })
                 .collect();
             Json(ApiResponse::success(session_briefs))
@@ -529,7 +604,13 @@ pub async fn get_session(
                 session_id: Some(r.session_id.clone()),
                 cwd: None,
                 git_branch: r.git_branch.clone(),
-                duration: None,
+                duration: session_duration(r.started_utc.as_deref(), r.ended_utc.as_deref()),
+                runtime: Some(r.runtime.clone()),
+                project: Some(r.project.clone()),
+                machine: Some(r.machine.clone()),
+                started_utc: r.started_utc.clone(),
+                ended_utc: r.ended_utc.clone(),
+                cost_usd: r.cost_usd,
             };
             let detail = SessionDetailDto {
                 name,
@@ -860,6 +941,50 @@ fn map_session_usage_dto(u: crate::usage::types::SessionUsage) -> SessionUsageDt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn junk_hint_filters_decorators_and_empty_extractions() {
+        assert!(is_junk_hint(""));
+        assert!(is_junk_hint("---"));
+        assert!(is_junk_hint("# heading"));
+        assert!(is_junk_hint("None identified in this session."));
+        assert!(is_junk_hint("None."));
+        assert!(is_junk_hint("None found."));
+        assert!(is_junk_hint("(none)"));
+        assert!(is_junk_hint("*Archived by Daily Context Archive System*"));
+        assert!(!is_junk_hint(
+            "Used rg to search the ledger for stale entries"
+        ));
+        assert!(!is_junk_hint(
+            "Ran `kubectl rollout restart deploy/daybook`"
+        ));
+    }
+
+    #[test]
+    fn session_duration_formats_edges() {
+        assert_eq!(
+            session_duration(Some("2026-10-30T10:00:00Z"), Some("2026-10-30T11:23:00Z")),
+            Some("1h 23m".to_string())
+        );
+        assert_eq!(
+            session_duration(Some("2026-10-30T10:00:00Z"), Some("2026-10-30T10:45:00Z")),
+            Some("45m".to_string())
+        );
+        assert_eq!(
+            session_duration(Some("2026-10-30T10:00:00Z"), Some("2026-10-30T10:00:30Z")),
+            Some("0m".to_string())
+        );
+        // ended before started (even sub-minute) is not a duration
+        assert_eq!(
+            session_duration(Some("2026-10-30T10:00:30Z"), Some("2026-10-30T10:00:00Z")),
+            None
+        );
+        assert_eq!(
+            session_duration(Some("garbage"), Some("2026-10-30T11:00:00Z")),
+            None
+        );
+        assert_eq!(session_duration(None, Some("2026-10-30T11:00:00Z")), None);
+    }
 
     fn rec() -> SessionRecord {
         SessionRecord {

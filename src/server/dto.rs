@@ -34,16 +34,26 @@ pub struct DateInfo {
     pub date: String,
     pub session_count: usize,
     pub has_digest: bool,
+    /// One-line overview so the archive list doesn't need a per-date fetch.
+    pub preview: String,
+    /// Up to 3 session display titles for the day feed strip.
+    pub session_titles: Vec<String>,
 }
-
 /// Brief session info for listing
 #[derive(Serialize)]
 pub struct SessionBrief {
     pub name: String,
     pub title: String,
     pub summary_preview: String,
+    pub runtime: String,
+    pub project: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_utc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_utc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
-
 /// A single card within a daily summary section
 #[derive(Serialize)]
 pub struct SummaryCardDto {
@@ -85,8 +95,13 @@ pub struct SessionMetadata {
     pub cwd: Option<String>,
     pub git_branch: Option<String>,
     pub duration: Option<String>,
+    pub runtime: Option<String>,
+    pub project: Option<String>,
+    pub machine: Option<String>,
+    pub started_utc: Option<String>,
+    pub ended_utc: Option<String>,
+    pub cost_usd: Option<f64>,
 }
-
 /// WebSocket message types
 #[allow(dead_code)]
 #[derive(Serialize, Deserialize)]
