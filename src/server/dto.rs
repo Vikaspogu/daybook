@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-
 /// Generic API response wrapper
 #[derive(Serialize)]
 pub struct ApiResponse<T: Serialize> {

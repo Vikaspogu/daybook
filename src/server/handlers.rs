@@ -431,7 +431,10 @@ pub async fn get_daily_summary(
                 }
                 if let Some(start) = r.summary_md.find("## Potential Skills/Commands\n") {
                     let rest = &r.summary_md[start..];
-                    let end = rest.find("\n## ").map(|i| start + i).unwrap_or(r.summary_md.len());
+                    let end = rest
+                        .find("\n## ")
+                        .map(|i| start + i)
+                        .unwrap_or(r.summary_md.len());
                     for line in r.summary_md[start..end].lines().skip(1) {
                         let line = line.trim().trim_start_matches("- ").trim();
                         if line.is_empty() || line.starts_with('#') {
