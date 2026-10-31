@@ -377,12 +377,32 @@ pub async fn list_dates(State(state): State<Arc<AppState>>) -> impl IntoResponse
                             preview: format_day_overview(
                                 &pairs.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
                             ),
-                            session_titles: pairs
-                                .iter()
-                                .filter(|(_, t)| !t.trim().is_empty())
-                                .take(3)
-                                .map(|(_, t)| t.trim().to_string())
-                                .collect(),
+                            session_titles: {
+                                let cleaned: Vec<String> = pairs
+                                    .iter()
+                                    .map(|(_, t)| clean_session_title(t))
+                                    .filter(|t| !t.is_empty())
+                                    .collect();
+                                let signal: Vec<String> = cleaned
+                                    .iter()
+                                    .filter(|t| {
+                                        let l = t.to_lowercase();
+                                        !(l.starts_with("blocked ")
+                                            || l.ends_with(" blocked")
+                                            || l.contains("repository survey")
+                                            || l.contains("pong response")
+                                            || l.contains("pong-response")
+                                            || l.contains("review sub-agent"))
+                                    })
+                                    .take(3)
+                                    .cloned()
+                                    .collect();
+                                if signal.is_empty() {
+                                    cleaned.into_iter().take(3).collect()
+                                } else {
+                                    signal
+                                }
+                            },
                             date: r.date,
                             session_count: r.session_count as usize,
                             has_digest: r.md_count > 0,
@@ -477,28 +497,86 @@ pub async fn get_daily_summary(
         Ok(rows) => {
             let session_count = rows.len();
             let sessions: Vec<String> = rows.iter().map(session_name).collect();
-            let overview =
-                format_day_overview(&rows.iter().map(|r| r.project.as_str()).collect::<Vec<_>>());
-            // Deterministic summary, no LLM on the pod: one insight card per
-            // session plus its "Potential Skills/Commands" hints collected as
-            // command cards. raw_content stays empty so the web UI renders the
-            // structured cards instead of a wall of raw markdown.
-            let mut insights = Vec::new();
+
+            let mut work_count = 0usize;
+            let mut review_count = 0usize;
+            let mut blocked_count = 0usize;
+            let mut by_project: std::collections::BTreeMap<String, ProjectGainDto> =
+                std::collections::BTreeMap::new();
+            let mut review_fallbacks: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
+            let mut waste_map: std::collections::BTreeMap<(String, String), (usize, f64)> =
+                std::collections::BTreeMap::new();
             let mut commands = Vec::new();
+
             for r in &rows {
                 let title = session_display_title(r);
                 let preview = summary_preview(&r.summary_md);
-                let preview = if preview.chars().count() >= 400 {
-                    format!("{}...", preview.chars().take(400).collect::<String>())
-                } else {
-                    preview
-                };
-                if !preview.is_empty() {
-                    insights.push(SummaryCardDto {
-                        title: title.clone(),
-                        content: preview,
+                let files = extract_files_touched(&r.summary_md);
+                let (category, blocker_reason) = classify_session(&title, &preview, &files);
+                let cost = r.cost_usd.unwrap_or(0.0);
+
+                let entry = by_project
+                    .entry(r.project.clone())
+                    .or_insert_with(|| ProjectGainDto {
+                        project: r.project.clone(),
+                        ..Default::default()
                     });
+
+                match category {
+                    "work" => {
+                        work_count += 1;
+                        entry.work_count += 1;
+                        entry.total_cost_usd += cost;
+                        let takeaway = first_sentence(&preview);
+                        let line = if takeaway.is_empty() {
+                            title.clone()
+                        } else {
+                            format!("{title}: {takeaway}")
+                        };
+                        if entry.accomplishments.len() < 5 && !entry.accomplishments.contains(&line)
+                        {
+                            entry.accomplishments.push(line);
+                        }
+                        if let Some(dec) = extract_key_decision(&r.summary_md) {
+                            if entry.key_decisions.len() < 3 && !entry.key_decisions.contains(&dec)
+                            {
+                                entry.key_decisions.push(dec);
+                            }
+                        }
+                        for f in files {
+                            if entry.files_touched.len() < 8 && !entry.files_touched.contains(&f) {
+                                entry.files_touched.push(f);
+                            }
+                        }
+                    }
+                    "review" => {
+                        review_count += 1;
+                        entry.review_count += 1;
+                        entry.total_cost_usd += cost;
+                        let takeaway = first_sentence(&preview);
+                        let line = if takeaway.is_empty() {
+                            title.clone()
+                        } else {
+                            format!("{title}: {takeaway}")
+                        };
+                        let fb = review_fallbacks.entry(r.project.clone()).or_default();
+                        if fb.len() < 2 && !fb.contains(&line) {
+                            fb.push(line);
+                        }
+                    }
+                    _ => {
+                        blocked_count += 1;
+                        entry.blocked_count += 1;
+                        let reason = blocker_reason.unwrap_or_else(|| {
+                            "Blocked before execution (environment or permissions)".to_string()
+                        });
+                        let w = waste_map.entry((r.project.clone(), reason)).or_default();
+                        w.0 += 1;
+                        w.1 += cost;
+                    }
                 }
+
                 if let Some(start) = r.summary_md.find("## Potential Skills/Commands\n") {
                     let rest = &r.summary_md[start..];
                     let end = rest
@@ -517,10 +595,79 @@ pub async fn get_daily_summary(
                     }
                 }
             }
+
+            let mut project_gains: Vec<ProjectGainDto> = by_project
+                .into_values()
+                .filter_map(|mut p| {
+                    if p.accomplishments.is_empty() {
+                        if let Some(fb) = review_fallbacks.remove(&p.project) {
+                            p.accomplishments = fb;
+                        }
+                    }
+                    if p.work_count > 0 || p.review_count > 0 {
+                        Some(p)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            project_gains.sort_by(|a, b| {
+                b.work_count
+                    .cmp(&a.work_count)
+                    .then_with(|| b.review_count.cmp(&a.review_count))
+            });
+
+            // Keep `insights` populated with one card per project so API consumers
+            // reading `DailySummaryDto.insights` receive the synthesized project summary.
+            let insights: Vec<SummaryCardDto> = project_gains
+                .iter()
+                .map(|g| SummaryCardDto {
+                    title: g.project.clone(),
+                    content: g
+                        .accomplishments
+                        .iter()
+                        .map(|a| format!("- {a}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                })
+                .collect();
+
+            let mut waste_alerts: Vec<WasteAlertDto> = waste_map
+                .into_iter()
+                .map(|((project, reason), (count, cost_usd))| {
+                    let hint = if reason.contains("bwrap") || reason.contains("RTM_NEWADDR") {
+                        "Background survey cannot create a bubblewrap loopback interface inside this container. Disable or reconfigure the background survey job in this environment.".to_string()
+                    } else if reason.contains("PONG") {
+                        "Automated CLI connectivity probe; safe to ignore.".to_string()
+                    } else if reason.contains("403") || reason.contains("model_access_denied") {
+                        "API key lacks access to the configured model; update the model in agent settings.".to_string()
+                    } else {
+                        "Session exited before completing work due to environment or permission constraints.".to_string()
+                    };
+                    WasteAlertDto {
+                        project,
+                        count,
+                        cost_usd,
+                        reason,
+                        hint,
+                    }
+                })
+                .collect();
+            waste_alerts.sort_by(|a, b| b.count.cmp(&a.count));
+
+            let overview = format_day_overview(
+                &rows.iter().map(|r| r.project.as_str()).collect::<Vec<_>>(),
+            );
+
             let summary = DailySummaryDto {
                 date: date.clone(),
                 overview,
                 session_count,
+                work_count,
+                review_count,
+                blocked_count,
+                project_gains,
+                waste_alerts,
                 sessions,
                 insights,
                 skills: Vec::new(),
@@ -548,22 +695,46 @@ pub async fn list_sessions(
 ) -> impl IntoResponse {
     match state.ledger.session_briefs(&date) {
         Ok(rows) => {
-            let session_briefs: Vec<SessionBrief> = rows
-                // ponytail: session_briefs loads full summary_md per row; fine at
-                // tens of sessions/date — a SQL substr would break "## Summary"
-                // section semantics. Revisit if dates grow past hundreds.
+            let mut session_briefs: Vec<SessionBrief> = rows
                 .iter()
-                .map(|r| SessionBrief {
-                    name: session_name(r),
-                    title: session_display_title(r),
-                    summary_preview: summary_preview(&r.summary_md),
-                    runtime: r.runtime.clone(),
-                    project: r.project.clone(),
-                    started_utc: r.started_utc.clone(),
-                    ended_utc: r.ended_utc.clone(),
-                    cost_usd: r.cost_usd,
+                .map(|r| {
+                    let title = session_display_title(r);
+                    let preview = summary_preview(&r.summary_md);
+                    let files = extract_files_touched(&r.summary_md);
+                    let duration =
+                        session_duration(r.started_utc.as_deref(), r.ended_utc.as_deref());
+                    let (category, blocker_reason) = classify_session(&title, &preview, &files);
+                    SessionBrief {
+                        name: session_name(r),
+                        title,
+                        summary_preview: preview,
+                        runtime: r.runtime.clone(),
+                        project: r.project.clone(),
+                        started_utc: r.started_utc.clone(),
+                        ended_utc: r.ended_utc.clone(),
+                        duration,
+                        cost_usd: r.cost_usd,
+                        category: category.to_string(),
+                        key_decision: if category == "work" {
+                            extract_key_decision(&r.summary_md)
+                        } else {
+                            None
+                        },
+                        files_touched: if category == "work" {
+                            files
+                        } else {
+                            Vec::new()
+                        },
+                        blocker_reason,
+                    }
                 })
                 .collect();
+            // Order: real work first, then reviews, then blocked noise
+            session_briefs.sort_by_key(|s| match s.category.as_str() {
+                "work" => 0u8,
+                "review" => 1u8,
+                _ => 2u8,
+            });
             Json(ApiResponse::success(session_briefs))
         }
         Err(e) => {
@@ -879,6 +1050,37 @@ fn split_session_name(name: &str) -> Option<(String, String)> {
     Some((machine.to_string(), session_id.to_string()))
 }
 
+/// Clean raw session titles: strip surrounding quotes, strip leading HH_MM- / HH:MM-
+/// timestamps, and humanize slug-only titles ("00_06-improve-cron-guidance" -> "Improve cron guidance").
+fn clean_session_title(raw: &str) -> String {
+    let mut s = raw.trim().trim_matches(['"', '\'']).trim();
+    if s.len() > 6 {
+        let bytes = s.as_bytes();
+        if bytes[0].is_ascii_digit()
+            && bytes[1].is_ascii_digit()
+            && (bytes[2] == b'_' || bytes[2] == b':' || bytes[2] == b'-')
+            && bytes[3].is_ascii_digit()
+            && bytes[4].is_ascii_digit()
+            && (bytes[5] == b'-' || bytes[5] == b'_' || bytes[5] == b' ')
+        {
+            s = s[6..].trim();
+        }
+    }
+    if s.is_empty() {
+        return String::new();
+    }
+    if !s.contains(' ') && (s.contains('-') || s.contains('_')) {
+        let words = s.replace(['-', '_'], " ");
+        let mut chars = words.chars();
+        match chars.next() {
+            Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+            None => words,
+        }
+    } else {
+        s.to_string()
+    }
+}
+
 /// Title from the transcript archive's frontmatter, if present.
 fn frontmatter_title(summary_md: &str) -> Option<String> {
     if !summary_md.starts_with("---\n") {
@@ -889,9 +1091,9 @@ fn frontmatter_title(summary_md: &str) -> Option<String> {
             break;
         }
         if let Some(rest) = line.strip_prefix("title: ") {
-            let t = rest.trim();
+            let t = clean_session_title(rest);
             if !t.is_empty() {
-                return Some(t.to_string());
+                return Some(t);
             }
         }
     }
@@ -899,28 +1101,189 @@ fn frontmatter_title(summary_md: &str) -> Option<String> {
 }
 
 fn session_display_title(record: &crate::ledger::SessionBriefRow) -> String {
-    if record.title.trim().is_empty() {
+    let raw = if record.title.trim().is_empty() {
         frontmatter_title(&record.summary_md).unwrap_or_else(|| record.session_id.clone())
     } else {
-        record.title.trim().to_string()
+        clean_session_title(&record.title)
+    };
+    if raw.is_empty() {
+        record.session_id.clone()
+    } else {
+        raw
     }
 }
-fn summary_preview(summary_md: &str) -> String {
-    let Some(start) = summary_md.find("## Summary\n").map(|i| i + 11) else {
+
+fn extract_section(summary_md: &str, heading: &str) -> String {
+    let marker = format!("## {heading}\n");
+    let Some(start) = summary_md.find(&marker).map(|i| i + marker.len()) else {
         return String::new();
     };
     let end = summary_md[start..]
         .find("\n## ")
         .map(|i| start + i)
         .unwrap_or(summary_md.len());
-    let text = summary_md[start..end].trim();
-    if text.chars().count() > 200 {
-        format!("{}...", text.chars().take(200).collect::<String>())
+    summary_md[start..end].trim().to_string()
+}
+
+fn summary_preview(summary_md: &str) -> String {
+    let text = extract_section(summary_md, "Summary");
+    if text.chars().count() > 220 {
+        format!("{}...", text.chars().take(220).collect::<String>())
     } else {
-        text.to_string()
+        text
     }
 }
 
+fn first_sentence(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
+    if let Some(idx) = first_line.find(". ") {
+        format!("{}.", &first_line[..idx])
+    } else {
+        first_line.to_string()
+    }
+}
+
+fn extract_key_decision(summary_md: &str) -> Option<String> {
+    let sec = extract_section(summary_md, "Key Decisions & Trade-offs");
+    for line in sec.lines() {
+        let cleaned = line
+            .trim()
+            .trim_start_matches("- ")
+            .trim_start_matches("* ")
+            .trim();
+        if is_junk_hint(cleaned) {
+            continue;
+        }
+        let lower = cleaned.to_lowercase();
+        if lower.starts_with("no repository")
+            || lower.starts_with("no code")
+            || lower.starts_with("no product")
+            || lower.starts_with("no files")
+        {
+            continue;
+        }
+        let out = if cleaned.chars().count() > 220 {
+            format!("{}...", cleaned.chars().take(220).collect::<String>())
+        } else {
+            cleaned.to_string()
+        };
+        return Some(out);
+    }
+    None
+}
+
+fn normalize_display_path(raw: &str) -> String {
+    let trimmed = raw.trim().trim_start_matches("./");
+    if let Some((_, after_repos)) = trimmed.split_once("/git-repos/") {
+        return after_repos.to_string();
+    }
+    if trimmed.starts_with('/') {
+        let parts: Vec<&str> = trimmed.split('/').filter(|p| !p.is_empty()).collect();
+        if parts.len() > 3 {
+            return parts[parts.len() - 3..].join("/");
+        }
+    }
+    trimmed.to_string()
+}
+
+fn extract_files_touched(summary_md: &str) -> Vec<String> {
+    let sec = extract_section(summary_md, "Code Changes");
+    let mut files = Vec::new();
+    for line in sec.lines() {
+        let trimmed = line.trim();
+        if is_junk_hint(trimmed) {
+            continue;
+        }
+        let mut rest = trimmed;
+        while let Some(open) = rest.find('`') {
+            let after_open = &rest[open + 1..];
+            let Some(close) = after_open.find('`') else {
+                break;
+            };
+            let candidate = after_open[..close].trim();
+            rest = &after_open[close + 1..];
+            if !candidate.is_empty()
+                && !candidate.contains(' ')
+                && (candidate.contains('/') || candidate.contains('.'))
+                && !candidate.starts_with("http")
+            {
+                let clean = normalize_display_path(candidate);
+                if !files.iter().any(|f| f == &clean) {
+                    files.push(clean);
+                    if files.len() >= 6 {
+                        return files;
+                    }
+                }
+            }
+        }
+    }
+    files
+}
+
+fn classify_session(
+    title: &str,
+    summary_preview_text: &str,
+    files_touched: &[String],
+) -> (&'static str, Option<String>) {
+    // Any session that modified code is shipped work, never a blocked survey or read-only review.
+    if !files_touched.is_empty() {
+        return ("work", None);
+    }
+
+    let lower_title = title.to_lowercase();
+    let preview = summary_preview_text.to_lowercase();
+
+    if (preview.contains("bwrap:") || preview.contains("rtm_newaddr"))
+        && (preview.contains("operation not permitted")
+            || preview.contains("could not")
+            || lower_title.contains("blocked"))
+    {
+        return (
+            "blocked",
+            Some("Sandbox loopback error (bwrap: Failed RTM_NEWADDR: Operation not permitted)".to_string()),
+        );
+    }
+    if lower_title.contains("pong response")
+        || lower_title.contains("pong-response")
+        || lower_title.contains("exact pong")
+        || lower_title.contains("stdin pong")
+    {
+        return (
+            "blocked",
+            Some("Automated CLI connectivity probe (PONG)".to_string()),
+        );
+    }
+    if lower_title.starts_with("blocked ")
+        || lower_title.ends_with(" blocked")
+        || preview.contains("could not proceed because")
+        || preview.contains("could not verify any")
+        || preview.contains("never ran because")
+    {
+        let reason = if preview.contains("403") || preview.contains("model_access_denied") {
+            "Model access denied (403 key_model_access_denied)".to_string()
+        } else {
+            "Blocked before execution (environment or permissions)".to_string()
+        };
+        return ("blocked", Some(reason));
+    }
+
+    if lower_title.contains("code-review")
+        || lower_title.contains("code review")
+        || lower_title.contains("correctness review")
+        || lower_title.contains("review sub-agent")
+        || lower_title.ends_with(" review")
+        || preview.contains("review pass")
+        || preview.contains("three reviewers completed")
+    {
+        return ("review", None);
+    }
+
+    ("work", None)
+}
 /// Map a SessionUsage domain model to SessionUsageDto
 fn map_session_usage_dto(u: crate::usage::types::SessionUsage) -> SessionUsageDto {
     SessionUsageDto {
@@ -958,6 +1321,104 @@ mod tests {
         assert!(!is_junk_hint(
             "Ran `kubectl rollout restart deploy/daybook`"
         ));
+    }
+
+    #[test]
+    fn clean_title_and_classification_extract_signal_from_noise() {
+        assert_eq!(
+            clean_session_title("\"00_06-improve-cron-guidance\""),
+            "Improve cron guidance"
+        );
+        assert_eq!(
+            clean_session_title("00:01-hermes-cron-review"),
+            "Hermes cron review"
+        );
+        assert_eq!(
+            clean_session_title("Cron final code-review"),
+            "Cron final code-review"
+        );
+
+        let blocked_md = "## Summary\nThe session could not proceed because bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted.\n\n## Key Decisions & Trade-offs\n- No repository or memory conclusions were made.\n\n## Code Changes\n- None.";
+        let bfiles = extract_files_touched(blocked_md);
+        let (cat, reason) =
+            classify_session("Repository survey blocked", &summary_preview(blocked_md), &bfiles);
+        assert_eq!(cat, "blocked");
+        assert!(reason.unwrap().contains("bwrap"));
+        assert_eq!(extract_key_decision(blocked_md), None);
+
+        // False-positive guard: a real work session titled "Fix blocked pipeline" or mentioning
+        // "operation not permitted" while modifying files must stay classified as "work".
+        let false_pos_md = "## Summary\nFixed the operation not permitted error in the blocked pipeline.\n\n## Code Changes\n- `src/pipeline.rs`: Fixed permissions.";
+        let fp_files = extract_files_touched(false_pos_md);
+        let (fp_cat, fp_reason) = classify_session(
+            "Fix blocked pipeline",
+            &summary_preview(false_pos_md),
+            &fp_files,
+        );
+        assert_eq!(fp_cat, "work");
+        assert!(fp_reason.is_none());
+
+        // 403 model_access_denied classification
+        let denied_md = "## Summary\nThe session could not proceed because 403 key_model_access_denied.\n\n## Code Changes\n- None.";
+        let (dcat, dreason) = classify_session(
+            "Blocked survey",
+            &summary_preview(denied_md),
+            &extract_files_touched(denied_md),
+        );
+        assert_eq!(dcat, "blocked");
+        assert!(dreason.unwrap().contains("403"));
+
+        let work_md = "## Summary\nUpdated important-mail cron to enforce strict allowlist.\n\n## Key Decisions & Trade-offs\n- Kept allowlist in important-mail.yaml instead of global config to avoid false positives.\n\n## Code Changes\n- `/home/agent/git-repos/hermes/cron/important-mail.yaml`: Added sender allowlist.";
+        let wfiles = extract_files_touched(work_md);
+        let (wcat, wreason) =
+            classify_session("Improve cron guidance", &summary_preview(work_md), &wfiles);
+        assert_eq!(wcat, "work");
+        assert!(wreason.is_none());
+        assert_eq!(
+            extract_key_decision(work_md).as_deref(),
+            Some("Kept allowlist in important-mail.yaml instead of global config to avoid false positives.")
+        );
+        assert_eq!(
+            wfiles,
+            vec!["hermes/cron/important-mail.yaml".to_string()]
+        );
+
+        let review_md = "## Summary\nCompleted read-only review pass across 3 files.\n\n## Code Changes\n- None.";
+        let (rcat, _) = classify_session(
+            "Hermes cron review",
+            &summary_preview(review_md),
+            &extract_files_touched(review_md),
+        );
+        assert_eq!(rcat, "review");
+
+        // EDT evening (Oct 31 00:15 UTC = Oct 30 20:15 EDT) -> 2026-10-30
+        assert_eq!(
+            crate::ledger::normalize_journal_date("2026-10-31", Some("2026-10-31T00:15:00Z")),
+            "2026-10-30"
+        );
+        // EST winter boundary (Jan 1 02:30 UTC = Dec 31 21:30 EST) -> 2026-12-31
+        assert_eq!(
+            crate::ledger::normalize_journal_date("2027-01-01", Some("2027-01-01T02:30:00Z")),
+            "2026-12-31"
+        );
+        // Fallbacks for None / empty / invalid RFC3339
+        assert_eq!(
+            crate::ledger::normalize_journal_date("2026-10-29", None),
+            "2026-10-29"
+        );
+        assert_eq!(
+            crate::ledger::normalize_journal_date("2026-10-29", Some("")),
+            "2026-10-29"
+        );
+        assert_eq!(
+            crate::ledger::normalize_journal_date("2026-10-29", Some("not-a-date")),
+            "2026-10-29"
+        );
+        // Preserves explicit non-UTC RFC3339 client offsets as-is
+        assert_eq!(
+            crate::ledger::normalize_journal_date("2026-10-31", Some("2026-10-30T23:30:00+02:00")),
+            "2026-10-30"
+        );
     }
 
     #[test]

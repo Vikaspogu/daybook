@@ -15,8 +15,33 @@ export interface SummaryCard {
   content: string
 }
 
+export interface ProjectGain {
+  project: string
+  work_count: number
+  review_count: number
+  blocked_count: number
+  total_cost_usd: number
+  accomplishments: string[]
+  key_decisions: string[]
+  files_touched: string[]
+}
+
+export interface WasteAlert {
+  project: string
+  count: number
+  cost_usd: number
+  reason: string
+  hint: string
+}
+
 export interface DailySummary {
   overview?: string
+  session_count?: number
+  work_count?: number
+  review_count?: number
+  blocked_count?: number
+  project_gains?: ProjectGain[]
+  waste_alerts?: WasteAlert[]
   insights: SummaryCard[]
   skills: SummaryCard[]
   commands: SummaryCard[]
@@ -33,9 +58,13 @@ export interface Session {
   project?: string
   started_utc?: string
   ended_utc?: string
+  duration?: string
   cost_usd?: number
+  category?: 'work' | 'review' | 'blocked'
+  key_decision?: string
+  files_touched?: string[]
+  blocker_reason?: string
 }
-
 export interface SessionDetail {
   content: string
   metadata?: {

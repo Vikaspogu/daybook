@@ -307,6 +307,88 @@ CREATE TABLE IF NOT EXISTS tokens (
 );
 ";
 
+/// US Eastern (America/New_York) offset in seconds at `utc`:
+/// EDT (UTC-4 = -14400) from 2nd Sunday of March 07:00 UTC to 1st Sunday of Nov 06:00 UTC,
+/// EST (UTC-5 = -18000) otherwise.
+fn us_eastern_offset_secs(utc: chrono::DateTime<chrono::Utc>) -> i32 {
+    use chrono::{Datelike, NaiveDate, NaiveTime};
+    let year = utc.year();
+    let march1 = NaiveDate::from_ymd_opt(year, 3, 1).unwrap();
+    let days_to_first_sun_mar = (7 - march1.weekday().num_days_from_sunday()) % 7;
+    let second_sun_mar = march1 + chrono::Days::new((days_to_first_sun_mar + 7) as u64);
+    let dst_start = second_sun_mar
+        .and_time(NaiveTime::from_hms_opt(7, 0, 0).unwrap())
+        .and_utc();
+
+    let nov1 = NaiveDate::from_ymd_opt(year, 11, 1).unwrap();
+    let days_to_first_sun_nov = (7 - nov1.weekday().num_days_from_sunday()) % 7;
+    let first_sun_nov = nov1 + chrono::Days::new(days_to_first_sun_nov as u64);
+    let dst_end = first_sun_nov
+        .and_time(NaiveTime::from_hms_opt(6, 0, 0).unwrap())
+        .and_utc();
+
+    if utc >= dst_start && utc < dst_end {
+        -4 * 3600
+    } else {
+        -5 * 3600
+    }
+}
+
+/// Derive the local journal calendar date (YYYY-MM-DD) from `started_utc` when present.
+/// Preserves explicit non-UTC RFC3339 offsets from the client; when `started_utc` is in UTC
+/// (`Z` / `+00:00`), honors `DAYBOOK_TZ_OFFSET_HOURS` or defaults to America/New_York so
+/// evening work sessions on UTC VMs don't spill into tomorrow's UTC date.
+pub fn normalize_journal_date(fallback_date: &str, started_utc: Option<&str>) -> String {
+    let Some(raw) = started_utc.map(str::trim).filter(|s| !s.is_empty()) else {
+        return fallback_date.to_string();
+    };
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) else {
+        return fallback_date.to_string();
+    };
+    if parsed.offset().local_minus_utc() != 0 {
+        return parsed.format("%Y-%m-%d").to_string();
+    }
+    let utc = parsed.with_timezone(&chrono::Utc);
+    if let Ok(hours_str) = std::env::var("DAYBOOK_TZ_OFFSET_HOURS") {
+        if let Ok(hours) = hours_str.trim().parse::<i32>() {
+            if let Some(offset) = chrono::FixedOffset::east_opt(hours.saturating_mul(3600)) {
+                return utc.with_timezone(&offset).format("%Y-%m-%d").to_string();
+            }
+        }
+    }
+    let offset = chrono::FixedOffset::east_opt(us_eastern_offset_secs(utc)).unwrap();
+    utc.with_timezone(&offset).format("%Y-%m-%d").to_string()
+}
+
+/// One-time migration (PRAGMA user_version = 1) that rebuckets pre-existing UTC-dated
+/// rows using `normalize_journal_date` inside a single transaction.
+fn reconcile_journal_dates(conn: &Connection) -> Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version >= 1 {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare(
+            "SELECT id, journal_date, started_utc FROM sessions WHERE started_utc IS NOT NULL AND started_utc != ''",
+        )?;
+        let rows: Vec<(i64, String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for (id, current_date, started_utc) in rows {
+            let normalized = normalize_journal_date(&current_date, Some(&started_utc));
+            if normalized != current_date {
+                tx.execute(
+                    "UPDATE sessions SET journal_date = ?1 WHERE id = ?2",
+                    rusqlite::params![normalized, id],
+                )?;
+            }
+        }
+    }
+    tx.execute_batch("PRAGMA user_version = 1;")?;
+    tx.commit()?;
+    Ok(())
+}
 impl Ledger {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
@@ -330,6 +412,7 @@ impl Ledger {
             .with_context(|| "set WAL")?;
         conn.execute_batch("PRAGMA busy_timeout=5000;")?;
         conn.execute_batch(SCHEMA)?;
+        reconcile_journal_dates(&conn)?;
         // Token hashes and all summaries live here: owner-only on unix.
         #[cfg(unix)]
         {
@@ -379,6 +462,7 @@ impl Ledger {
             return Ok(outcome);
         }
 
+        let journal_date = normalize_journal_date(&r.journal_date, r.started_utc.as_deref());
         let usage = serde_json::to_string(&r.usage)?;
         let aggs = serde_json::to_string(&r.aggregates)?;
         conn.execute(
@@ -400,7 +484,7 @@ impl Ledger {
                 r.machine,
                 r.runtime,
                 r.project,
-                r.journal_date,
+                journal_date,
                 r.started_utc,
                 r.ended_utc,
                 r.title,
@@ -903,5 +987,37 @@ mod tests {
             ledger.check_token("secret1").unwrap().as_deref(),
             Some("vm1")
         );
+    }
+
+    #[test]
+    fn test_reconcile_journal_dates_migrates_once_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("mig.db3");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (
+                    session_id, machine, runtime, project, journal_date,
+                    started_utc, version, summary_md, content_hash, pushed_at
+                ) VALUES (
+                    's1', 'vm1', 'codex', 'daybook', '2026-10-31',
+                    '2026-10-31T00:15:00Z', 1, '## Summary\nEvening work.', 'h1', '2026-10-31T00:20:00Z'
+                )",
+                [],
+            )
+            .unwrap();
+        }
+        let ledger = Ledger::open(&db_path).unwrap();
+        let dates = ledger.date_infos().unwrap();
+        assert_eq!(dates.len(), 1);
+        assert_eq!(dates[0].date, "2026-10-30");
+
+        let conn = ledger.conn.lock().unwrap();
+        let user_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(user_version, 1);
+        reconcile_journal_dates(&conn).unwrap();
     }
 }

@@ -52,13 +52,47 @@ pub struct SessionBrief {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended_utc: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// "work" | "review" | "blocked"
+    pub category: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_decision: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files_touched: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocker_reason: Option<String>,
 }
+
 /// A single card within a daily summary section
 #[derive(Serialize)]
 pub struct SummaryCardDto {
     pub title: String,
     pub content: String,
+}
+
+/// Per-project synthesis for the At-a-Glance Day Brief
+#[derive(Serialize, Default, Clone)]
+pub struct ProjectGainDto {
+    pub project: String,
+    pub work_count: usize,
+    pub review_count: usize,
+    pub blocked_count: usize,
+    pub total_cost_usd: f64,
+    pub accomplishments: Vec<String>,
+    pub key_decisions: Vec<String>,
+    pub files_touched: Vec<String>,
+}
+
+/// Aggregated alert for repeated blocked/wasted background sessions
+#[derive(Serialize, Default, Clone)]
+pub struct WasteAlertDto {
+    pub project: String,
+    pub count: usize,
+    pub cost_usd: f64,
+    pub reason: String,
+    pub hint: String,
 }
 
 /// Daily summary DTO
@@ -67,6 +101,11 @@ pub struct DailySummaryDto {
     pub date: String,
     pub overview: String,
     pub session_count: usize,
+    pub work_count: usize,
+    pub review_count: usize,
+    pub blocked_count: usize,
+    pub project_gains: Vec<ProjectGainDto>,
+    pub waste_alerts: Vec<WasteAlertDto>,
     pub sessions: Vec<String>,
     pub insights: Vec<SummaryCardDto>,
     pub skills: Vec<SummaryCardDto>,

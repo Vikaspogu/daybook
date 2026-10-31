@@ -309,10 +309,12 @@ export function Welcome() {
                   </span>
                 )}
 
-                {/* Daily preview */}
-                {archive?.preview && (
-                  <p className="text-[10px] leading-tight text-gray-500 dark:text-gray-400 line-clamp-2 w-full">
-                    {archive?.preview}
+                {/* Daily preview: desktop only, prefer clean session titles over raw counts */}
+                {(archive?.session_titles?.length || archive?.preview) && (
+                  <p className="hidden sm:block text-[10px] leading-tight text-gray-500 dark:text-gray-400 line-clamp-2 w-full">
+                    {archive.session_titles?.length
+                      ? archive.session_titles.slice(0, 2).join(' · ')
+                      : archive.preview}
                   </p>
                 )}
               </button>

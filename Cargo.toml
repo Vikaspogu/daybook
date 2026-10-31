@@ -1,6 +1,6 @@
 [package]
 name = "daybook"
-version = "0.1.14"
+version = "0.1.15"
 edition = "2021"
 authors = ["Oanakiaja <oanakiaja@gmail.com>"]
 description = "Daily Context Archive System for AI agents"
