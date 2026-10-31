@@ -194,41 +194,42 @@ export function Settings() {
   }
 
   return (
-    <div className="max-w-5xl mx-auto px-6 py-8">
-      {/* Header */}
-      <div className="mb-6">
-        <h1 className="text-3xl font-bold text-orange-500 dark:text-orange-400">
-          {t('settings.title')}
-        </h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-          {t('settings.subtitle')}
-        </p>
-      </div>
+    <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+      {/* Hero Summary Card */}
+      <div className="qp-hero flex flex-wrap items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="qp-kicker">QUIET PRECISION · CONFIGURATION</div>
+          <h1 className="qp-hero-title text-[#FBBF24]">
+            {t('settings.title')}
+          </h1>
+          <p className="text-xs font-mono text-[#94A3B8]">
+            {t('settings.subtitle')}
+          </p>
+        </div>
 
-      {/* Real Top Tabs (General | Templates) */}
-      <div className="flex gap-1 bg-gray-100 dark:bg-gray-800 rounded-lg p-1 mb-6 w-fit">
-        {([
-          { id: 'general' as TopTab, label: t('settings.general') },
-          { id: 'templates' as TopTab, label: t('settings.templates') },
-        ]).map(tab => (
-          <button
-            key={tab.id}
-            type="button"
-            onClick={() => setActiveTab(tab.id)}
-            className={cn(
-              'px-4 py-1.5 text-sm font-medium rounded-md transition-colors',
-              activeTab === tab.id
-                ? 'bg-white dark:bg-daily-light text-orange-500 dark:text-orange-400 shadow-sm'
-                : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
-            )}
-          >
-            {tab.label}
-          </button>
-        ))}
+        {/* 2-Up Tab Switcher */}
+        <div className="grid grid-cols-2 gap-2 min-w-[240px]">
+          {([
+            { id: 'general' as TopTab, label: t('settings.general') },
+            { id: 'templates' as TopTab, label: t('settings.templates') },
+          ]).map(tab => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+              className={cn(
+                'qp-quick-btn !h-11',
+                activeTab === tab.id ? 'amber' : 'text-[#94A3B8] hover:text-[#F8FAFC]'
+              )}
+            >
+              <span className="text-xs font-bold">{tab.label}</span>
+            </button>
+          ))}
+        </div>
       </div>
 
       {error && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 text-red-400 mb-6">
+        <div className="qp-surface-coral rounded-2xl p-4 text-xs font-mono text-[#FB7185]">
           {error}
         </div>
       )}
@@ -238,7 +239,7 @@ export function Settings() {
           initial={{ opacity: 0, y: -10 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0 }}
-          className="bg-green-500/10 border border-green-500/30 rounded-lg p-4 text-green-400 mb-6"
+          className="qp-surface-emerald rounded-2xl p-4 text-xs font-mono text-[#34D399]"
         >
           {saveMessage}
         </motion.div>

@@ -1,6 +1,7 @@
 import { format, parseISO, subDays } from 'date-fns'
 import type { DateItem } from '../hooks/useApi'
 import { useLanguage } from '../contexts/LanguageContext'
+import { cn } from '../lib/utils'
 
 export function OverviewStrip({ days }: { days: DateItem[] }) {
   const { t } = useLanguage()
@@ -9,7 +10,6 @@ export function OverviewStrip({ days }: { days: DateItem[] }) {
   const totalSessions = days.reduce((sum, d) => sum + d.session_count, 0)
   const avgPerDay = totalDays > 0 ? totalSessions / totalDays : 0
 
-  // Consecutive-day streak ending at the most recent recorded date
   let streak = 0
   if (totalDays > 0) {
     const sorted = [...days].sort((a, b) => b.date.localeCompare(a.date))
@@ -21,22 +21,40 @@ export function OverviewStrip({ days }: { days: DateItem[] }) {
     }
   }
 
-  const cards = [
-    { value: String(totalDays), label: t('welcome.kpiDays') },
-    { value: String(totalSessions), label: t('welcome.kpiSessions') },
-    { value: avgPerDay.toFixed(1), label: t('welcome.kpiAvgPerDay') },
-    { value: String(streak), label: t('welcome.kpiStreak') },
+  const tiles = [
+    {
+      icon: 'DY',
+      name: t('welcome.kpiDays'),
+      state: `${totalDays} archived`,
+      tone: totalDays > 0 ? 'emerald' : '',
+    },
+    {
+      icon: 'SN',
+      name: t('welcome.kpiSessions'),
+      state: `${totalSessions} logged`,
+      tone: totalSessions > 0 ? 'sky' : '',
+    },
+    {
+      icon: 'AVG',
+      name: t('welcome.kpiAvgPerDay'),
+      state: `${avgPerDay.toFixed(1)} / day`,
+      tone: avgPerDay > 0 ? 'amber' : '',
+    },
+    {
+      icon: '🔥',
+      name: t('welcome.kpiStreak'),
+      state: `${streak}d active`,
+      tone: streak > 1 ? 'emerald' : '',
+    },
   ]
 
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
-      {cards.map(c => (
-        <div
-          key={c.label}
-          className="rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-daily-light p-3"
-        >
-          <div className="text-2xl font-bold tabular-nums">{c.value}</div>
-          <div className="text-xs text-gray-500 dark:text-gray-400">{c.label}</div>
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-[10px] mb-6">
+      {tiles.map(tile => (
+        <div key={tile.name} className={cn('qp-tile', tile.tone)}>
+          <div className="qp-tile-icon">{tile.icon}</div>
+          <div className="qp-tile-name">{tile.name}</div>
+          <div className="qp-tile-state font-mono">{tile.state}</div>
         </div>
       ))}
     </div>

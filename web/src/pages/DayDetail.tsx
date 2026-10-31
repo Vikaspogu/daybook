@@ -2,32 +2,58 @@ import { useState, useEffect, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { useApi } from '../hooks/useApi'
-import type { ConsolidatedRule, DailySummary, DateInsights, NextStepItem, ProjectGain, ProjectLearnings, Session, SummaryCard, WasteAlert } from '../hooks/useApi'
+import type {
+  ConsolidatedRule,
+  DailySummary,
+  DateInsights,
+  NextStepItem,
+  ProjectGain,
+  ProjectLearnings,
+  Session,
+  SummaryCard,
+  WasteAlert,
+} from '../hooks/useApi'
 import { MarkdownRenderer } from '../components/MarkdownRenderer'
 import { cn } from '../lib/utils'
 import { formatTokenCount, formatCost } from '../components/UsageCharts'
 import { useLanguage } from '../contexts/LanguageContext'
 
-// Format outcome into a readable badge label
-const formatOutcome = (outcome: string): string => {
-  return outcome.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-}
+const formatOutcome = (outcome: string): string =>
+  outcome.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 
-// Get badge color class based on outcome
-const getOutcomeBadgeClass = (outcome: string | null): string => {
+const getOutcomePillTone = (outcome: string | null): string => {
   switch (outcome) {
     case 'achieved':
-      return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+      return 'emerald'
     case 'partially_achieved':
-      return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+      return 'amber'
     case 'not_achieved':
-      return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+      return 'coral'
     default:
-      return 'bg-gray-100 text-gray-600 dark:bg-gray-700/30 dark:text-gray-400'
+      return ''
   }
 }
 
-// "1h 23m" from two ISO timestamps; null when either is missing/unparseable
+// Normalize project label to crisp 1-2 word name (never raw paths or scratch slugs)
+const normalizeProjectLabel = (raw?: string): string => {
+  if (!raw) return 'workspace'
+  const base = raw.split('/').filter(Boolean).pop() ?? raw
+  if (/^\d{4}-\d{2}-\d{2}-/.test(base) || base.length > 26) {
+    return 'scratch'
+  }
+  return base
+}
+
+// Clean up raw session slugs into crisp human labels
+const cleanSessionTitle = (raw: string): string => {
+  const cleaned = raw
+    .replace(/^\d{2}[_:]\d{2}[-_]?/, '')
+    .replace(/[-_]+/g, ' ')
+    .trim()
+  if (!cleaned) return raw
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1)
+}
+
 const formatDuration = (started?: string, ended?: string): string | null => {
   if (!started || !ended) return null
   const s = Date.parse(started)
@@ -37,34 +63,43 @@ const formatDuration = (started?: string, ended?: string): string | null => {
   return mins >= 60 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${mins}m`
 }
 
-// Section header with a tiny anchor link
-function Section({ id, title, children }: { id: string; title: string; children: React.ReactNode }) {
+// Section Header with Left Kicker (11px uppercase #64748B) and Right Monospace Meta Badge (#475569)
+function Section({
+  id,
+  title,
+  meta,
+  children,
+}: {
+  id: string
+  title: string
+  meta?: string
+  children: React.ReactNode
+}) {
   return (
     <motion.section
       id={id}
-      initial={{ opacity: 0, y: 12 }}
+      initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       className="scroll-mt-20 space-y-3"
     >
-      <div className="flex items-center gap-2">
-        <h2 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-          {title}
-        </h2>
-        <a
-          href={`#${id}`}
-          aria-label={`Link to ${title}`}
-          className="text-gray-300 dark:text-gray-600 hover:text-orange-500 dark:hover:text-orange-400 transition-colors"
-        >
-          #
-        </a>
+      <div className="flex items-center justify-between gap-2 px-0.5">
+        <div className="flex items-center gap-2">
+          <h2 className="qp-kicker">{title}</h2>
+          <a
+            href={`#${id}`}
+            aria-label={`Link to ${title}`}
+            className="font-mono text-[11px] text-[#475569] hover:text-[#FBBF24] transition-colors"
+          >
+            #
+          </a>
+        </div>
+        {meta && <span className="qp-meta">{meta}</span>}
       </div>
       {children}
     </motion.section>
   )
 }
 
-
-// Skill/Command card with distinctive visual style and action buttons
 function SkillCommandCard({
   card,
   type,
@@ -78,16 +113,8 @@ function SkillCommandCard({
   const [copyOk, setCopyOk] = useState(false)
   const [installing, setInstalling] = useState(false)
   const [installed, setInstalled] = useState(false)
-  const [installPath, setInstallPath] = useState<string | null>(null)
   const { t } = useLanguage()
   const isSkill = type === 'skill'
-  const colorClass = isSkill
-    ? 'border-green-200 dark:border-green-800/40 hover:border-green-300 dark:hover:border-green-700/60'
-    : 'border-purple-200 dark:border-purple-800/40 hover:border-purple-300 dark:hover:border-purple-700/60'
-  const badgeClass = isSkill
-    ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-    : 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
-  const iconColor = isSkill ? 'text-green-500' : 'text-purple-500'
 
   const handleCopy = async (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -104,150 +131,62 @@ function SkillCommandCard({
     try {
       await onInstall(card.title, card.content, type)
       setInstalled(true)
-      // Show path briefly
-      const home = '~/.claude'
-      setInstallPath(
-        type === 'skill'
-          ? `${home}/skills/`
-          : `${home}/commands/`
-      )
     } catch {
-      // error handled by parent
+      // handled by hook
     } finally {
       setInstalling(false)
     }
   }
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      className={cn(
-        'bg-white dark:bg-daily-light rounded-xl border transition-colors',
-        colorClass
-      )}
-    >
-      <div
-        className="p-4 cursor-pointer"
+    <div className="qp-card overflow-hidden">
+      <button
+        type="button"
         onClick={() => setExpanded(!expanded)}
+        className={cn(
+          'w-full text-left qp-tile rounded-none border-0 shadow-none',
+          isSkill ? 'emerald' : 'amber'
+        )}
       >
-        <div className="flex items-start gap-3">
-          <div className={cn('mt-0.5 flex-shrink-0', iconColor)}>
-            {isSkill ? (
-              <svg className="size-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-            ) : (
-              <svg className="size-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-              </svg>
-            )}
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-1">
-              <h4 className="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate">
-                {card.title}
-              </h4>
-              <span className={cn('text-[10px] font-medium px-1.5 py-0.5 rounded-full flex-shrink-0 uppercase tracking-wide', badgeClass)}>
-                {isSkill ? t('dayDetail.skill') : t('dayDetail.cmd')}
-              </span>
-            </div>
-            {!expanded && card.content && (
-              <p className="text-xs text-gray-500 dark:text-gray-400 line-clamp-2">
-                {card.content.replace(/[#*`\->\n]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)}
-              </p>
-            )}
-          </div>
-          <svg
-            className={cn('size-4 text-gray-400 transition-transform flex-shrink-0 mt-0.5', expanded && 'rotate-180')}
-            fill="none" viewBox="0 0 24 24" stroke="currentColor"
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-          </svg>
+        <div className="qp-tile-icon">{isSkill ? 'SK' : 'CM'}</div>
+        <div className="qp-tile-name">{card.title}</div>
+        <div className="qp-tile-state font-mono">
+          {isSkill ? t('dayDetail.skill') : t('dayDetail.cmd')} · {expanded ? 'hide' : 'inspect'}
         </div>
-      </div>
+      </button>
+
       {expanded && (
-        <div className="border-t border-gray-100 dark:border-gray-700/30">
-          <div className="px-4 pb-3 pt-3 text-sm text-gray-600 dark:text-gray-400 markdown-content">
+        <div className="border-t border-white/[0.06] p-4 space-y-3">
+          <div className="text-xs text-[#94A3B8] markdown-content">
             <MarkdownRenderer content={card.content} />
           </div>
-          {/* Action buttons */}
-          <div className="px-4 pb-3 flex items-center gap-2">
+          <div className="flex items-center gap-2">
             <button
+              type="button"
               onClick={handleCopy}
-              className={cn(
-                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors',
-                'border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400',
-                'hover:bg-gray-50 dark:hover:bg-gray-800/50',
-                copyOk && 'border-green-300 dark:border-green-700 text-green-600 dark:text-green-400'
-              )}
+              className="px-2.5 py-1 rounded-lg border border-white/10 text-xs font-mono text-[#94A3B8] hover:text-[#F8FAFC] hover:border-white/25 transition-colors"
             >
-              {copyOk ? (
-                <>
-                  <svg className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                  </svg>
-                  {t('dayDetail.copied')}
-                </>
-              ) : (
-                <>
-                  <svg className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                  </svg>
-                  {t('dayDetail.copy')}
-                </>
-              )}
+              {copyOk ? t('dayDetail.copied') : t('dayDetail.copy')}
             </button>
             <button
+              type="button"
               onClick={handleInstall}
               disabled={installing || installed}
-              className={cn(
-                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors',
-                installed
-                  ? 'border border-green-300 dark:border-green-700 text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/10'
-                  : isSkill
-                    ? 'border border-green-200 dark:border-green-800/40 text-green-700 dark:text-green-400 hover:bg-green-50 dark:hover:bg-green-900/20'
-                    : 'border border-purple-200 dark:border-purple-800/40 text-purple-700 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-900/20',
-                'disabled:opacity-50'
-              )}
+              className="px-2.5 py-1 rounded-lg border border-amber-400/30 text-xs font-mono text-[#FBBF24] hover:bg-amber-500/10 disabled:opacity-50 transition-colors"
             >
-              {installing ? (
-                <>
-                  <svg className="animate-spin size-3.5" viewBox="0 0 24 24" fill="none">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                  </svg>
-                  {t('dayDetail.installing')}
-                </>
-              ) : installed ? (
-                <>
-                  <svg className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                  </svg>
-                  {t('dayDetail.installed')}
-                </>
-              ) : (
-                <>
-                  <svg className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                  </svg>
-                  {t('dayDetail.install')}
-                </>
-              )}
+              {installing
+                ? t('dayDetail.installing')
+                : installed
+                  ? t('dayDetail.installed')
+                  : t('dayDetail.install')}
             </button>
-            {installed && installPath && (
-              <span className="text-[10px] text-gray-400 dark:text-gray-500 truncate">
-                {installPath}
-              </span>
-            )}
           </div>
         </div>
       )}
-    </motion.div>
+    </div>
   )
 }
 
-// One row in the Sessions section
 function SessionRow({
   session,
   date,
@@ -258,98 +197,88 @@ function SessionRow({
   insight?: { outcome: string | null; friction_types: string[] }
 }) {
   const duration = session.duration ?? formatDuration(session.started_utc, session.ended_utc)
+  const cat = session.category ?? 'work'
+  const tileTone = cat === 'work' ? 'emerald' : cat === 'review' ? 'sky' : 'coral'
+  const projLabel = normalizeProjectLabel(session.project)
+  const badgeText =
+    cat === 'review'
+      ? 'RV'
+      : cat === 'blocked'
+        ? '!'
+        : projLabel.slice(0, 2).toUpperCase()
+
+  const telemetryParts = [
+    projLabel,
+    session.runtime,
+    duration,
+    session.cost_usd != null && session.cost_usd > 0 ? formatCost(session.cost_usd) : null,
+  ].filter(Boolean)
 
   return (
-    <Link to={`/day/${date}/session/${encodeURIComponent(session.name)}`}>
-      <div
-        className={cn(
-          'p-4 rounded-xl border transition-colors',
-          'bg-gray-50 dark:bg-daily-light border-gray-200 dark:border-gray-800 hover:border-orange-400 dark:hover:border-orange-500/40'
-        )}
-      >
-        <div className="flex items-start justify-between gap-3 mb-1.5">
-          <div className="flex items-center gap-2 min-w-0">
-            {session.project && (
-              <span className="px-2 py-0.5 rounded-md bg-orange-500/10 text-orange-600 dark:text-orange-400 border border-orange-500/20 text-xs font-semibold truncate max-w-44">
-                {session.project}
-              </span>
-            )}
-            <h3 className="font-semibold text-gray-900 dark:text-gray-100 line-clamp-1">
-              {session.title || session.name}
-            </h3>
-          </div>
-          <div className="flex items-center gap-1.5 flex-shrink-0">
-            {session.category === 'review' && (
-              <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20">
-                Review
-              </span>
-            )}
-            {session.category === 'blocked' && (
-              <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20">
-                Blocked
-              </span>
-            )}
+    <Link
+      to={`/day/${date}/session/${encodeURIComponent(session.name)}`}
+      className="block group"
+    >
+      <div className="qp-card overflow-hidden hover:border-white/20 transition-all">
+        {/* 66px Interactive Control Tile Header ("i n" / "i l") */}
+        <div className={cn('qp-tile rounded-none border-0 shadow-none', tileTone)}>
+          <div className="qp-tile-icon">{badgeText}</div>
+          <div className="qp-tile-name flex items-center justify-between gap-2">
+            <span className="truncate">{cleanSessionTitle(session.title || session.name)}</span>
             {insight?.outcome && (
-              <span className={cn('text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap', getOutcomeBadgeClass(insight.outcome))}>
+              <span
+                className={cn(
+                  'qp-pill !py-0.5 !px-2 !text-[10px] shrink-0 font-mono',
+                  getOutcomePillTone(insight.outcome)
+                )}
+              >
                 {formatOutcome(insight.outcome)}
               </span>
             )}
           </div>
+          <div className="qp-tile-state font-mono">
+            {telemetryParts.join(' · ')}
+          </div>
         </div>
 
-        {session.summary_preview && (
-          <p className="text-sm text-gray-600 dark:text-gray-300 line-clamp-2 text-pretty mb-2">
-            {session.summary_preview}
-          </p>
-        )}
+        {/* Supplementary Digest Context */}
+        {(session.summary_preview || session.key_decision || (session.files_touched?.length ?? 0) > 0) && (
+          <div className="px-3.5 py-3 border-t border-white/[0.06] space-y-2">
+            {session.summary_preview && (
+              <p className="text-xs text-[#94A3B8] line-clamp-2 leading-relaxed">
+                {session.summary_preview}
+              </p>
+            )}
 
-        {session.key_decision && (
-          <div className="mb-2.5 px-3 py-2 rounded-lg bg-amber-500/5 border border-amber-500/20 text-xs text-gray-700 dark:text-gray-300">
-            <span className="font-semibold text-amber-600 dark:text-amber-400">Why: </span>
-            {session.key_decision}
+            {session.key_decision && (
+              <div className="px-3 py-2 rounded-xl qp-surface-amber text-xs text-[#F8FAFC] leading-relaxed">
+                <span className="font-mono font-bold text-[#FBBF24] uppercase text-[10px] mr-1.5">
+                  WHY
+                </span>
+                {session.key_decision}
+              </div>
+            )}
+
+            {session.blocker_reason && session.category === 'blocked' && (
+              <div className="px-3 py-1.5 rounded-xl qp-surface-coral text-xs text-[#FB7185] font-mono">
+                {session.blocker_reason}
+              </div>
+            )}
+
+            {session.files_touched && session.files_touched.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 pt-0.5">
+                {session.files_touched.slice(0, 4).map(file => (
+                  <span
+                    key={file}
+                    className="px-2 py-0.5 rounded-md bg-[#0B0E14]/70 border border-white/[0.07] font-mono text-[11px] text-[#94A3B8] truncate max-w-60"
+                  >
+                    {file}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         )}
-
-        {session.blocker_reason && session.category === 'blocked' && (
-          <div className="mb-2.5 px-3 py-1.5 rounded-lg bg-red-500/5 border border-red-500/20 text-xs text-red-600 dark:text-red-400 font-mono">
-            {session.blocker_reason}
-          </div>
-        )}
-
-        {session.files_touched && session.files_touched.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-2.5">
-            {session.files_touched.slice(0, 4).map(file => (
-              <span
-                key={file}
-                className="px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800/80 border border-gray-200 dark:border-gray-700/60 font-mono text-[11px] text-gray-600 dark:text-gray-400 truncate max-w-64"
-              >
-                {file}
-              </span>
-            ))}
-          </div>
-        )}
-
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          {session.runtime && (
-            <span className="px-1.5 py-0.5 rounded bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400 font-medium font-mono">
-              {session.runtime}
-            </span>
-          )}
-          {duration && (
-            <span className="text-gray-500 dark:text-gray-400 tabular-nums font-mono">{duration}</span>
-          )}
-          {session.cost_usd != null && (
-            <span className="text-purple-500 font-medium tabular-nums font-mono">{formatCost(session.cost_usd)}</span>
-          )}
-          {insight && insight.friction_types.length > 0 && (
-            <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
-              <svg className="size-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
-              </svg>
-              {insight.friction_types.map(f => f.replace(/_/g, ' ')).join(', ')}
-            </span>
-          )}
-        </div>
       </div>
     </Link>
   )
@@ -360,13 +289,12 @@ function BoldColonItem({ text, dotColor }: { text: string; dotColor: string }) {
   const head = colonIdx > 0 ? text.slice(0, colonIdx) : null
   const rest = colonIdx > 0 ? text.slice(colonIdx + 2) : text
   return (
-    <li className="flex items-start gap-2 text-xs sm:text-sm text-gray-700 dark:text-gray-300 leading-relaxed">
+    <li className="flex items-start gap-2 text-xs text-[#94A3B8] leading-relaxed">
       <span className={cn('font-bold mt-0.5 flex-shrink-0', dotColor)}>•</span>
       <span>
         {head ? (
           <>
-            <strong className="font-semibold text-gray-900 dark:text-gray-100">{head}:</strong>{' '}
-            {rest}
+            <strong className="font-bold text-[#F8FAFC]">{head}:</strong> {rest}
           </>
         ) : (
           rest
@@ -384,48 +312,49 @@ function WorkflowCoachingCard({
   nextSteps: NextStepItem[]
 }) {
   return (
-    <div className="bg-gray-50 dark:bg-daily-light rounded-2xl p-5 border border-amber-500/30 space-y-4">
-      <div className="rounded-xl p-4 bg-white dark:bg-black/20 border border-gray-200 dark:border-gray-800 space-y-2.5">
-        <div className="text-[11px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">
-          ⚡ Cost, Cache & Command Health
+    <div className="qp-card p-4 space-y-3.5">
+      <div className="rounded-xl p-3.5 bg-[#0B0E14]/65 border border-white/[0.06] space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="qp-kicker !text-[#FBBF24]">⚡ Cost, Cache & Command Health</span>
+          <span className="qp-meta">{signals.length} SIGNALS</span>
         </div>
         {signals.length > 0 ? (
-          <ul className="space-y-2">
+          <ul className="space-y-1.5">
             {signals.map((sig, i) => (
-              <BoldColonItem key={i} text={sig} dotColor="text-amber-500" />
+              <BoldColonItem key={i} text={sig} dotColor="text-[#FBBF24]" />
             ))}
           </ul>
         ) : (
-          <p className="text-xs text-gray-500 dark:text-gray-400">
+          <p className="text-xs text-[#64748B]">
             No workflow friction signals detected today.
           </p>
         )}
       </div>
 
       {nextSteps.length > 0 && (
-        <div className="rounded-xl p-4 bg-orange-500/5 border border-orange-500/25 space-y-2.5">
+        <div className="rounded-xl p-3.5 qp-surface-amber space-y-2.5">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-orange-600 dark:text-orange-400">
-              🎯 Recommended Next Steps & Action Items ({nextSteps.length})
+            <span className="qp-kicker !text-[#FBBF24]">
+              🎯 Recommended Next Steps
             </span>
-            <span className="text-[11px] font-mono text-gray-500 dark:text-gray-400">
-              Derived from today&apos;s friction & deferred work
+            <span className="font-mono text-[11px] font-semibold text-[#FBBF24]/80 tabular-nums">
+              {nextSteps.length} ACTIONS
             </span>
           </div>
           <ul className="space-y-2">
             {nextSteps.map((step, i) => (
               <li
                 key={i}
-                className="flex items-start gap-2.5 text-xs sm:text-sm text-gray-700 dark:text-gray-300 leading-relaxed"
+                className="flex items-start gap-2.5 text-xs text-[#F8FAFC]/90 leading-relaxed"
               >
-                <span className="px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-600 dark:text-orange-400 border border-orange-500/30 font-mono text-[10px] font-bold uppercase flex-shrink-0 mt-0.5">
+                <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-[#FBBF24] border border-amber-400/30 font-mono text-[10px] font-bold uppercase flex-shrink-0 mt-0.5">
                   {step.tag}
                 </span>
                 <span>
-                  <strong className="font-semibold text-gray-900 dark:text-gray-100">
+                  <strong className="font-bold text-[#F8FAFC]">
                     {step.title}:
                   </strong>{' '}
-                  {step.detail}
+                  <span className="text-[#94A3B8]">{step.detail}</span>
                 </span>
               </li>
             ))}
@@ -449,7 +378,7 @@ function ProjectLearningsSection({
       : fallbackLearnings.length > 0
         ? [
             {
-              project: 'General',
+              project: 'workspace',
               pitfalls: [],
               learnings: fallbackLearnings.map(text => ({
                 kind: 'learning',
@@ -463,30 +392,26 @@ function ProjectLearningsSection({
   if (effectiveGroups.length === 0) return null
 
   return (
-    <div className="grid gap-4">
+    <div className="grid gap-3.5">
       {effectiveGroups.map(group => {
         const pitfallCount = group.pitfalls.length
         const learningCount = group.learnings.length
+        const projectName = normalizeProjectLabel(group.project)
         return (
-          <div
-            key={group.project}
-            className="bg-gray-50 dark:bg-daily-light rounded-xl p-5 border border-gray-200 dark:border-gray-800 space-y-3.5"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-gray-200 dark:border-gray-800">
+          <div key={group.project} className="qp-card p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-white/[0.06]">
               <div className="flex items-center gap-2">
-                <span className="size-2 rounded-full bg-sky-500" />
-                <h3 className="text-base font-bold text-gray-900 dark:text-gray-100">
-                  {group.project}
-                </h3>
+                <span className="qp-dot text-[#38BDF8]" />
+                <h3 className="qp-card-title">{projectName}</h3>
               </div>
-              <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono">
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono tabular-nums">
                 {pitfallCount > 0 && (
-                  <span className="px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                  <span className="qp-pill coral !py-0.5 !px-2 !text-[11px]">
                     {pitfallCount} {pitfallCount === 1 ? 'pitfall' : 'pitfalls'}
                   </span>
                 )}
                 {learningCount > 0 && (
-                  <span className="px-2 py-0.5 rounded-md bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20">
+                  <span className="qp-pill sky !py-0.5 !px-2 !text-[11px]">
                     {learningCount} {learningCount === 1 ? 'learning' : 'learnings'}
                   </span>
                 )}
@@ -494,22 +419,20 @@ function ProjectLearningsSection({
             </div>
 
             {pitfallCount > 0 && (
-              <div className="rounded-lg bg-amber-500/5 border border-amber-500/20 p-3.5 space-y-2">
-                <div className="text-[11px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">
-                  ⚠ Pitfalls & Gotchas
-                </div>
+              <div className="rounded-xl qp-surface-coral p-3.5 space-y-2">
+                <div className="qp-kicker !text-[#FB7185]">⚠ Pitfalls & Gotchas</div>
                 <ul className="space-y-2">
                   {group.pitfalls.map((item, idx) => (
                     <li
                       key={idx}
-                      className="flex items-start gap-2 text-xs sm:text-sm text-gray-700 dark:text-gray-300 leading-relaxed"
+                      className="flex items-start gap-2 text-xs text-[#F8FAFC]/90 leading-relaxed"
                     >
-                      <span className="text-amber-500 font-bold mt-0.5 flex-shrink-0">•</span>
+                      <span className="text-[#FB7185] font-bold mt-0.5 flex-shrink-0">•</span>
                       <div className="space-y-0.5">
                         <span>{item.text}</span>
                         {item.session_title && (
-                          <div className="text-[11px] font-mono text-gray-400 dark:text-gray-500">
-                            Session: {item.session_title}
+                          <div className="text-[11px] font-mono text-[#94A3B8]">
+                            Session: {cleanSessionTitle(item.session_title)}
                           </div>
                         )}
                       </div>
@@ -520,22 +443,20 @@ function ProjectLearningsSection({
             )}
 
             {learningCount > 0 && (
-              <div className="rounded-lg bg-sky-500/5 border border-sky-500/20 p-3.5 space-y-2">
-                <div className="text-[11px] font-bold uppercase tracking-wider text-sky-600 dark:text-sky-400">
-                  💡 System & Codebase Learnings
-                </div>
+              <div className="rounded-xl qp-surface-sky p-3.5 space-y-2">
+                <div className="qp-kicker !text-[#38BDF8]">💡 System & Codebase Learnings</div>
                 <ul className="space-y-2">
                   {group.learnings.map((item, idx) => (
                     <li
                       key={idx}
-                      className="flex items-start gap-2 text-xs sm:text-sm text-gray-700 dark:text-gray-300 leading-relaxed"
+                      className="flex items-start gap-2 text-xs text-[#F8FAFC]/90 leading-relaxed"
                     >
-                      <span className="text-sky-500 font-bold mt-0.5 flex-shrink-0">•</span>
+                      <span className="text-[#38BDF8] font-bold mt-0.5 flex-shrink-0">•</span>
                       <div className="space-y-0.5">
                         <span>{item.text}</span>
                         {item.session_title && (
-                          <div className="text-[11px] font-mono text-gray-400 dark:text-gray-500">
-                            Session: {item.session_title}
+                          <div className="text-[11px] font-mono text-[#94A3B8]">
+                            Session: {cleanSessionTitle(item.session_title)}
                           </div>
                         )}
                       </div>
@@ -563,7 +484,7 @@ function ConsolidatedRulesCard({
   const [installedIdx, setInstalledIdx] = useState<Record<number, boolean>>({})
 
   const formatRuleMarkdown = (r: ConsolidatedRule) => {
-    const lines = [`- **[${r.name}]** (${r.project}): ${r.summary}`]
+    const lines = [`- **[${r.name}]** (${normalizeProjectLabel(r.project)}): ${r.summary}`]
     if (r.trigger) lines.push(`  - Trigger: ${r.trigger}`)
     if (r.why) lines.push(`  - Why: ${r.why}`)
     return lines.join('\n')
@@ -576,7 +497,7 @@ function ConsolidatedRulesCard({
       setCopiedAll(true)
       setTimeout(() => setCopiedAll(false), 2000)
     } catch {
-      // clipboard unavailable on insecure origins
+      // clipboard unavailable
     }
   }
 
@@ -586,9 +507,10 @@ function ConsolidatedRulesCard({
       setCopiedIdx(idx)
       setTimeout(() => setCopiedIdx(null), 2000)
     } catch {
-      // clipboard unavailable on insecure origins
+      // clipboard unavailable
     }
   }
+
   const handleInstallOne = async (r: ConsolidatedRule, idx: number) => {
     if (installedIdx[idx]) return
     try {
@@ -600,48 +522,48 @@ function ConsolidatedRulesCard({
   }
 
   return (
-    <div className="bg-gray-50 dark:bg-daily-light rounded-2xl p-5 border border-gray-200 dark:border-gray-800 space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-gray-200 dark:border-gray-800">
-        <span className="text-xs text-gray-500 dark:text-gray-400">
+    <div className="qp-card p-4 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-white/[0.06]">
+        <span className="text-xs text-[#94A3B8]">
           Consolidated from session summaries ({rules.length} {rules.length === 1 ? 'rule' : 'rules'})
         </span>
         <button
+          type="button"
           onClick={handleCopyAll}
-          className="px-2.5 py-1 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-black/20 text-xs font-mono text-gray-700 dark:text-gray-300 hover:border-orange-400 transition-colors"
+          className="px-2.5 py-1 rounded-lg border border-amber-400/30 bg-amber-500/10 text-xs font-mono text-[#FBBF24] hover:bg-amber-500/20 transition-colors tabular-nums"
         >
-          {copiedAll ? '✓ Copied All' : `Copy All ${rules.length} as Markdown`}
+          {copiedAll ? '✓ Copied All' : `Copy All (${rules.length})`}
         </button>
       </div>
       <div className="space-y-2.5">
         {rules.map((r, i) => (
           <div
             key={`${r.project}-${r.name}-${i}`}
-            className="rounded-xl p-3.5 bg-white dark:bg-black/20 border border-gray-200 dark:border-gray-800 flex flex-col sm:flex-row sm:items-start justify-between gap-3"
+            className="rounded-xl p-3 bg-[#0B0E14]/65 border border-white/[0.06] flex flex-col sm:flex-row sm:items-start justify-between gap-3"
           >
             <div className="space-y-1 min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="px-1.5 py-0.5 rounded bg-orange-500/10 text-orange-600 dark:text-orange-400 border border-orange-500/20 font-mono text-[11px] font-semibold">
-                  {r.project}
+                <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-[#FBBF24] border border-amber-400/30 font-mono text-[10px] font-semibold">
+                  {normalizeProjectLabel(r.project)}
                 </span>
-                <span className="font-mono text-xs sm:text-sm font-bold text-gray-900 dark:text-gray-100">
+                <span className="font-mono text-xs font-bold text-[#F8FAFC]">
                   {r.name}
                 </span>
               </div>
-              <p className="text-xs sm:text-sm text-gray-700 dark:text-gray-300">
+              <p className="text-xs text-[#94A3B8] leading-relaxed">
                 {r.summary}
               </p>
               {(r.trigger || r.why) && (
-                <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
+                <p className="text-[11px] text-[#64748B] leading-relaxed">
                   {r.trigger && (
                     <>
-                      <strong className="text-gray-700 dark:text-gray-300">Trigger:</strong>{' '}
-                      {r.trigger}
+                      <strong className="text-[#94A3B8]">Trigger:</strong> {r.trigger}
                     </>
                   )}
                   {r.trigger && r.why && ' · '}
                   {r.why && (
                     <>
-                      <strong className="text-gray-700 dark:text-gray-300">Why:</strong> {r.why}
+                      <strong className="text-[#94A3B8]">Why:</strong> {r.why}
                     </>
                   )}
                 </p>
@@ -649,15 +571,17 @@ function ConsolidatedRulesCard({
             </div>
             <div className="flex items-center gap-1.5 flex-shrink-0">
               <button
+                type="button"
                 onClick={() => handleCopyOne(r, i)}
-                className="px-2.5 py-1 rounded-md border border-gray-200 dark:border-gray-700 text-xs font-mono text-gray-600 dark:text-gray-300 hover:border-orange-400 transition-colors"
+                className="px-2.5 py-1 rounded-lg border border-white/10 text-[11px] font-mono text-[#94A3B8] hover:text-[#F8FAFC] hover:border-white/25 transition-colors"
               >
                 {copiedIdx === i ? '✓ Copied' : 'Copy'}
               </button>
               <button
+                type="button"
                 onClick={() => handleInstallOne(r, i)}
                 disabled={!!installedIdx[i]}
-                className="px-2.5 py-1 rounded-md border border-purple-500/30 text-xs font-mono text-purple-600 dark:text-purple-400 hover:bg-purple-500/10 disabled:opacity-50 transition-colors"
+                className="px-2.5 py-1 rounded-lg border border-emerald-400/30 text-[11px] font-mono text-[#34D399] hover:bg-emerald-500/10 disabled:opacity-50 transition-colors"
               >
                 {installedIdx[i] ? '✓ Installed' : 'Install'}
               </button>
@@ -670,31 +594,32 @@ function ConsolidatedRulesCard({
 }
 
 function ProjectGainCard({ gain }: { gain: ProjectGain }) {
+  const projectName = normalizeProjectLabel(gain.project)
   return (
-    <div className="bg-gray-50 dark:bg-daily-light rounded-xl p-5 border border-gray-200 dark:border-gray-800 space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-gray-200 dark:border-gray-800">
+    <div className="qp-card p-4 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-white/[0.06]">
         <div className="flex items-center gap-2">
-          <span className="size-2 rounded-full bg-orange-500" />
-          <h3 className="text-base font-bold text-gray-900 dark:text-gray-100">{gain.project}</h3>
+          <span className="qp-dot text-[#34D399]" />
+          <h3 className="qp-card-title">{projectName}</h3>
         </div>
-        <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono">
+        <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono tabular-nums">
           {gain.work_count > 0 && (
-            <span className="px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+            <span className="qp-pill emerald !py-0.5 !px-2 !text-[11px]">
               {gain.work_count} work
             </span>
           )}
           {gain.review_count > 0 && (
-            <span className="px-2 py-0.5 rounded-md bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20">
+            <span className="qp-pill sky !py-0.5 !px-2 !text-[11px]">
               {gain.review_count} {gain.review_count === 1 ? 'review' : 'reviews'}
             </span>
           )}
           {gain.blocked_count > 0 && (
-            <span className="px-2 py-0.5 rounded-md bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20">
+            <span className="qp-pill coral !py-0.5 !px-2 !text-[11px]">
               {gain.blocked_count} blocked
             </span>
           )}
           {gain.total_cost_usd > 0 && (
-            <span className="px-2 py-0.5 rounded-md bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 tabular-nums">
+            <span className="qp-pill amber !py-0.5 !px-2 !text-[11px]">
               {formatCost(gain.total_cost_usd)}
             </span>
           )}
@@ -708,13 +633,12 @@ function ProjectGainCard({ gain }: { gain: ProjectGain }) {
             const head = colonIdx > 0 ? item.slice(0, colonIdx) : null
             const rest = colonIdx > 0 ? item.slice(colonIdx + 2) : item
             return (
-              <li key={idx} className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
-                <span className="text-emerald-500 font-bold mt-0.5 flex-shrink-0">•</span>
+              <li key={idx} className="flex items-start gap-2 text-xs sm:text-[13px] text-[#94A3B8] leading-relaxed">
+                <span className="text-[#34D399] font-bold mt-0.5 flex-shrink-0">•</span>
                 <span>
                   {head ? (
                     <>
-                      <strong className="font-semibold text-gray-900 dark:text-gray-100">{head}:</strong>{' '}
-                      {rest}
+                      <strong className="font-bold text-[#F8FAFC]">{head}:</strong> {rest}
                     </>
                   ) : (
                     rest
@@ -727,12 +651,10 @@ function ProjectGainCard({ gain }: { gain: ProjectGain }) {
       )}
 
       {gain.key_decisions.length > 0 && (
-        <div className="rounded-lg bg-amber-500/5 border border-amber-500/20 p-3 space-y-1">
-          <div className="text-[11px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">
-            Key Decisions & Why
-          </div>
+        <div className="rounded-xl qp-surface-amber p-3 space-y-1.5">
+          <div className="qp-kicker !text-[#FBBF24]">Key Decisions & Why</div>
           {gain.key_decisions.map((dec, idx) => (
-            <p key={idx} className="text-xs text-gray-700 dark:text-gray-300 leading-relaxed">
+            <p key={idx} className="text-xs text-[#F8FAFC]/90 leading-relaxed">
               {dec}
             </p>
           ))}
@@ -740,11 +662,11 @@ function ProjectGainCard({ gain }: { gain: ProjectGain }) {
       )}
 
       {gain.files_touched.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 pt-1">
+        <div className="flex flex-wrap gap-1.5 pt-0.5">
           {gain.files_touched.map(file => (
             <span
               key={file}
-              className="px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800/80 border border-gray-200 dark:border-gray-700/60 font-mono text-[11px] text-gray-600 dark:text-gray-400"
+              className="px-2 py-0.5 rounded-md bg-[#0B0E14]/75 border border-white/[0.07] font-mono text-[11px] text-[#94A3B8]"
             >
               {file}
             </span>
@@ -759,16 +681,14 @@ function WasteAlertCard({ alerts }: { alerts: WasteAlert[] }) {
   const totalBlocked = alerts.reduce((s, a) => s + a.count, 0)
   const totalWasteCost = alerts.reduce((s, a) => s + a.cost_usd, 0)
   return (
-    <div className="rounded-xl p-5 bg-red-500/5 border border-red-500/25 space-y-3">
+    <div className="rounded-[18px] p-4 qp-surface-coral space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-bold uppercase tracking-wider text-red-600 dark:text-red-400">
-            ⚠ {totalBlocked} Blocked / Background Noise Sessions Hidden Below
-          </span>
-        </div>
+        <span className="qp-kicker !text-[#FB7185]">
+          ⚠ {totalBlocked} Blocked / Background Noise Runs Hidden Below
+        </span>
         {totalWasteCost > 0 && (
-          <span className="text-xs font-mono font-semibold text-red-600 dark:text-red-400 tabular-nums">
-            {formatCost(totalWasteCost)} spent on blocked runs
+          <span className="text-xs font-mono font-semibold text-[#FB7185] tabular-nums">
+            {formatCost(totalWasteCost)} wasted
           </span>
         )}
       </div>
@@ -776,18 +696,18 @@ function WasteAlertCard({ alerts }: { alerts: WasteAlert[] }) {
         {alerts.map((a, i) => (
           <div
             key={`${a.project}-${i}`}
-            className="rounded-lg bg-white/60 dark:bg-black/20 border border-red-500/15 p-3 text-xs space-y-1"
+            className="rounded-xl bg-[#0B0E14]/70 border border-rose-400/20 p-3 text-xs space-y-1"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-semibold text-gray-900 dark:text-gray-100">
-                {a.count}× <span className="font-mono text-orange-500">{a.project}</span> — {a.reason}
+              <span className="font-bold text-[#F8FAFC]">
+                {a.count}× <span className="font-mono text-[#FB7185]">{normalizeProjectLabel(a.project)}</span> — {a.reason}
               </span>
               {a.cost_usd > 0 && (
-                <span className="font-mono text-gray-500 tabular-nums">{formatCost(a.cost_usd)}</span>
+                <span className="font-mono text-[#94A3B8] tabular-nums">{formatCost(a.cost_usd)}</span>
               )}
             </div>
-            <p className="text-gray-600 dark:text-gray-400">
-              <strong className="text-gray-800 dark:text-gray-200">Action:</strong> {a.hint}
+            <p className="text-[#94A3B8]">
+              <strong className="text-[#F8FAFC]">Action:</strong> {a.hint}
             </p>
           </div>
         ))}
@@ -827,8 +747,14 @@ export function DayDetail() {
     fetchSessions(date)
       .then(res => {
         if (!cancelled) {
-          setSessions(res)
-          const hasWork = res.some(s => (s.category ?? 'work') === 'work')
+          // Sort active/shipped work first, then review, then blocked
+          const rank = (s: Session) => {
+            const c = s.category ?? 'work'
+            return c === 'work' ? 0 : c === 'review' ? 1 : 2
+          }
+          const sorted = [...res].sort((a, b) => rank(a) - rank(b))
+          setSessions(sorted)
+          const hasWork = sorted.some(s => (s.category ?? 'work') === 'work')
           if (!hasWork) {
             setCategoryFilter('all')
           }
@@ -880,7 +806,7 @@ export function DayDetail() {
   }, [sessions, categoryFilter, runtimeFilter])
 
   const projects = useMemo(
-    () => [...new Set(sessions.map(s => s.project).filter((p): p is string => !!p))],
+    () => [...new Set(sessions.map(s => s.project).filter((p): p is string => !!p).map(normalizeProjectLabel))],
     [sessions]
   )
   const totalCost = useMemo(
@@ -888,21 +814,18 @@ export function DayDetail() {
     [sessions]
   )
 
-  const skippedProjects = useMemo(() => {
-    const cards = [...(summary?.skills ?? []), ...(summary?.commands ?? [])]
-    if (cards.length === 0) return []
-    return projects.filter(
-      p => !cards.some(c => c.title === p || c.title.startsWith(`${p} — `) || c.title.startsWith(`${p} - `))
-    )
-  }, [summary, projects])
-
   if (loading && !summary) {
     return (
-      <div className="max-w-4xl mx-auto px-6 py-8">
-        <div className="animate-pulse space-y-4">
-          <div className="h-8 w-48 bg-gray-200 dark:bg-daily-light rounded" />
-          <div className="h-32 bg-gray-200 dark:bg-daily-light rounded-lg" />
-          <div className="h-24 bg-gray-200 dark:bg-daily-light rounded-lg" />
+      <div className="max-w-[1280px] mx-auto px-4 sm:px-6 py-6 space-y-5">
+        <div className="qp-hero h-36 animate-pulse" />
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-[10px]">
+          {[...Array(4)].map((_, i) => (
+            <div key={i} className="qp-tile animate-pulse" />
+          ))}
+        </div>
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+          <div className="qp-card h-64 animate-pulse" />
+          <div className="qp-card h-64 animate-pulse" />
         </div>
       </div>
     )
@@ -927,45 +850,49 @@ export function DayDetail() {
   const signalDenominator = counts.work + counts.review + counts.blocked
   const signalRatioPct =
     signalDenominator > 0 ? Math.round((counts.work / signalDenominator) * 100) : 100
+  const failedCalls = dayMetrics?.failed_tool_calls ?? 0
+  const interruptedCount = dayMetrics?.interrupted ?? 0
+  const testRuns = dayMetrics?.test_runs ?? 0
+
   return (
-    <div className="max-w-4xl mx-auto px-6 py-8 space-y-8">
+    <div className="max-w-[1280px] mx-auto px-4 sm:px-6 py-6 space-y-6">
       {/* Breadcrumb */}
-      <nav className="text-sm">
-        <Link to="/" className="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
-          {t('dayDetail.breadcrumbArchives')}
-        </Link>
-        <span className="text-gray-400 dark:text-gray-600 mx-2">/</span>
-        <span className="text-orange-500 dark:text-orange-400 font-mono">{date}</span>
+      <nav className="flex items-center justify-between text-xs font-mono">
+        <div className="flex items-center gap-2">
+          <Link to="/" className="text-[#64748B] hover:text-[#F8FAFC] transition-colors">
+            {t('dayDetail.breadcrumbArchives')}
+          </Link>
+          <span className="text-[#475569]">/</span>
+          <span className="text-[#FBBF24] font-semibold tabular-nums">{date}</span>
+        </div>
+        <span className="qp-meta">QUIET PRECISION · DAILY BRIEF</span>
       </nav>
 
       {error && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 text-red-400">
+        <div className="qp-surface-coral rounded-2xl p-4 text-xs font-mono text-[#FB7185]">
           {error}
         </div>
       )}
 
-      {/* === 30-Second Scorecard Hero === */}
-      <div className="bg-gray-50 dark:bg-daily-light rounded-2xl p-5 border border-gray-200 dark:border-gray-800 space-y-4">
-        <div className="flex flex-wrap items-baseline justify-between gap-2 pb-3 border-b border-gray-200 dark:border-gray-800">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-              {date} · Daily Workflow Brief
+      {/* === Hero Summary Card (border-radius: 22px, padding: 18px 20px) === */}
+      <div className="qp-hero space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3 pb-3.5 border-b border-white/[0.06]">
+          <div className="space-y-1">
+            <h1 className="qp-hero-title tabular-nums">
+              {date} · Daily Brief
             </h1>
-            <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
-              {counts.work} shipped work {counts.work === 1 ? 'session' : 'sessions'} across{' '}
-              {projectGains.length || projects.length}{' '}
+            <p className="text-xs font-mono text-[#94A3B8] tabular-nums">
+              {counts.work} shipped · {projectGains.length || projects.length}{' '}
               {(projectGains.length || projects.length) === 1 ? 'project' : 'projects'} ·{' '}
-              {counts.review} review {counts.review === 1 ? 'pass' : 'passes'} · {counts.blocked}{' '}
-              blocked
+              {counts.review} {counts.review === 1 ? 'review' : 'reviews'} · {signalRatioPct}% signal
             </p>
           </div>
+
           {runtimes.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
               {runtimes.map(r => (
-                <span
-                  key={r}
-                  className="text-xs bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400 px-2.5 py-0.5 rounded-full font-mono tabular-nums"
-                >
+                <span key={r} className="qp-pill sky font-mono tabular-nums !py-1 !px-2.5 !text-[11px]">
+                  <span className="qp-dot" />
                   {r} × {sessions.filter(s => s.runtime === r).length}
                 </span>
               ))}
@@ -973,253 +900,279 @@ export function DayDetail() {
           )}
         </div>
 
-        {/* 4-Box KPI Scorecard */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-          <div className="rounded-xl p-3 bg-white dark:bg-black/20 border border-gray-200 dark:border-gray-800">
-            <div className="text-[11px] text-gray-500 dark:text-gray-400">Shipped vs Review</div>
-            <div className="text-base font-bold font-mono tabular-nums text-gray-900 dark:text-gray-100 mt-0.5">
-              {counts.work} work / {counts.review} rev
-            </div>
-            <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
-              {signalRatioPct}% signal ratio
+        {/* 2-Up / 4-Up Interactive Control Tiles (66px fixed height, "i n" / "i l") */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-[10px]">
+          <div className={cn('qp-tile', counts.work > 0 ? 'emerald' : '')}>
+            <div className="qp-tile-icon">WK</div>
+            <div className="qp-tile-name">Shipped Work</div>
+            <div className="qp-tile-state font-mono">
+              {counts.work} work · {signalRatioPct}% signal
             </div>
           </div>
 
-          <div className="rounded-xl p-3 bg-white dark:bg-black/20 border border-gray-200 dark:border-gray-800">
-            <div className="text-[11px] text-gray-500 dark:text-gray-400">Total Spend</div>
-            <div className="text-base font-bold font-mono tabular-nums text-gray-900 dark:text-gray-100 mt-0.5">
-              {displayCost > 0 ? formatCost(displayCost) : '$0.00'}
-            </div>
-            <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
-              {pricedSessionCount} priced {pricedSessionCount === 1 ? 'session' : 'sessions'}
+          <div className={cn('qp-tile', displayCost > 0 ? 'amber' : '')}>
+            <div className="qp-tile-icon">$</div>
+            <div className="qp-tile-name">Active Spend</div>
+            <div className="qp-tile-state font-mono">
+              {displayCost > 0 ? formatCost(displayCost) : '$0.00'} · {pricedSessionCount} priced
             </div>
           </div>
 
-          <div className="rounded-xl p-3 bg-white dark:bg-black/20 border border-gray-200 dark:border-gray-800">
-            <div className="text-[11px] text-gray-500 dark:text-gray-400">Tokens & Cache</div>
-            <div className="text-base font-bold font-mono tabular-nums text-gray-900 dark:text-gray-100 mt-0.5">
-              {totalTokens > 0 ? `${formatTokenCount(totalTokens)} tok` : '—'}
-            </div>
-            <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
-              {cacheHitPct != null
-                ? `${cacheHitPct}% cache hit (${formatTokenCount(dayMetrics?.cache_read_tokens ?? 0)})`
-                : 'No token telemetry'}
+          <div className={cn('qp-tile', totalTokens > 0 ? 'sky' : '')}>
+            <div className="qp-tile-icon">⚡</div>
+            <div className="qp-tile-name">Prompt Cache</div>
+            <div className="qp-tile-state font-mono">
+              {totalTokens > 0
+                ? `${formatTokenCount(totalTokens)}${cacheHitPct != null ? ` · ${cacheHitPct}% hit` : ''}`
+                : 'No telemetry'}
             </div>
           </div>
 
-          <div className="rounded-xl p-3 bg-white dark:bg-black/20 border border-gray-200 dark:border-gray-800">
-            <div className="text-[11px] text-gray-500 dark:text-gray-400">Tool Errors / Tests</div>
-            <div className="text-base font-bold font-mono tabular-nums text-gray-900 dark:text-gray-100 mt-0.5">
-              {dayMetrics?.failed_tool_calls ?? 0} err · {dayMetrics?.test_runs ?? 0} tests
-            </div>
-            <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
-              {(dayMetrics?.interrupted ?? 0) > 0
-                ? `${dayMetrics?.interrupted} interrupted`
-                : (dayMetrics?.failed_tool_calls ?? 0) === 0
-                  ? 'Clean execution'
-                  : 'Inspect tool failures'}
+          <div className={cn('qp-tile', failedCalls > 0 || interruptedCount > 0 ? 'coral' : '')}>
+            <div className="qp-tile-icon">{failedCalls > 0 || interruptedCount > 0 ? '!' : '✓'}</div>
+            <div className="qp-tile-name">Command Health</div>
+            <div className="qp-tile-state font-mono">
+              {failedCalls} err · {testRuns} tests
+              {interruptedCount > 0 ? ` · ${interruptedCount} int` : ''}
             </div>
           </div>
         </div>
 
-        {/* Interactive Signal vs Noise Pills */}
-        <div className="flex flex-wrap gap-2 pt-1">
+        {/* Semantic Status Pills (border-radius: 999px, padding: 6px 12px, 6px glowing status dot) */}
+        <div className="flex flex-wrap gap-2 pt-0.5">
           <a
             href="#sessions"
             onClick={() => setCategoryFilter('work')}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/25 text-emerald-700 dark:text-emerald-400 text-xs font-medium hover:bg-emerald-500/15 transition-colors"
+            className="qp-pill emerald font-mono tabular-nums hover:brightness-110"
           >
-            <span className="size-2 rounded-full bg-emerald-500" />
-            <span className="font-bold font-mono tabular-nums">{counts.work}</span>
-            <span>Shipped Work</span>
+            <span className="qp-dot" />
+            <span>{counts.work} Shipped Work</span>
           </a>
           <a
             href="#sessions"
             onClick={() => setCategoryFilter('review')}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-sky-500/10 border border-sky-500/25 text-sky-700 dark:text-sky-400 text-xs font-medium hover:bg-sky-500/15 transition-colors"
+            className="qp-pill sky font-mono tabular-nums hover:brightness-110"
           >
-            <span className="size-2 rounded-full bg-sky-500" />
-            <span className="font-bold font-mono tabular-nums">{counts.review}</span>
-            <span>Code Reviews</span>
+            <span className="qp-dot" />
+            <span>{counts.review} Code Reviews</span>
           </a>
           {counts.blocked > 0 && (
             <a
               href="#sessions"
               onClick={() => setCategoryFilter('blocked')}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-red-500/10 border border-red-500/25 text-red-700 dark:text-red-400 text-xs font-medium hover:bg-red-500/15 transition-colors"
+              className="qp-pill coral font-mono tabular-nums hover:brightness-110"
             >
-              <span className="size-2 rounded-full bg-red-500" />
-              <span className="font-bold font-mono tabular-nums">{counts.blocked}</span>
-              <span>Blocked / Noise</span>
+              <span className="qp-dot" />
+              <span>{counts.blocked} Blocked</span>
             </a>
           )}
         </div>
       </div>
 
-      {/* === 1. Cost, Cache & Command Health + Next Steps === */}
-      {(efficiencySignals.length > 0 || nextSteps.length > 0) && (
-        <Section id="coaching" title="1 · Cost, Cache & Command Health + Next Steps">
-          <WorkflowCoachingCard
-            signals={efficiencySignals}
-            nextSteps={nextSteps}
-          />
-        </Section>
-      )}
-
-      {/* === 2. Pitfalls & Learnings — Grouped by Project === */}
-      {(learningsByProject.length > 0 || learnings.length > 0) && (
-        <Section id="learnings" title="2 · Pitfalls & Learnings — By Project">
-          <ProjectLearningsSection
-            groups={learningsByProject}
-            fallbackLearnings={learnings}
-          />
-        </Section>
-      )}
-
-      {/* === 3. What You Gained Today (Project Synthesis) === */}
-      {projectGains.length > 0 && (
-        <Section id="gains" title="3 · What Shipped & Why — By Project">
-          <div className="grid gap-4">
-            {projectGains.map(gain => (
-              <ProjectGainCard key={gain.project} gain={gain} />
-            ))}
-          </div>
-        </Section>
-      )}
-
-      {/* === Action Needed: Wasted / Blocked Background Runs === */}
-      {wasteAlerts.length > 0 && (
-        <Section id="alerts" title="Action Needed — Blocked Background Runs">
-          <WasteAlertCard alerts={wasteAlerts} />
-        </Section>
-      )}
-
-      {/* === 4. Consolidated Workflow Rules (1 card instead of N fragmented cards) === */}
-      {consolidatedRules.length > 0 ? (
-        <Section
-          id="extracted"
-          title={`4 · Consolidated Workflow Rules Extracted Today (${consolidatedRules.length})`}
-        >
-          <ConsolidatedRulesCard rules={consolidatedRules} onInstall={installCard} />
-        </Section>
-      ) : (
-        hasExtracted &&
-        summary && (
-          <Section id="extracted" title={t('dayDetail.sectionExtracted')}>
-            <div className="space-y-3">
-              <div className="grid gap-3 sm:grid-cols-2">
-                {summary.skills.map((card, i) => (
-                  <SkillCommandCard
-                    key={`skill-${card.title}-${i}`}
-                    card={card}
-                    type="skill"
-                    onInstall={installCard}
-                  />
-                ))}
-                {summary.commands.map((card, i) => (
-                  <SkillCommandCard
-                    key={`cmd-${card.title}-${i}`}
-                    card={card}
-                    type="command"
-                    onInstall={installCard}
-                  />
+      {/* === Multi-Column Operational Section Grid (min-width: 340px per column, gap: 20px) === */}
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(340px,1.12fr)_minmax(340px,0.88fr)] gap-5 items-start">
+        {/* Primary Operational Column: Shipped Outcomes + Pitfalls & Learnings + Waste Alerts */}
+        <div className="space-y-6 min-w-0">
+          {projectGains.length > 0 && (
+            <Section
+              id="gains"
+              title="1 · What Shipped & Why"
+              meta={`${projectGains.length} ${projectGains.length === 1 ? 'PROJECT' : 'PROJECTS'}`}
+            >
+              <div className="grid gap-3.5">
+                {projectGains.map(gain => (
+                  <ProjectGainCard key={gain.project} gain={gain} />
                 ))}
               </div>
-              {skippedProjects.length > 0 && (
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="text-xs text-gray-400 dark:text-gray-500">
-                    {t('dayDetail.noExtraction')}
-                  </span>
-                  {skippedProjects.map(p => (
-                    <span
-                      key={p}
-                      className="text-xs text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-gray-800/50 px-2 py-0.5 rounded-full"
-                    >
-                      {p}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-          </Section>
-        )
-      )}
+            </Section>
+          )}
 
-      {/* === 4. Sessions: Segmented by Work / Reviews / Blocked === */}
-      <Section id="sessions" title={t('dayDetail.sectionSessions')}>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap gap-1.5">
-            {(
-              [
-                { id: 'work', label: `Shipped Work (${counts.work})` },
-                { id: 'review', label: `Reviews (${counts.review})` },
-                ...(counts.blocked > 0 ? [{ id: 'blocked', label: `Blocked (${counts.blocked})` }] : []),
-                { id: 'all', label: `All (${sessions.length})` },
-              ] as { id: 'work' | 'review' | 'blocked' | 'all'; label: string }[]
-            ).map(tab => (
-              <button
-                key={tab.id}
-                onClick={() => setCategoryFilter(tab.id)}
-                className={cn(
-                  'px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors tabular-nums',
-                  categoryFilter === tab.id
-                    ? 'bg-orange-500/20 text-orange-600 dark:text-orange-400 border-orange-500/40'
-                    : 'text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-800 hover:border-orange-400/40'
-                )}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
+          {(learningsByProject.length > 0 || learnings.length > 0) && (
+            <Section
+              id="learnings"
+              title="2 · Pitfalls & Learnings"
+              meta="BY PROJECT"
+            >
+              <ProjectLearningsSection
+                groups={learningsByProject}
+                fallbackLearnings={learnings}
+              />
+            </Section>
+          )}
 
-          {runtimes.length > 1 && (
-            <div className="flex flex-wrap gap-1.5">
-              <button
-                onClick={() => setRuntimeFilter(null)}
-                className={cn(
-                  'px-2.5 py-1 text-xs font-medium rounded-full border transition-colors',
-                  runtimeFilter === null
-                    ? 'bg-sky-500/20 text-sky-600 dark:text-sky-400 border-sky-500/30'
-                    : 'text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-700'
-                )}
-              >
-                {t('dayDetail.filterAll')}
-              </button>
-              {runtimes.map(r => (
-                <button
-                  key={r}
-                  onClick={() => setRuntimeFilter(r)}
-                  className={cn(
-                    'px-2.5 py-1 text-xs font-medium rounded-full border transition-colors font-mono tabular-nums',
-                    runtimeFilter === r
-                      ? 'bg-sky-500/20 text-sky-600 dark:text-sky-400 border-sky-500/30'
-                      : 'text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-700'
-                  )}
-                >
-                  {r}
-                </button>
-              ))}
-            </div>
+          {wasteAlerts.length > 0 && (
+            <Section id="alerts" title="Action Needed — Blocked Runs" meta="CORAL ALERT">
+              <WasteAlertCard alerts={wasteAlerts} />
+            </Section>
           )}
         </div>
 
-        {filteredSessions.length > 0 ? (
-          <div className="space-y-2.5">
-            {filteredSessions.map(session => (
-              <SessionRow
-                key={session.name}
-                session={session}
-                date={date!}
-                insight={insightByName.get(session.name)}
+        {/* Secondary Operational Column: Coaching + Workflow Rules + Live Session Feed */}
+        <div className="space-y-6 min-w-0">
+          {(efficiencySignals.length > 0 || nextSteps.length > 0) && (
+            <Section
+              id="coaching"
+              title="3 · Coaching & Next Steps"
+              meta={`${nextSteps.length} NEXT`}
+            >
+              <WorkflowCoachingCard
+                signals={efficiencySignals}
+                nextSteps={nextSteps}
               />
-            ))}
-          </div>
-        ) : (
-          <div className="text-center py-8 bg-gray-50 dark:bg-daily-light rounded-xl border border-gray-200 dark:border-gray-800">
-            <p className="text-gray-500 dark:text-gray-400">{t('dayDetail.noSessions')}</p>
-          </div>
-        )}
-      </Section>
+            </Section>
+          )}
+
+          {consolidatedRules.length > 0 ? (
+            <Section
+              id="extracted"
+              title="4 · Consolidated Workflow Rules"
+              meta={`${consolidatedRules.length} RULES`}
+            >
+              <ConsolidatedRulesCard rules={consolidatedRules} onInstall={installCard} />
+            </Section>
+          ) : (
+            hasExtracted &&
+            summary && (
+              <Section
+                id="extracted"
+                title={t('dayDetail.sectionExtracted')}
+                meta={`${summary.skills.length + summary.commands.length} ITEMS`}
+              >
+                <div className="grid gap-2.5">
+                  {summary.skills.map((card, i) => (
+                    <SkillCommandCard
+                      key={`skill-${card.title}-${i}`}
+                      card={card}
+                      type="skill"
+                      onInstall={installCard}
+                    />
+                  ))}
+                  {summary.commands.map((card, i) => (
+                    <SkillCommandCard
+                      key={`cmd-${card.title}-${i}`}
+                      card={card}
+                      type="command"
+                      onInstall={installCard}
+                    />
+                  ))}
+                </div>
+              </Section>
+            )
+          )}
+
+          {/* Sessions Feed with 3-Up Quick-Action Strip (height: 60px, border-radius: 16px, gap: 8px) */}
+          <Section
+            id="sessions"
+            title={t('dayDetail.sectionSessions')}
+            meta={`${filteredSessions.length} / ${sessions.length}`}
+          >
+            <div className={cn('grid gap-2', counts.blocked > 0 ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3')}>
+              <button
+                type="button"
+                onClick={() => setCategoryFilter('all')}
+                className={cn(
+                  'qp-quick-btn',
+                  categoryFilter === 'all' ? 'amber' : 'text-[#94A3B8] hover:text-[#F8FAFC]'
+                )}
+              >
+                <span className="text-xs font-bold">All Runs</span>
+                <span className="font-mono text-[11px] tabular-nums opacity-85">
+                  {sessions.length} total
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setCategoryFilter(prev => (prev === 'work' ? 'all' : 'work'))}
+                className={cn(
+                  'qp-quick-btn',
+                  categoryFilter === 'work' ? 'emerald' : 'text-[#94A3B8] hover:text-[#F8FAFC]'
+                )}
+              >
+                <span className="text-xs font-bold">Shipped</span>
+                <span className="font-mono text-[11px] tabular-nums opacity-85">
+                  {counts.work} runs
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setCategoryFilter(prev => (prev === 'review' ? 'all' : 'review'))}
+                className={cn(
+                  'qp-quick-btn',
+                  categoryFilter === 'review' ? 'sky' : 'text-[#94A3B8] hover:text-[#F8FAFC]'
+                )}
+              >
+                <span className="text-xs font-bold">Reviews</span>
+                <span className="font-mono text-[11px] tabular-nums opacity-85">
+                  {counts.review} passes
+                </span>
+              </button>
+
+              {counts.blocked > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setCategoryFilter(prev => (prev === 'blocked' ? 'all' : 'blocked'))}
+                  className={cn(
+                    'qp-quick-btn',
+                    categoryFilter === 'blocked' ? 'coral' : 'text-[#94A3B8] hover:text-[#F8FAFC]'
+                  )}
+                >
+                  <span className="text-xs font-bold">Blocked</span>
+                  <span className="font-mono text-[11px] tabular-nums opacity-85">
+                    {counts.blocked} blocked
+                  </span>
+                </button>
+              )}
+            </div>
+
+            {runtimes.length > 1 && (
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setRuntimeFilter(null)}
+                  className={cn(
+                    'qp-pill !py-1 !px-2.5 !text-[11px] font-mono',
+                    runtimeFilter === null ? 'sky' : 'hover:text-[#F8FAFC]'
+                  )}
+                >
+                  {t('dayDetail.filterAll')}
+                </button>
+                {runtimes.map(r => (
+                  <button
+                    type="button"
+                    key={r}
+                    onClick={() => setRuntimeFilter(r)}
+                    className={cn(
+                      'qp-pill !py-1 !px-2.5 !text-[11px] font-mono tabular-nums',
+                      runtimeFilter === r ? 'sky' : 'hover:text-[#F8FAFC]'
+                    )}
+                  >
+                    {r}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {filteredSessions.length > 0 ? (
+              <div className="space-y-2.5">
+                {filteredSessions.map(session => (
+                  <SessionRow
+                    key={session.name}
+                    session={session}
+                    date={date!}
+                    insight={insightByName.get(session.name)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="qp-card text-center py-8">
+                <p className="text-xs font-mono text-[#64748B]">{t('dayDetail.noSessions')}</p>
+              </div>
+            )}
+          </Section>
+        </div>
+      </div>
     </div>
   )
 }

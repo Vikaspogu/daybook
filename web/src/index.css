@@ -2,87 +2,385 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Custom scrollbar - Light mode */
+/* Quiet Precision / Dark Obsidian Scrollbars */
 ::-webkit-scrollbar {
-  width: 4px;
-  height: 4px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #f3f4f6;
+  background: #0B0E14;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #f97316;
-  border-radius: 2px;
+  background: rgba(148, 163, 184, 0.24);
+  border-radius: 999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #ea580c;
+  background: rgba(251, 191, 36, 0.5);
 }
 
-/* Custom scrollbar - Dark mode */
-.dark ::-webkit-scrollbar-track {
-  background: #1a1a1a;
-}
-
-.dark ::-webkit-scrollbar-thumb:hover {
-  background: #fb923c;
-}
-
-/* Smooth scrolling */
 html {
   scroll-behavior: smooth;
+  background-color: #0B0E14;
+  color-scheme: dark;
 }
 
-/* Base styles */
 body {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: 'Figtree', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  background-color: #0B0E14;
+  color: #F8FAFC;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Markdown content styling - Light mode */
+.font-mono,
+.tabular-nums,
+.qp-mono {
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* === Quiet Precision / Dark Obsidian Design System === */
+
+.qp-canvas {
+  background-color: #0B0E14;
+  color: #F8FAFC;
+}
+
+/* Default Card Surface (Idle) */
+.qp-card {
+  background: linear-gradient(180deg, rgba(24, 29, 40, 0.88) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  border-radius: 18px;
+}
+
+/* Hero Summary Card */
+.qp-hero {
+  background: linear-gradient(180deg, rgba(24, 29, 40, 0.88) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  border-radius: 22px;
+  padding: 18px 20px;
+}
+
+/* Type Scale */
+.qp-hero-title {
+  font-size: clamp(22px, 2.5vw, 26px);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  color: #F8FAFC;
+}
+
+.qp-kicker {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.10em;
+  color: #64748B;
+}
+
+.qp-meta {
+  font-size: 11px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  color: #475569;
+}
+
+.qp-card-title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #F8FAFC;
+}
+
+.qp-card-state {
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: #94A3B8;
+}
+
+/* Semantic Active Surfaces */
+.qp-surface-emerald {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.14) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border: 1px solid rgba(52, 211, 153, 0.30);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.qp-surface-amber {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.16) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border: 1px solid rgba(251, 191, 36, 0.34);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.qp-surface-sky {
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.14) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border: 1px solid rgba(56, 189, 248, 0.30);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.qp-surface-coral {
+  background: linear-gradient(135deg, rgba(244, 63, 94, 0.16) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border: 1px solid rgba(251, 113, 133, 0.36);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* Interactive Control Tile (2-up grid, 66px fixed height, "i n" / "i l") */
+.qp-tile {
+  height: 66px;
+  border-radius: 18px;
+  padding: 12px 14px;
+  display: grid;
+  grid-template-areas:
+    "i n"
+    "i l";
+  grid-template-columns: 38px minmax(0, 1fr);
+  column-gap: 11px;
+  align-items: center;
+  background: linear-gradient(180deg, rgba(24, 29, 40, 0.88) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.qp-tile-icon {
+  grid-area: i;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.05);
+  color: #94A3B8;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.qp-tile-name {
+  grid-area: n;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #F8FAFC;
+  align-self: end;
+  line-height: 1.2;
+}
+
+.qp-tile-state {
+  grid-area: l;
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #94A3B8;
+  align-self: start;
+  line-height: 1.25;
+}
+
+.qp-tile.emerald {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.14) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border-color: rgba(52, 211, 153, 0.30);
+}
+.qp-tile.emerald .qp-tile-icon {
+  background: rgba(16, 185, 129, 0.18);
+  color: #34D399;
+}
+.qp-tile.emerald .qp-tile-state {
+  color: #34D399;
+}
+
+.qp-tile.amber {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.16) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border-color: rgba(251, 191, 36, 0.34);
+}
+.qp-tile.amber .qp-tile-icon {
+  background: rgba(245, 158, 11, 0.20);
+  color: #FBBF24;
+}
+.qp-tile.amber .qp-tile-state {
+  color: #FBBF24;
+}
+
+.qp-tile.sky {
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.14) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border-color: rgba(56, 189, 248, 0.30);
+}
+.qp-tile.sky .qp-tile-icon {
+  background: rgba(56, 189, 248, 0.18);
+  color: #38BDF8;
+}
+.qp-tile.sky .qp-tile-state {
+  color: #38BDF8;
+}
+
+.qp-tile.coral {
+  background: linear-gradient(135deg, rgba(244, 63, 94, 0.16) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border-color: rgba(251, 113, 133, 0.36);
+}
+.qp-tile.coral .qp-tile-icon {
+  background: rgba(244, 63, 94, 0.20);
+  color: #FB7185;
+}
+.qp-tile.coral .qp-tile-state {
+  color: #FB7185;
+}
+
+/* Quick Action Button (3-up row, fixed height 60px, border-radius 16px) */
+.qp-quick-btn {
+  height: 60px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(24, 29, 40, 0.88) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 6px 8px;
+  transition: all 0.15s ease;
+}
+
+.qp-quick-btn.emerald {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.14) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border-color: rgba(52, 211, 153, 0.30);
+  color: #34D399;
+}
+
+.qp-quick-btn.sky {
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.14) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border-color: rgba(56, 189, 248, 0.30);
+  color: #38BDF8;
+}
+
+.qp-quick-btn.coral {
+  background: linear-gradient(135deg, rgba(244, 63, 94, 0.16) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border-color: rgba(251, 113, 133, 0.36);
+  color: #FB7185;
+}
+
+.qp-quick-btn.amber {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.16) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border-color: rgba(251, 191, 36, 0.34);
+  color: #FBBF24;
+}
+
+/* Status Pills & Glowing 6px Dot */
+.qp-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(16, 20, 28, 0.88);
+  color: #94A3B8;
+  transition: all 0.15s ease;
+}
+
+.qp-pill.emerald {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.14) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border-color: rgba(52, 211, 153, 0.30);
+  color: #34D399;
+}
+
+.qp-pill.amber {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.16) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border-color: rgba(251, 191, 36, 0.34);
+  color: #FBBF24;
+}
+
+.qp-pill.sky {
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.14) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border-color: rgba(56, 189, 248, 0.30);
+  color: #38BDF8;
+}
+
+.qp-pill.coral {
+  background: linear-gradient(135deg, rgba(244, 63, 94, 0.16) 0%, rgba(16, 20, 28, 0.92) 100%);
+  border-color: rgba(251, 113, 133, 0.36);
+  color: #FB7185;
+}
+
+.qp-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+  flex-shrink: 0;
+}
+
+/* Floating Bottom Glass Dock (Mobile) */
+.qp-dock {
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  background: rgba(15, 19, 28, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 22px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* Markdown content styling */
 .markdown-content h1 {
-  @apply text-2xl font-bold text-orange-600 dark:text-orange-400 mb-4;
+  @apply text-xl font-extrabold text-slate-50 mb-4 tracking-tight;
 }
 
 .markdown-content h2 {
-  @apply text-xl font-semibold text-orange-500 dark:text-orange-300 mt-6 mb-3;
+  @apply text-base font-bold text-amber-400 mt-5 mb-2.5 tracking-tight;
 }
 
 .markdown-content h3 {
-  @apply text-lg font-medium text-gray-800 dark:text-gray-200 mt-4 mb-2;
+  @apply text-sm font-bold text-slate-200 mt-4 mb-2;
 }
 
 .markdown-content p {
-  @apply text-gray-700 dark:text-gray-300 mb-3 leading-relaxed text-pretty;
+  @apply text-slate-300 mb-3 leading-relaxed text-sm text-pretty;
 }
 
 .markdown-content ul {
-  @apply list-disc list-inside mb-3 space-y-1;
+  @apply list-disc list-inside mb-3 space-y-1 text-sm;
 }
 
 .markdown-content li {
-  @apply text-gray-700 dark:text-gray-300;
+  @apply text-slate-300;
 }
 
 .markdown-content code {
-  @apply bg-gray-100 dark:bg-daily-light px-1.5 py-0.5 rounded text-orange-600 dark:text-orange-300 text-sm;
+  @apply bg-slate-900/90 border border-white/10 px-1.5 py-0.5 rounded text-amber-300 font-mono text-xs;
 }
 
 .markdown-content pre {
-  @apply bg-gray-100 dark:bg-daily-light p-4 rounded-lg overflow-x-auto mb-4;
+  @apply bg-slate-950/90 border border-white/10 p-4 rounded-xl overflow-x-auto mb-4 text-xs;
 }
 
 .markdown-content pre code {
-  @apply bg-transparent p-0;
+  @apply bg-transparent border-0 p-0;
 }
 
 .markdown-content a {
-  @apply text-orange-600 dark:text-orange-400 hover:text-orange-500 dark:hover:text-orange-300 underline;
+  @apply text-sky-400 hover:text-sky-300 underline;
 }
 
 .markdown-content blockquote {
-  @apply border-l-4 border-orange-500 pl-4 italic text-gray-500 dark:text-gray-400 my-4;
+  @apply border-l-2 border-amber-400/60 pl-4 italic text-slate-400 my-4;
 }
