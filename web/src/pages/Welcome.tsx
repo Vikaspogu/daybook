@@ -14,19 +14,19 @@ import {
   subMonths,
 } from 'date-fns'
 import { useApi } from '../hooks/useApi'
-import type { DateItem, DailySummary } from '../hooks/useApi'
+import type { DateItem } from '../hooks/useApi'
 import { cn } from '../lib/utils'
 import { formatCost } from '../components/UsageCharts'
 import { useLanguage } from '../contexts/LanguageContext'
+import { OverviewStrip } from '../components/OverviewStrip'
 
 export function Welcome() {
   const [days, setDays] = useState<DateItem[]>([])
-  const [summaries, setSummaries] = useState<Map<string, DailySummary>>(new Map())
   const [dailyCostMap, setDailyCostMap] = useState<Map<string, number>>(new Map())
   const [loading, setLoading] = useState(true)
   const [currentMonth, setCurrentMonth] = useState(new Date())
   const [slideDirection, setSlideDirection] = useState<'left' | 'right'>('left')
-  const { fetchDates, fetchDailySummary, fetchInsights } = useApi()
+  const { fetchDates, fetchInsights } = useApi()
   const navigate = useNavigate()
   const { t } = useLanguage()
 
@@ -41,25 +41,6 @@ export function Welcome() {
         const dates = await fetchDates()
         setDays(dates)
 
-        // Load summaries for dates that have digest
-        const results = await Promise.all(
-          dates
-            .filter(d => d.has_digest)
-            .map(async (d) => {
-              try {
-                const summary = await fetchDailySummary(d.date)
-                return [d.date, summary] as const
-              } catch {
-                return null
-              }
-            })
-        )
-
-        const map = new Map<string, DailySummary>()
-        for (const r of results) {
-          if (r) map.set(r[0], r[1])
-        }
-        setSummaries(map)
 
         // Load usage data for cost display
         try {
@@ -82,7 +63,7 @@ export function Welcome() {
     }
 
     loadData()
-  }, [fetchDates, fetchDailySummary, fetchInsights])
+  }, [fetchDates, fetchInsights])
 
   const archiveMap = useMemo(() => {
     const map = new Map<string, DateItem>()
@@ -209,6 +190,8 @@ export function Welcome() {
         </p>
       </div>
 
+      <OverviewStrip days={days} />
+
 
       {/* Month navigation */}
       <div className="flex items-center justify-between mb-4">
@@ -274,7 +257,6 @@ export function Welcome() {
           {calendarDays.map(day => {
             const dateStr = format(day, 'yyyy-MM-dd')
             const archive = archiveMap.get(dateStr)
-            const summary = summaries.get(dateStr)
             const dayCost = dailyCostMap.get(dateStr)
             const isCurrentMonth = isSameMonth(day, currentMonth)
             const today = isToday(day)
@@ -327,10 +309,10 @@ export function Welcome() {
                   </span>
                 )}
 
-                {/* Summary preview */}
-                {hasArchive && summary?.overview && (
+                {/* Daily preview */}
+                {archive?.preview && (
                   <p className="text-[10px] leading-tight text-gray-500 dark:text-gray-400 line-clamp-2 w-full">
-                    {summary.overview}
+                    {archive?.preview}
                   </p>
                 )}
               </button>

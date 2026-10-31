@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, memo } from 'react'
+import { useState, useEffect, useRef, memo, useMemo } from 'react'
 import { motion } from 'framer-motion'
 import { useApi } from '../hooks/useApi'
 import type { ConversationMessage, ConversationContentBlock } from '../hooks/useApi'
@@ -9,6 +9,62 @@ import { useLanguage } from '../contexts/LanguageContext'
 interface ChatViewProps {
   date: string
   name: string
+}
+
+interface PairedToolCall {
+  id: string
+  name: string
+  input: unknown
+  result?: string
+}
+
+type GroupedBlock =
+  | { kind: 'text'; text: string }
+  | { kind: 'tools'; calls: PairedToolCall[] }
+
+// Group consecutive tool_use + tool_result blocks so multi-tool turns render
+// as one collapsible "Ran N tools" bar instead of a wall of JSON.
+function groupMessageBlocks(blocks: ConversationContentBlock[]): GroupedBlock[] {
+  const out: GroupedBlock[] = []
+  let currentTools: PairedToolCall[] = []
+
+  const flushTools = () => {
+    if (currentTools.length > 0) {
+      out.push({ kind: 'tools', calls: currentTools })
+      currentTools = []
+    }
+  }
+
+  for (const block of blocks) {
+    if (block.type === 'text') {
+      if (block.text.trim()) {
+        flushTools()
+        out.push({ kind: 'text', text: block.text })
+      }
+    } else if (block.type === 'tool_use') {
+      currentTools.push({
+        id: block.tool_use_id,
+        name: block.name,
+        input: block.input,
+      })
+    } else if (block.type === 'tool_result') {
+      const match = block.tool_use_id
+        ? currentTools.find(t => t.id === block.tool_use_id && t.result === undefined)
+        : [...currentTools].reverse().find(t => !t.id && t.result === undefined)
+      if (match) {
+        match.result = block.content
+      } else if (block.content) {
+        currentTools.push({
+          id: block.tool_use_id,
+          name: 'result',
+          input: '',
+          result: block.content,
+        })
+      }
+    }
+  }
+  flushTools()
+  return out
 }
 
 export function ChatView({ date, name }: ChatViewProps) {
@@ -109,6 +165,9 @@ export function ChatView({ date, name }: ChatViewProps) {
 const MessageBubble = memo(function MessageBubble({ message }: { message: ConversationMessage }) {
   const isUser = message.role === 'user'
   const { t } = useLanguage()
+  const grouped = useMemo(() => groupMessageBlocks(message.content), [message.content])
+
+  if (grouped.length === 0) return null
 
   return (
     <motion.div
@@ -126,53 +185,99 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: Conver
         )}
       >
         {/* Role label */}
-        <div className={cn(
-          'text-[11px] font-medium mb-1.5 flex items-center gap-2',
-          isUser ? 'text-orange-400' : 'text-gray-400 dark:text-gray-500'
-        )}>
+        <div
+          className={cn(
+            'text-[11px] font-semibold uppercase tracking-wider mb-1.5 flex items-center gap-2',
+            isUser ? 'text-orange-500 dark:text-orange-400' : 'text-sky-600 dark:text-sky-400'
+          )}
+        >
           <span>{isUser ? t('chatView.you') : t('chatView.claude')}</span>
           {message.timestamp && (
-            <span className="text-gray-400 dark:text-gray-600 font-normal">
+            <span className="text-gray-400 dark:text-gray-500 font-mono font-normal normal-case tracking-normal tabular-nums">
               {formatTimestamp(message.timestamp)}
             </span>
           )}
         </div>
 
-        {/* Content blocks */}
+        {/* Grouped content blocks */}
         <div className="space-y-2">
-          {message.content.map((block, i) => (
-            <ContentBlockRenderer key={i} block={block} />
-          ))}
+          {grouped.map((g, i) =>
+            g.kind === 'text' ? (
+              <div key={i} className="text-sm leading-relaxed text-gray-800 dark:text-gray-200">
+                <MarkdownRenderer content={g.text} />
+              </div>
+            ) : (
+              <ToolCallGroup key={i} calls={g.calls} />
+            )
+          )}
         </div>
       </div>
     </motion.div>
   )
 })
 
-function ContentBlockRenderer({ block }: { block: ConversationContentBlock }) {
-  switch (block.type) {
-    case 'text':
-      return (
-        <div className="text-sm leading-relaxed text-gray-800 dark:text-gray-200">
-          <MarkdownRenderer content={block.text} />
-        </div>
-      )
-    case 'tool_use':
-      return <ToolCallBlock name={block.name} input={block.input} toolUseId={block.tool_use_id} />
-    case 'tool_result':
-      return <ToolResultBlock content={block.content} />
-    default:
-      return null
-  }
-}
+function ToolCallGroup({ calls }: { calls: PairedToolCall[] }) {
+  const [groupOpen, setGroupOpen] = useState(false)
 
-function ToolCallBlock({ name, input, toolUseId: _toolUseId }: { name: string; input: unknown; toolUseId: string }) {
-  const [expanded, setExpanded] = useState(false)
-  const summary = getToolSummary(name, input)
+  const countsByName = useMemo(() => {
+    const map = new Map<string, number>()
+    for (const c of calls) {
+      map.set(c.name, (map.get(c.name) ?? 0) + 1)
+    }
+    return [...map.entries()]
+  }, [calls])
+
+  if (calls.length === 1) {
+    return <SingleToolCall call={calls[0]} />
+  }
 
   return (
-    <div className="my-1 border border-gray-300/50 dark:border-gray-600/50 rounded-md overflow-hidden">
+    <div className="my-1 rounded-xl border border-gray-200 dark:border-gray-700/60 bg-white/60 dark:bg-black/30 overflow-hidden">
       <button
+        type="button"
+        onClick={() => setGroupOpen(o => !o)}
+        className="w-full flex flex-wrap items-center gap-2 px-3 py-2 text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-100/70 dark:hover:bg-white/5 transition-colors text-left"
+      >
+        <span className="text-gray-400 dark:text-gray-500 font-mono">
+          {groupOpen ? '▾' : '▸'}
+        </span>
+        <span className="font-medium tabular-nums">
+          Ran {calls.length} tools
+        </span>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {countsByName.map(([toolName, count]) => (
+            <span
+              key={toolName}
+              className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-mono text-[11px] tabular-nums"
+            >
+              {toolName}{count > 1 ? ` ×${count}` : ''}
+            </span>
+          ))}
+        </div>
+        <span className="ml-auto text-[11px] text-gray-400 dark:text-gray-500">
+          {groupOpen ? 'collapse' : 'expand'}
+        </span>
+      </button>
+      {groupOpen && (
+        <div className="px-3 pb-2.5 pt-1 space-y-1.5 border-t border-gray-200/70 dark:border-gray-700/50">
+          {calls.map((c, idx) => (
+            <SingleToolCall key={`${c.id}-${idx}`} call={c} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SingleToolCall({ call }: { call: PairedToolCall }) {
+  const [expanded, setExpanded] = useState(false)
+  const { t } = useLanguage()
+  const summary = getToolSummary(call.name, call.input)
+
+  return (
+    <div className="my-1 border border-gray-300/50 dark:border-gray-700/60 rounded-lg overflow-hidden">
+      <button
+        type="button"
         onClick={() => setExpanded(!expanded)}
         className={cn(
           'w-full flex items-center gap-2 px-3 py-1.5 text-xs',
@@ -180,8 +285,10 @@ function ToolCallBlock({ name, input, toolUseId: _toolUseId }: { name: string; i
           'text-gray-600 dark:text-gray-400 transition-colors text-left'
         )}
       >
-        <span className="text-orange-500 font-semibold font-mono shrink-0">{name}</span>
-        {summary && <span className="truncate font-mono opacity-70">{summary}</span>}
+        <span className="text-orange-500 dark:text-orange-400 font-semibold font-mono shrink-0">
+          {call.name}
+        </span>
+        {summary && <span className="truncate font-mono opacity-75">{summary}</span>}
         <svg
           className={cn('size-3 shrink-0 ml-auto transition-transform', expanded && 'rotate-180')}
           fill="none"
@@ -192,43 +299,24 @@ function ToolCallBlock({ name, input, toolUseId: _toolUseId }: { name: string; i
         </svg>
       </button>
       {expanded && (
-        <div className="px-3 py-2 text-xs font-mono bg-gray-100/50 dark:bg-daily-dark border-t border-gray-300/50 dark:border-gray-600/50 max-h-60 overflow-auto">
-          <pre className="whitespace-pre-wrap break-all text-gray-600 dark:text-gray-400">
-            {typeof input === 'string' ? input : JSON.stringify(input, null, 2)}
-          </pre>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function ToolResultBlock({ content }: { content: string }) {
-  const [expanded, setExpanded] = useState(false)
-  const { t } = useLanguage()
-
-  if (!content) return null
-
-  const preview = content.length > 100 ? content.slice(0, 100) + '...' : content
-
-  return (
-    <div className="my-1">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className={cn(
-          'w-full text-left px-3 py-1.5 text-xs font-mono rounded-md',
-          'bg-green-500/5 dark:bg-green-500/5 text-gray-500 dark:text-gray-500',
-          'border border-green-500/10 dark:border-green-500/10',
-          'hover:bg-green-500/10 transition-colors'
-        )}
-      >
-        <span className="text-green-600 dark:text-green-500 font-semibold mr-2">{t('chatView.result')}</span>
-        {!expanded && <span className="opacity-60">{preview}</span>}
-      </button>
-      {expanded && (
-        <div className="mt-1 px-3 py-2 text-xs font-mono bg-green-500/5 border border-green-500/10 rounded-md max-h-60 overflow-auto">
-          <pre className="whitespace-pre-wrap break-all text-gray-600 dark:text-gray-400">
-            {content}
-          </pre>
+        <div className="divide-y divide-gray-200 dark:divide-gray-700/60">
+          {call.input !== '' && call.input != null && (
+            <div className="px-3 py-2 text-xs font-mono bg-gray-100/50 dark:bg-daily-dark max-h-60 overflow-auto">
+              <pre className="whitespace-pre-wrap break-all text-gray-600 dark:text-gray-400">
+                {typeof call.input === 'string' ? call.input : JSON.stringify(call.input, null, 2)}
+              </pre>
+            </div>
+          )}
+          {call.result && (
+            <div className="px-3 py-2 text-xs font-mono bg-green-500/5 max-h-60 overflow-auto">
+              <div className="text-[10px] font-semibold text-green-600 dark:text-green-500 uppercase tracking-wider mb-1">
+                {t('chatView.result')}
+              </div>
+              <pre className="whitespace-pre-wrap break-all text-gray-600 dark:text-gray-400">
+                {call.result}
+              </pre>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -237,29 +325,25 @@ function ToolResultBlock({ content }: { content: string }) {
 
 function getToolSummary(name: string, input: unknown): string {
   const inp = input as Record<string, unknown>
-  if (!inp) return ''
-  switch (name) {
-    case 'Read':
-      return String(inp.file_path || '')
-    case 'Write':
-      return String(inp.file_path || '')
-    case 'Edit':
-      return String(inp.file_path || '')
-    case 'Bash':
-      return String(inp.command || '').slice(0, 80)
-    case 'Glob':
-      return String(inp.pattern || '')
-    case 'Grep':
-      return String(inp.pattern || '')
-    case 'Task':
-      return String(inp.description || '').slice(0, 60)
-    case 'WebFetch':
-      return String(inp.url || '').slice(0, 60)
-    case 'WebSearch':
-      return String(inp.query || '').slice(0, 60)
-    default:
-      return ''
+  if (!inp || typeof inp !== 'object') return ''
+  const lower = name.toLowerCase()
+  if (lower === 'read' || lower === 'write' || lower === 'edit' || lower === 'replace' || lower === 'replace_match' || lower === 'insert') {
+    return String(inp.file_path || inp.path || '')
   }
+  if (lower === 'bash' || lower === 'hypa_shell') {
+    return String(inp.command || '').slice(0, 80)
+  }
+  if (lower === 'glob' || lower === 'grep' || lower === 'hypa_grep' || lower === 'hypa_find') {
+    return String(inp.pattern || inp.path || '')
+  }
+  if (lower === 'task' || lower === 'subagent' || lower.endsWith('delegate_task')) {
+    return String(inp.description || inp.title || inp.task || '').slice(0, 60)
+  }
+  if (lower === 'webfetch' || lower === 'websearch' || lower === 'web_search') {
+    return String(inp.url || inp.query || '').slice(0, 60)
+  }
+  const fallback = inp.file_path ?? inp.path ?? inp.command ?? inp.pattern ?? inp.query ?? inp.title
+  return typeof fallback === 'string' ? fallback.slice(0, 60) : ''
 }
 
 function formatTimestamp(ts: string): string {

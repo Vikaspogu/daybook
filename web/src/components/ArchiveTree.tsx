@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { format, parseISO, isToday, isYesterday } from 'date-fns'
@@ -13,9 +13,6 @@ interface DateNodeState {
   sessionsLoaded: boolean
 }
 
-type NavItem =
-  | { type: 'daily'; date: string; path: string }
-  | { type: 'session'; date: string; name: string; path: string }
 
 export function ArchiveTree() {
   const [dates, setDates] = useState<DateItem[]>([])
@@ -26,76 +23,6 @@ export function ArchiveTree() {
   const location = useLocation()
   const { t } = useLanguage()
 
-  // Build flat navigation list (only navigable items: daily summaries and sessions)
-  const navItems = useMemo<NavItem[]>(() => {
-    const items: NavItem[] = []
-    dates.forEach(dateItem => {
-      const state = dateStates[dateItem.date]
-      // Always include daily summary path for each date
-      items.push({ type: 'daily', date: dateItem.date, path: `/day/${dateItem.date}` })
-      // Include sessions if expanded and loaded
-      if (state?.expanded && state.sessionsLoaded && state.sessions.length > 0) {
-        state.sessions.forEach(session => {
-          items.push({
-            type: 'session',
-            date: dateItem.date,
-            name: session.name,
-            path: `/day/${dateItem.date}/session/${encodeURIComponent(session.name)}`
-          })
-        })
-      }
-    })
-    return items
-  }, [dates, dateStates])
-
-  // Find current index based on location
-  const findCurrentIndex = useCallback(() => {
-    const path = location.pathname
-    const idx = navItems.findIndex(item => item.path === path)
-    return idx >= 0 ? idx : 0
-  }, [navItems, location.pathname])
-
-  // Keyboard navigation - directly navigate on arrow key
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Skip if modifier key held (allow browser back/forward)
-      if (e.metaKey || e.ctrlKey) return
-
-      // Only handle when on Archives page
-      if (!location.pathname.startsWith('/day') && location.pathname !== '/') return
-
-      // Skip if user is typing
-      const target = e.target as HTMLElement
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
-        return
-      }
-
-      if (navItems.length === 0) return
-
-      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-        e.preventDefault()
-
-        const currentIdx = findCurrentIndex()
-        let nextIdx: number
-
-        if (e.key === 'ArrowUp') {
-          nextIdx = currentIdx > 0 ? currentIdx - 1 : navItems.length - 1
-        } else {
-          nextIdx = currentIdx < navItems.length - 1 ? currentIdx + 1 : 0
-        }
-
-        const nextItem = navItems[nextIdx]
-        // Auto-expand the date if navigating to it (collapse others)
-        if (!dateStates[nextItem.date]?.expanded) {
-          expandOnly(nextItem.date)
-        }
-        navigate(nextItem.path)
-      }
-    }
-
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [navItems, findCurrentIndex, location.pathname, navigate, dateStates])
 
   // Load dates on mount
   useEffect(() => {
@@ -238,6 +165,11 @@ export function ArchiveTree() {
                 <div className="text-xs text-gray-500 mt-0.5">
                   {dateItem.session_count} {dateItem.session_count === 1 ? t('archive.session') : t('archive.sessions')}
                 </div>
+                {dateItem.session_titles.length > 0 && (
+                  <div className="text-xs text-gray-400 dark:text-gray-600 mt-0.5 truncate">
+                    {dateItem.session_titles.join(' · ')}
+                  </div>
+                )}
               </div>
             </button>
 

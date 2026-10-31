@@ -6,6 +6,8 @@ export interface DateItem {
   date: string
   session_count: number
   has_digest: boolean
+  preview?: string
+  session_titles: string[]
 }
 
 export interface SummaryCard {
@@ -27,15 +29,28 @@ export interface Session {
   name: string
   title?: string
   summary_preview?: string
+  runtime?: string
+  project?: string
+  started_utc?: string
+  ended_utc?: string
+  cost_usd?: number
 }
 
 export interface SessionDetail {
   content: string
   metadata?: {
     title?: string
+    date?: string
+    session_id?: string
     cwd?: string
     git_branch?: string
     duration?: string
+    runtime?: string
+    project?: string
+    machine?: string
+    started_utc?: string
+    ended_utc?: string
+    cost_usd?: number
   }
   file_path?: string
 }

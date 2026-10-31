@@ -1,62 +1,35 @@
-import { useEffect, useCallback } from 'react'
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { useState } from 'react'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { cn } from '../lib/utils'
 import { ThemeToggle } from './ThemeToggle'
 import { LanguageToggle } from './LanguageToggle'
 import { useLanguage } from '../contexts/LanguageContext'
 
-const TABS = ['/', '/insights', '/settings'] as const
-
 export function Layout() {
   const location = useLocation()
-  const navigate = useNavigate()
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const isArchiveRoute = location.pathname === '/' || location.pathname.startsWith('/day')
   const { t } = useLanguage()
-
-  // Get current tab index based on pathname
-  const getCurrentTabIndex = useCallback(() => {
-    const path = location.pathname
-    if (path === '/' || path.startsWith('/day')) return 0
-    if (path === '/insights') return 1
-    if (path === '/settings') return 2
-    return 0
-  }, [location.pathname])
-
-  // Handle keyboard navigation
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Skip if modifier key held (allow browser back/forward)
-      if (e.metaKey || e.ctrlKey) return
-
-      // Skip if user is typing in an input/textarea
-      const target = e.target as HTMLElement
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
-        return
-      }
-
-      const currentIndex = getCurrentTabIndex()
-
-      if (e.key === 'ArrowLeft') {
-        e.preventDefault()
-        const prevIndex = currentIndex > 0 ? currentIndex - 1 : TABS.length - 1
-        navigate(TABS[prevIndex])
-      } else if (e.key === 'ArrowRight') {
-        e.preventDefault()
-        const nextIndex = currentIndex < TABS.length - 1 ? currentIndex + 1 : 0
-        navigate(TABS[nextIndex])
-      }
-    }
-
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [getCurrentTabIndex, navigate])
 
   return (
     <div className="min-h-dvh bg-white dark:bg-daily-dark text-gray-900 dark:text-gray-100 transition-colors">
       {/* Header */}
       <header className="fixed top-0 left-0 right-0 z-50 bg-white/90 dark:bg-daily-dark/90 backdrop-blur-md border-b border-gray-200 dark:border-orange-500/20 transition-colors">
         <div className="px-6 py-3 flex items-center gap-6">
+          {isArchiveRoute && (
+            <button
+              type="button"
+              onClick={() => setDrawerOpen(open => !open)}
+              className="lg:hidden -ml-2 p-2 rounded-lg text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-daily-light transition-colors"
+              aria-label={t('nav.menu')}
+            >
+              <svg className="size-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
+          )}
           <NavLink to="/" className="text-xl font-bold text-orange-500 dark:text-orange-400 hover:text-orange-600 dark:hover:text-orange-300 transition-colors">
-            Daily
+            Daybook
           </NavLink>
           <nav className="flex gap-4 flex-1">
             <NavLink
@@ -109,7 +82,7 @@ export function Layout() {
 
       {/* Main Content */}
       <main className="pt-16 min-h-dvh">
-        <Outlet />
+        <Outlet context={{ drawerOpen, setDrawerOpen }} />
       </main>
     </div>
   )

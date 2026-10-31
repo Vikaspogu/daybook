@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { motion } from 'framer-motion'
 import {
   BarChart,
@@ -27,18 +27,29 @@ function StatCard({ label, value, sub }: { label: string; value: string | number
   return (
     <div className="bg-gray-50 dark:bg-daily-light rounded-xl p-5 border border-gray-200 dark:border-gray-800">
       <p className="text-sm text-gray-500 dark:text-gray-400 mb-1">{label}</p>
-      <p className="text-3xl font-bold text-orange-500 dark:text-orange-400">{value}</p>
+      <p className="text-3xl font-bold text-orange-500 dark:text-orange-400 tabular-nums">{value}</p>
       {sub && <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">{sub}</p>}
     </div>
   )
 }
 
-function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
+function ChartCard({
+  title,
+  className,
+  children,
+}: {
+  title: string
+  className?: string
+  children: React.ReactNode
+}) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className="bg-gray-50 dark:bg-daily-light rounded-xl p-5 border border-gray-200 dark:border-gray-800"
+      className={cn(
+        'bg-gray-50 dark:bg-daily-light rounded-xl p-5 border border-gray-200 dark:border-gray-800',
+        className
+      )}
     >
       <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4">{title}</h3>
       {children}
@@ -46,14 +57,13 @@ function ChartCard({ title, children }: { title: string; children: React.ReactNo
   )
 }
 
-// Custom tooltip styling
 function CustomTooltip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null
   return (
     <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 shadow-lg">
       <p className="text-xs text-gray-500 dark:text-gray-400">{label}</p>
       {payload.map((p: any, i: number) => (
-        <p key={i} className="text-sm font-medium" style={{ color: p.color }}>
+        <p key={i} className="text-sm font-medium tabular-nums" style={{ color: p.color }}>
           {p.value} {p.name || 'sessions'}
         </p>
       ))}
@@ -83,6 +93,18 @@ export function Insights() {
     }
     load()
   }, [fetchInsights, days])
+
+  const problemSessions = useMemo(() => {
+    const list = data?.session_details ?? []
+    return list.filter(
+      s =>
+        s.friction_types.length > 0 ||
+        s.outcome === 'not_achieved' ||
+        s.outcome === 'partially_achieved' ||
+        s.satisfaction === 'frustrated'
+    )
+  }, [data])
+  const problemCount = problemSessions.length
 
   if (loading) {
     return (
@@ -119,10 +141,14 @@ export function Insights() {
     ? Math.round((data.daily_stats.filter(d => d.has_digest).length / data.total_days) * 100)
     : 0
 
+  const hasLangs = data.language_distribution.length > 0
+  const hasTypes = data.session_type_distribution.length > 0
+  const bothDist = hasLangs && hasTypes
+
   return (
     <div className="max-w-6xl mx-auto px-6 py-8">
       {/* Header */}
-      <div className="flex items-center justify-between mb-8">
+      <div className="flex flex-wrap items-center justify-between gap-4 mb-8">
         <div>
           <h1 className="text-3xl font-bold">
             <span className="text-orange-500 dark:text-orange-400">{t('insights.title')}</span>
@@ -136,7 +162,7 @@ export function Insights() {
             <button
               key={d}
               onClick={() => setDays(d)}
-              className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+              className={`px-3 py-1.5 text-sm rounded-lg transition-colors tabular-nums ${
                 days === d
                   ? 'bg-orange-500 text-white'
                   : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
@@ -149,24 +175,31 @@ export function Insights() {
       </div>
 
       {/* Tab bar */}
-      <div className="flex gap-1 bg-gray-100 dark:bg-gray-800 rounded-lg p-1 mb-6">
+      <div className="flex gap-1 bg-gray-100 dark:bg-gray-800 rounded-lg p-1 mb-6 w-fit">
         {([
           { key: 'charts' as InsightTab, label: t('insights.tabCharts') },
-          { key: 'sessions' as InsightTab, label: t('insights.tabSessions'), count: data.session_details?.length },
+          { key: 'sessions' as InsightTab, label: t('insights.tabSessions'), count: problemCount },
         ]).map(tab => (
           <button
             key={tab.key}
             onClick={() => setActiveTab(tab.key)}
             className={cn(
-              'px-4 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-1.5',
+              'px-4 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-2',
               activeTab === tab.key
                 ? 'bg-white dark:bg-daily-light text-orange-500 dark:text-orange-400 shadow-sm'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
             )}
           >
             {tab.label}
-            {tab.count != null && tab.count > 0 && (
-              <span className="text-[10px] text-gray-400 dark:text-gray-500">
+            {tab.count != null && (
+              <span
+                className={cn(
+                  'px-1.5 py-0.5 rounded-full text-[11px] font-semibold tabular-nums',
+                  tab.count > 0
+                    ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+                    : 'bg-gray-200 text-gray-500 dark:bg-gray-700 dark:text-gray-400'
+                )}
+              >
                 {tab.count}
               </span>
             )}
@@ -229,9 +262,11 @@ export function Insights() {
               </div>
 
               {data.usage_summary.model_distribution.length > 0 && (
-                <ChartCard title={t('insights.modelDistribution')}>
-                  <ModelPieChart data={data.usage_summary.model_distribution} />
-                </ChartCard>
+                <div className="mb-4">
+                  <ChartCard title={t('insights.modelDistribution')}>
+                    <ModelPieChart data={data.usage_summary.model_distribution} />
+                  </ChartCard>
+                </div>
               )}
             </>
           )}
@@ -241,89 +276,98 @@ export function Insights() {
 
           {/* Activity Timeline */}
           <ChartCard title={t('insights.activityTimeline')}>
-            <ResponsiveContainer width="100%" height={200}>
-              <AreaChart data={data.daily_stats}>
-                <defs>
-                  <linearGradient id="colorSessions" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#f97316" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#f97316" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#374151" opacity={0.2} />
-                <XAxis
-                  dataKey="date"
-                  tick={{ fontSize: 11, fill: '#9ca3af' }}
-                  tickFormatter={(v: string) => v.slice(5)}
-                />
-                <YAxis tick={{ fontSize: 11, fill: '#9ca3af' }} allowDecimals={false} />
-                <Tooltip content={<CustomTooltip />} />
-                <Area
-                  type="monotone"
-                  dataKey="session_count"
-                  stroke="#f97316"
-                  strokeWidth={2}
-                  fill="url(#colorSessions)"
-                />
-              </AreaChart>
-            </ResponsiveContainer>
+            {data.daily_stats.length > 0 ? (
+              <ResponsiveContainer width="100%" height={200}>
+                <AreaChart data={data.daily_stats}>
+                  <defs>
+                    <linearGradient id="colorSessions" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#f97316" stopOpacity={0.3} />
+                      <stop offset="95%" stopColor="#f97316" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" opacity={0.2} />
+                  <XAxis
+                    dataKey="date"
+                    tick={{ fontSize: 11, fill: '#9ca3af' }}
+                    tickFormatter={(v: string) => v.slice(5)}
+                  />
+                  <YAxis tick={{ fontSize: 11, fill: '#9ca3af' }} allowDecimals={false} />
+                  <Tooltip content={<CustomTooltip />} />
+                  <Area
+                    type="monotone"
+                    dataKey="session_count"
+                    stroke="#f97316"
+                    strokeWidth={2}
+                    fill="url(#colorSessions)"
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <p className="text-sm text-gray-500 dark:text-gray-400 py-8 text-center">
+                {t('insights.noSessionDetails')}
+              </p>
+            )}
           </ChartCard>
 
-          {/* Distribution Charts */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-            {/* Languages */}
-            {data.language_distribution.length > 0 && (
-              <ChartCard title={t('insights.languages')}>
-                <ResponsiveContainer width="100%" height={250}>
-                  <BarChart data={data.language_distribution.slice(0, 8)} layout="vertical">
-                    <CartesianGrid strokeDasharray="3 3" stroke="#374151" opacity={0.2} />
-                    <XAxis type="number" tick={{ fontSize: 11, fill: '#9ca3af' }} allowDecimals={false} />
-                    <YAxis
-                      type="category"
-                      dataKey="name"
-                      tick={{ fontSize: 12, fill: '#9ca3af' }}
-                      width={100}
-                    />
-                    <Tooltip content={<CustomTooltip />} />
-                    <Bar dataKey="count" fill="#38bdf8" radius={[0, 4, 4, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </ChartCard>
-            )}
-          </div>
-
-          {/* Session Types */}
-          {data.session_type_distribution.length > 0 && (
-            <div className="mt-4">
-              <ChartCard title={t('insights.sessionTypes')}>
-                <div className="flex flex-wrap gap-3">
-                  {data.session_type_distribution.map((item, i) => (
-                    <div
-                      key={item.name}
-                      className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700"
-                    >
-                      <div
-                        className="w-3 h-3 rounded-full"
-                        style={{ backgroundColor: COLORS[i % COLORS.length] }}
+          {/* Balanced Distribution Grid — pairs Languages + Session Types when both exist, full-width when only one */}
+          {(hasLangs || hasTypes) && (
+            <div className={cn('grid grid-cols-1 gap-4 mt-4', bothDist && 'md:grid-cols-2')}>
+              {hasLangs && (
+                <ChartCard title={t('insights.languages')}>
+                  <ResponsiveContainer width="100%" height={240}>
+                    <BarChart data={data.language_distribution.slice(0, 8)} layout="vertical">
+                      <CartesianGrid strokeDasharray="3 3" stroke="#374151" opacity={0.2} />
+                      <XAxis type="number" tick={{ fontSize: 11, fill: '#9ca3af' }} allowDecimals={false} />
+                      <YAxis
+                        type="category"
+                        dataKey="name"
+                        tick={{ fontSize: 12, fill: '#9ca3af' }}
+                        width={100}
                       />
-                      <span className="text-sm text-gray-600 dark:text-gray-300">{item.name}</span>
-                      <span className="text-sm font-bold text-orange-500 dark:text-orange-400">{item.count}</span>
-                    </div>
-                  ))}
-                </div>
-              </ChartCard>
+                      <Tooltip content={<CustomTooltip />} />
+                      <Bar dataKey="count" fill="#38bdf8" radius={[0, 4, 4, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </ChartCard>
+              )}
+
+              {hasTypes && (
+                <ChartCard title={t('insights.sessionTypes')}>
+                  <div className="flex flex-wrap gap-3">
+                    {data.session_type_distribution.map((item, i) => (
+                      <div
+                        key={item.name}
+                        className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700"
+                      >
+                        <div
+                          className="w-3 h-3 rounded-full"
+                          style={{ backgroundColor: COLORS[i % COLORS.length] }}
+                        />
+                        <span className="text-sm text-gray-600 dark:text-gray-300">{item.name}</span>
+                        <span className="text-sm font-bold text-orange-500 dark:text-orange-400 tabular-nums">{item.count}</span>
+                      </div>
+                    ))}
+                  </div>
+                </ChartCard>
+              )}
             </div>
           )}
         </>
       )}
 
-      {/* === Session Details Tab === */}
+      {/* === Problem Sessions Tab === */}
       {activeTab === 'sessions' && (
         <>
-          {data.session_details && data.session_details.length > 0 ? (
-            <InsightsProblemView sessionDetails={data.session_details} />
+          {problemSessions.length > 0 ? (
+            <InsightsProblemView sessionDetails={problemSessions} />
           ) : (
-            <div className="text-center py-12 bg-gray-50 dark:bg-daily-light rounded-xl border border-gray-200 dark:border-gray-800">
-              <p className="text-gray-500 dark:text-gray-400">{t('insights.noSessionDetails')}</p>
+            <div className="text-center py-12 px-6 bg-gray-50 dark:bg-daily-light rounded-xl border border-dashed border-gray-300 dark:border-gray-700">
+              <p className="text-sm font-medium text-gray-600 dark:text-gray-300">
+                {t('insights.problemNoIssues')}
+              </p>
+              <p className="text-xs text-gray-400 dark:text-gray-500 mt-1 max-w-md mx-auto">
+                {t('insights.noSessionDetails')}
+              </p>
             </div>
           )}
         </>
