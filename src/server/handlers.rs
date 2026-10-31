@@ -653,7 +653,7 @@ pub async fn get_daily_summary(
                     }
                 })
                 .collect();
-            waste_alerts.sort_by(|a, b| b.count.cmp(&a.count));
+            waste_alerts.sort_by_key(|a| std::cmp::Reverse(a.count));
 
             let overview = format_day_overview(
                 &rows.iter().map(|r| r.project.as_str()).collect::<Vec<_>>(),
