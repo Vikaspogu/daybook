@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { useApi } from '../hooks/useApi'
-import type { ConsolidatedRule, DailySummary, DateInsights, NextStepItem, ProjectGain, Session, SummaryCard, WasteAlert } from '../hooks/useApi'
+import type { ConsolidatedRule, DailySummary, DateInsights, NextStepItem, ProjectGain, ProjectLearnings, Session, SummaryCard, WasteAlert } from '../hooks/useApi'
 import { MarkdownRenderer } from '../components/MarkdownRenderer'
 import { cn } from '../lib/utils'
 import { formatTokenCount, formatCost } from '../components/UsageCharts'
@@ -378,49 +378,28 @@ function BoldColonItem({ text, dotColor }: { text: string; dotColor: string }) {
 
 function WorkflowCoachingCard({
   signals,
-  learnings,
   nextSteps,
 }: {
   signals: string[]
-  learnings: string[]
   nextSteps: NextStepItem[]
 }) {
   return (
     <div className="bg-gray-50 dark:bg-daily-light rounded-2xl p-5 border border-amber-500/30 space-y-4">
-      <div className="grid gap-3 md:grid-cols-2">
-        <div className="rounded-xl p-4 bg-white dark:bg-black/20 border border-gray-200 dark:border-gray-800 space-y-2">
-          <div className="text-[11px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">
-            ⚡ Efficiency & Friction Signals
-          </div>
-          {signals.length > 0 ? (
-            <ul className="space-y-2">
-              {signals.map((sig, i) => (
-                <BoldColonItem key={i} text={sig} dotColor="text-amber-500" />
-              ))}
-            </ul>
-          ) : (
-            <p className="text-xs text-gray-500 dark:text-gray-400">
-              No workflow friction signals detected today.
-            </p>
-          )}
+      <div className="rounded-xl p-4 bg-white dark:bg-black/20 border border-gray-200 dark:border-gray-800 space-y-2.5">
+        <div className="text-[11px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">
+          ⚡ Cost, Cache & Command Health
         </div>
-
-        <div className="rounded-xl p-4 bg-white dark:bg-black/20 border border-gray-200 dark:border-gray-800 space-y-2">
-          <div className="text-[11px] font-bold uppercase tracking-wider text-sky-600 dark:text-sky-400">
-            💡 Top Pitfalls & Learnings Today
-          </div>
-          {learnings.length > 0 ? (
-            <ul className="space-y-2">
-              {learnings.map((item, i) => (
-                <BoldColonItem key={i} text={item} dotColor="text-sky-500" />
-              ))}
-            </ul>
-          ) : (
-            <p className="text-xs text-gray-500 dark:text-gray-400">
-              No recurring pitfalls logged across today&apos;s sessions.
-            </p>
-          )}
-        </div>
+        {signals.length > 0 ? (
+          <ul className="space-y-2">
+            {signals.map((sig, i) => (
+              <BoldColonItem key={i} text={sig} dotColor="text-amber-500" />
+            ))}
+          </ul>
+        ) : (
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            No workflow friction signals detected today.
+          </p>
+        )}
       </div>
 
       {nextSteps.length > 0 && (
@@ -453,6 +432,121 @@ function WorkflowCoachingCard({
           </ul>
         </div>
       )}
+    </div>
+  )
+}
+
+function ProjectLearningsSection({
+  groups,
+  fallbackLearnings,
+}: {
+  groups: ProjectLearnings[]
+  fallbackLearnings: string[]
+}) {
+  const effectiveGroups: ProjectLearnings[] =
+    groups.length > 0
+      ? groups
+      : fallbackLearnings.length > 0
+        ? [
+            {
+              project: 'General',
+              pitfalls: [],
+              learnings: fallbackLearnings.map(text => ({
+                kind: 'learning',
+                text,
+                session_title: '',
+              })),
+            },
+          ]
+        : []
+
+  if (effectiveGroups.length === 0) return null
+
+  return (
+    <div className="grid gap-4">
+      {effectiveGroups.map(group => {
+        const pitfallCount = group.pitfalls.length
+        const learningCount = group.learnings.length
+        return (
+          <div
+            key={group.project}
+            className="bg-gray-50 dark:bg-daily-light rounded-xl p-5 border border-gray-200 dark:border-gray-800 space-y-3.5"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-gray-200 dark:border-gray-800">
+              <div className="flex items-center gap-2">
+                <span className="size-2 rounded-full bg-sky-500" />
+                <h3 className="text-base font-bold text-gray-900 dark:text-gray-100">
+                  {group.project}
+                </h3>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono">
+                {pitfallCount > 0 && (
+                  <span className="px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                    {pitfallCount} {pitfallCount === 1 ? 'pitfall' : 'pitfalls'}
+                  </span>
+                )}
+                {learningCount > 0 && (
+                  <span className="px-2 py-0.5 rounded-md bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20">
+                    {learningCount} {learningCount === 1 ? 'learning' : 'learnings'}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {pitfallCount > 0 && (
+              <div className="rounded-lg bg-amber-500/5 border border-amber-500/20 p-3.5 space-y-2">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">
+                  ⚠ Pitfalls & Gotchas
+                </div>
+                <ul className="space-y-2">
+                  {group.pitfalls.map((item, idx) => (
+                    <li
+                      key={idx}
+                      className="flex items-start gap-2 text-xs sm:text-sm text-gray-700 dark:text-gray-300 leading-relaxed"
+                    >
+                      <span className="text-amber-500 font-bold mt-0.5 flex-shrink-0">•</span>
+                      <div className="space-y-0.5">
+                        <span>{item.text}</span>
+                        {item.session_title && (
+                          <div className="text-[11px] font-mono text-gray-400 dark:text-gray-500">
+                            Session: {item.session_title}
+                          </div>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {learningCount > 0 && (
+              <div className="rounded-lg bg-sky-500/5 border border-sky-500/20 p-3.5 space-y-2">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-sky-600 dark:text-sky-400">
+                  💡 System & Codebase Learnings
+                </div>
+                <ul className="space-y-2">
+                  {group.learnings.map((item, idx) => (
+                    <li
+                      key={idx}
+                      className="flex items-start gap-2 text-xs sm:text-sm text-gray-700 dark:text-gray-300 leading-relaxed"
+                    >
+                      <span className="text-sky-500 font-bold mt-0.5 flex-shrink-0">•</span>
+                      <div className="space-y-0.5">
+                        <span>{item.text}</span>
+                        {item.session_title && (
+                          <div className="text-[11px] font-mono text-gray-400 dark:text-gray-500">
+                            Session: {item.session_title}
+                          </div>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -820,6 +914,7 @@ export function DayDetail() {
   const wasteAlerts = summary?.waste_alerts ?? []
   const efficiencySignals = summary?.efficiency_signals ?? []
   const learnings = summary?.learnings ?? []
+  const learningsByProject = summary?.learnings_by_project ?? []
   const nextSteps = summary?.next_steps ?? []
   const consolidatedRules = summary?.consolidated_rules ?? []
   const hasExtracted = (summary?.skills?.length ?? 0) + (summary?.commands?.length ?? 0) > 0
@@ -961,20 +1056,29 @@ export function DayDetail() {
         </div>
       </div>
 
-      {/* === 1. Workflow Coaching, Learnings & Next Steps (~90s read) === */}
-      {(efficiencySignals.length > 0 || learnings.length > 0 || nextSteps.length > 0) && (
-        <Section id="coaching" title="1 · Workflow Coaching, Learnings & Next Steps">
+      {/* === 1. Cost, Cache & Command Health + Next Steps === */}
+      {(efficiencySignals.length > 0 || nextSteps.length > 0) && (
+        <Section id="coaching" title="1 · Cost, Cache & Command Health + Next Steps">
           <WorkflowCoachingCard
             signals={efficiencySignals}
-            learnings={learnings}
             nextSteps={nextSteps}
           />
         </Section>
       )}
 
-      {/* === 2. What You Gained Today (Project Synthesis) === */}
+      {/* === 2. Pitfalls & Learnings — Grouped by Project === */}
+      {(learningsByProject.length > 0 || learnings.length > 0) && (
+        <Section id="learnings" title="2 · Pitfalls & Learnings — By Project">
+          <ProjectLearningsSection
+            groups={learningsByProject}
+            fallbackLearnings={learnings}
+          />
+        </Section>
+      )}
+
+      {/* === 3. What You Gained Today (Project Synthesis) === */}
       {projectGains.length > 0 && (
-        <Section id="gains" title="2 · What Shipped & Why — By Project">
+        <Section id="gains" title="3 · What Shipped & Why — By Project">
           <div className="grid gap-4">
             {projectGains.map(gain => (
               <ProjectGainCard key={gain.project} gain={gain} />
@@ -990,11 +1094,11 @@ export function DayDetail() {
         </Section>
       )}
 
-      {/* === 3. Consolidated Workflow Rules (1 card instead of N fragmented cards) === */}
+      {/* === 4. Consolidated Workflow Rules (1 card instead of N fragmented cards) === */}
       {consolidatedRules.length > 0 ? (
         <Section
           id="extracted"
-          title={`3 · Consolidated Workflow Rules Extracted Today (${consolidatedRules.length})`}
+          title={`4 · Consolidated Workflow Rules Extracted Today (${consolidatedRules.length})`}
         >
           <ConsolidatedRulesCard rules={consolidatedRules} onInstall={installCard} />
         </Section>

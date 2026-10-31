@@ -61,6 +61,17 @@ export interface ConsolidatedRule {
   why?: string | null
 }
 
+export interface LearningItem {
+  kind: 'pitfall' | 'learning' | string
+  text: string
+  session_title: string
+}
+
+export interface ProjectLearnings {
+  project: string
+  pitfalls: LearningItem[]
+  learnings: LearningItem[]
+}
 export interface DailySummary {
   overview?: string
   session_count?: number
@@ -70,6 +81,7 @@ export interface DailySummary {
   day_metrics?: DayMetrics
   efficiency_signals?: string[]
   learnings?: string[]
+  learnings_by_project?: ProjectLearnings[]
   next_steps?: NextStepItem[]
   consolidated_rules?: ConsolidatedRule[]
   project_gains?: ProjectGain[]

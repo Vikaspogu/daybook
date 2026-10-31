@@ -511,6 +511,8 @@ pub async fn get_daily_summary(
             let mut consolidated_rules: Vec<ConsolidatedRuleDto> = Vec::new();
             let mut work_learnings: Vec<String> = Vec::new();
             let mut review_learnings: Vec<String> = Vec::new();
+            let mut learnings_map: std::collections::BTreeMap<String, ProjectLearningsDto> =
+                std::collections::BTreeMap::new();
             let mut cost_by_session: Vec<(String, String, String, f64)> = Vec::new();
             let mut followup_candidates: Vec<(String, String, String)> = Vec::new();
             let mut empty_reviewer_noted = false;
@@ -605,7 +607,8 @@ pub async fn get_daily_summary(
                                 entry.files_touched.push(f);
                             }
                         }
-                        for l in extract_learnings(&r.summary_md).into_iter().take(2) {
+                        for l in extract_learnings(&r.summary_md).into_iter().take(3) {
+                            push_project_learning(&mut learnings_map, &r.project, &title, &l);
                             if !work_learnings.contains(&l) {
                                 work_learnings.push(l);
                             }
@@ -625,7 +628,8 @@ pub async fn get_daily_summary(
                         if fb.len() < 2 && !fb.contains(&line) {
                             fb.push(line);
                         }
-                        for l in extract_learnings(&r.summary_md).into_iter().take(1) {
+                        for l in extract_learnings(&r.summary_md).into_iter().take(2) {
+                            push_project_learning(&mut learnings_map, &r.project, &title, &l);
                             if !review_learnings.contains(&l) {
                                 review_learnings.push(l);
                             }
@@ -687,13 +691,36 @@ pub async fn get_daily_summary(
                 })
                 .collect();
 
-            let mut learnings = work_learnings;
-            for l in review_learnings {
-                if learnings.len() >= 4 {
-                    break;
-                }
-                if !learnings.contains(&l) {
-                    learnings.push(l);
+            let mut learnings_by_project: Vec<ProjectLearningsDto> = learnings_map
+                .into_values()
+                .filter(|p| !p.pitfalls.is_empty() || !p.learnings.is_empty())
+                .collect();
+            learnings_by_project.sort_by(|a, b| {
+                let count_b = b.pitfalls.len() + b.learnings.len();
+                let count_a = a.pitfalls.len() + a.learnings.len();
+                count_b
+                    .cmp(&count_a)
+                    .then_with(|| a.project.cmp(&b.project))
+            });
+
+            let mut learnings: Vec<String> = learnings_by_project
+                .iter()
+                .flat_map(|p| {
+                    p.pitfalls
+                        .iter()
+                        .chain(p.learnings.iter())
+                        .map(|item| item.text.clone())
+                })
+                .collect();
+            if learnings.is_empty() {
+                learnings = work_learnings;
+                for l in review_learnings {
+                    if learnings.len() >= 4 {
+                        break;
+                    }
+                    if !learnings.contains(&l) {
+                        learnings.push(l);
+                    }
                 }
             }
 
@@ -782,6 +809,7 @@ pub async fn get_daily_summary(
                 day_metrics,
                 efficiency_signals,
                 learnings,
+                learnings_by_project,
                 next_steps,
                 consolidated_rules,
                 project_gains,
@@ -1330,11 +1358,18 @@ fn extract_learnings(summary_md: &str) -> Vec<String> {
             || lower.starts_with("no product")
             || lower.starts_with("no files")
             || lower.starts_with("read-only review")
+            || lower.starts_with("the reviewed plan was ")
+            || lower.starts_with("the four verified ")
+            || lower.starts_with("the verified ")
         {
             continue;
         }
-        let item = if cleaned.chars().count() > 220 {
-            format!("{}...", cleaned.chars().take(220).collect::<String>())
+        let item = if cleaned.chars().count() > 420 {
+            let prefix: String = cleaned.chars().take(420).collect();
+            match prefix.rfind(' ') {
+                Some(idx) if idx > 200 => format!("{}...", &prefix[..idx]),
+                _ => format!("{prefix}..."),
+            }
         } else {
             cleaned
         };
@@ -1343,6 +1378,160 @@ fn extract_learnings(summary_md: &str) -> Vec<String> {
         }
     }
     out
+}
+
+fn classify_learning_kind(text: &str) -> &'static str {
+    let lower = text.to_lowercase();
+    const PITFALL_MARKERS: &[&str] = &[
+        "does not",
+        "do not",
+        "did not",
+        "cannot",
+        "can't",
+        "won't",
+        "never",
+        "refused",
+        "rejected",
+        "failed",
+        "failure",
+        "error",
+        "bug",
+        "broken",
+        "stale",
+        "missing",
+        "unsupported",
+        "read-only",
+        "timeout",
+        "timed out",
+        "blocked",
+        "pitfall",
+        "gotcha",
+        "caveat",
+        "instead of",
+        "rather than",
+        "still requires",
+        "requires configured",
+        "alone does not",
+        "fallback",
+        "avoid",
+        "warning",
+    ];
+    if PITFALL_MARKERS.iter().any(|m| lower.contains(m)) {
+        "pitfall"
+    } else {
+        "learning"
+    }
+}
+
+fn learning_stem_tokens(text: &str) -> std::collections::BTreeSet<String> {
+    const STOPWORDS: &[&str] = &[
+        "that", "this", "with", "from", "were", "have", "into", "when", "while", "their", "than",
+        "also", "only", "still", "does", "alone", "both", "each", "some", "more", "most", "such",
+        "used", "using", "through",
+    ];
+    text.split(|c: char| !c.is_alphanumeric())
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.len() >= 4 && !STOPWORDS.contains(&w.as_str()))
+        .map(|mut w| {
+            for suffix in ["ing", "ed", "es", "s"] {
+                if w.len() > suffix.len() + 3 && w.ends_with(suffix) {
+                    w.truncate(w.len() - suffix.len());
+                    break;
+                }
+            }
+            w
+        })
+        .collect()
+}
+
+fn first_subject_token(text: &str) -> Option<String> {
+    let first = text
+        .split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+        .find(|w| !w.is_empty())?
+        .to_lowercase();
+    const GENERIC_STARTS: &[&str] = &[
+        "the",
+        "both",
+        "when",
+        "each",
+        "some",
+        "most",
+        "this",
+        "that",
+        "these",
+        "those",
+        "after",
+        "before",
+        "during",
+        "while",
+        "since",
+        "because",
+        "initial",
+        "component",
+    ];
+    if first.len() >= 5 && !GENERIC_STARTS.contains(&first.as_str()) {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+fn is_similar_learning(existing: &str, candidate: &str) -> bool {
+    if existing.eq_ignore_ascii_case(candidate) {
+        return true;
+    }
+    if let (Some(a), Some(b)) = (
+        first_subject_token(existing),
+        first_subject_token(candidate),
+    ) {
+        if a == b {
+            return true;
+        }
+    }
+    let tok_a = learning_stem_tokens(existing);
+    let tok_b = learning_stem_tokens(candidate);
+    let min_len = tok_a.len().min(tok_b.len());
+    if min_len < 4 {
+        return false;
+    }
+    let shared = tok_a.intersection(&tok_b).count();
+    (shared as f64 / min_len as f64) >= 0.45
+}
+
+fn push_project_learning(
+    map: &mut std::collections::BTreeMap<String, ProjectLearningsDto>,
+    project: &str,
+    session_title: &str,
+    text: &str,
+) {
+    let entry = map
+        .entry(project.to_string())
+        .or_insert_with(|| ProjectLearningsDto {
+            project: project.to_string(),
+            pitfalls: Vec::new(),
+            learnings: Vec::new(),
+        });
+    let already_present = entry
+        .pitfalls
+        .iter()
+        .chain(entry.learnings.iter())
+        .any(|existing| is_similar_learning(&existing.text, text));
+    if already_present {
+        return;
+    }
+    let kind = classify_learning_kind(text);
+    let item = LearningItemDto {
+        kind: kind.to_string(),
+        text: text.to_string(),
+        session_title: session_title.to_string(),
+    };
+    if kind == "pitfall" {
+        if entry.pitfalls.len() < 6 {
+            entry.pitfalls.push(item);
+        }
+    } else if entry.learnings.len() < 6 {
+        entry.learnings.push(item);
+    }
 }
 
 /// Parse 3-line `## Potential Skills/Commands` bullets (`- **[name]**: summary` +
@@ -1445,18 +1634,18 @@ fn build_workflow_coaching(
         if p.review_count > p.work_count && p.review_count >= 3 {
             let detail = if empty_reviewer_noted {
                 format!(
-                    "{} review passes ran for {} work sessions in {} — reviewer empty outputs forced extra review retries before fallback.",
+                    "Agents ran {} code-review sessions for {} coding sessions in {} because a reviewer subagent returned empty output and forced extra retry rounds.",
                     p.review_count, p.work_count, p.project
                 )
             } else {
                 format!(
-                    "{} review passes ran for {} work sessions in {} — multiple review rounds ran per shipped change.",
+                    "Agents ran {} code-review sessions for {} coding sessions in {} — batch your edits before running pre-commit review so reviewers run once per change.",
                     p.review_count, p.work_count, p.project
                 )
             };
             signals.push(format!(
-                "Review loop amplification ({} reviews vs {} work in {}): {}",
-                p.review_count, p.work_count, p.project, detail
+                "High code-review overhead in {} ({} reviews vs {} coding sessions): {}",
+                p.project, p.review_count, p.work_count, detail
             ));
             if next_steps.len() < 3 {
                 next_steps.push(NextStepDto {
@@ -1485,18 +1674,24 @@ fn build_workflow_coaching(
         let share_pct = (top_sum / day_metrics.total_cost_usd * 100.0).round();
         let top_labels: Vec<String> = cost_by_session[..top_n]
             .iter()
-            .map(|(t, _, rt, c)| format!("{t} [{rt}] ${c:.2}"))
+            .map(|(t, _, rt, c)| format!("{t} [{rt}] (${c:.2})"))
             .collect();
-        let hit_note = day_metrics
+        let cache_explanation = day_metrics
             .cache_hit_rate
-            .map(|r| format!(" with a {:.1}% cache hit rate", r * 100.0))
+            .map(|r| {
+                let hit_pct = (r * 100.0).round() as u64;
+                let full_pct = 100u64.saturating_sub(hit_pct);
+                format!(
+                    " {hit_pct}% of input tokens came from prompt cache ({full_pct}% were billed at full input price from new threads or expired cache)."
+                )
+            })
             .unwrap_or_default();
         signals.push(format!(
-            "Spend concentration (${:.2} total): {} accounted for {:.0}% of daily spend{}.",
+            "Biggest cost drivers (${:.2} total today): {} used {:.0}% of today's budget.{}",
             day_metrics.total_cost_usd,
-            top_labels.join(", "),
+            top_labels.join(" and "),
             share_pct,
-            hit_note
+            cache_explanation
         ));
 
         if let Some(rate) = day_metrics.cache_hit_rate {
@@ -1516,9 +1711,35 @@ fn build_workflow_coaching(
     }
 
     if day_metrics.failed_tool_calls > 0 || day_metrics.interrupted > 0 {
+        let mut parts = Vec::new();
+        if day_metrics.failed_tool_calls > 0 {
+            let noun = if day_metrics.failed_tool_calls == 1 {
+                "shell/tool command"
+            } else {
+                "shell/tool commands"
+            };
+            parts.push(format!(
+                "{} {} exited with an error",
+                day_metrics.failed_tool_calls, noun
+            ));
+        }
+        if day_metrics.interrupted > 0 {
+            let noun = if day_metrics.interrupted == 1 {
+                "agent turn was stopped mid-run"
+            } else {
+                "agent turns were stopped mid-run"
+            };
+            parts.push(format!("{} {}", day_metrics.interrupted, noun));
+        }
+        let test_note = if day_metrics.test_runs > 0 {
+            format!("across {} test suite runs", day_metrics.test_runs)
+        } else {
+            "(0 automated test suites ran)".to_string()
+        };
         signals.push(format!(
-            "Tool & turn friction ({} failed tool calls, {} interrupted turns across {} test runs): Inspect sessions with repeated command failures to tighten CLI flags or paths.",
-            day_metrics.failed_tool_calls, day_metrics.interrupted, day_metrics.test_runs
+            "Command errors & stopped turns: {} {}. Repeated command failures usually mean the agent is guessing CLI flags or file paths.",
+            parts.join(" and "),
+            test_note
         ));
         if day_metrics.failed_tool_calls >= 5 && next_steps.len() < 3 {
             next_steps.push(NextStepDto {
@@ -1534,7 +1755,7 @@ fn build_workflow_coaching(
 
     for alert in waste_alerts.iter().take(1) {
         signals.push(format!(
-            "Blocked background runs ({}x in {}): {}",
+            "Blocked background sessions ({}x in {}): Session exited before starting work — {}",
             alert.count, alert.project, alert.reason
         ));
         if next_steps.len() < 3 {
@@ -1562,7 +1783,7 @@ fn build_workflow_coaching(
 
     if signals.is_empty() && session_count > 0 {
         signals.push(format!(
-            "Clean execution ({work_count} shipped work, {review_count} review, {blocked_count} blocked): All sessions completed with 0 tool errors."
+            "Clean execution ({work_count} shipped work, {review_count} review, {blocked_count} blocked): All sessions completed with 0 command errors."
         ));
     }
 
@@ -2450,12 +2671,15 @@ mod tests {
             15, 5, 8, 2, &metrics, &gains, &alerts, &mut costs, &followups, true,
         );
         assert_eq!(signals.len(), 4);
-        assert!(signals[0].contains("Review loop amplification (8 reviews vs 5 work in daybook)"));
-        assert!(signals[0].contains("reviewer empty outputs"));
-        assert!(signals[1].contains("Spend concentration ($10.00 total)"));
-        assert!(signals[1].contains("85% of daily spend"));
-        assert!(signals[2].contains("Tool & turn friction (6 failed tool calls"));
-        assert!(signals[3].contains("Blocked background runs (2x in agent-farm)"));
+        assert!(signals[0]
+            .contains("High code-review overhead in daybook (8 reviews vs 5 coding sessions)"));
+        assert!(signals[0].contains("returned empty output"));
+        assert!(signals[1].contains("Biggest cost drivers ($10.00 total today)"));
+        assert!(signals[1].contains("85% of today's budget"));
+        assert!(signals[2].contains(
+            "Command errors & stopped turns: 6 shell/tool commands exited with an error"
+        ));
+        assert!(signals[3].contains("Blocked background sessions (2x in agent-farm)"));
         assert_eq!(next_steps.len(), 3);
         assert_eq!(next_steps[0].tag, "WORKFLOW");
         assert_eq!(next_steps[1].tag, "COST");
@@ -2494,6 +2718,39 @@ mod tests {
         assert_eq!(
             extract_learnings("## Learnings\n- Always verify heading prefixes.\n"),
             vec!["Always verify heading prefixes.".to_string()]
+        );
+
+        // Project learnings grouping, pitfall classification, and near-duplicate deduplication
+        let mut lmap = std::collections::BTreeMap::new();
+        push_project_learning(
+            &mut lmap,
+            "t3code",
+            "Fix skill toggle",
+            "The text fallback appeared when skill toggling was unsupported or settings were read-only.",
+        );
+        push_project_learning(
+            &mut lmap,
+            "t3code",
+            "Fix skill toggle",
+            "The settings panel is shared by web and desktop, so one change covered both surfaces.",
+        );
+        push_project_learning(
+            &mut lmap,
+            "scratch",
+            "Survey 1",
+            "aidevops combines agent instructions, executable tools, and workflows. Infrastructure access still requires configuration.",
+        );
+        push_project_learning(
+            &mut lmap,
+            "scratch",
+            "Survey 2",
+            "aidevops structures an AI assistant's work through instructions and tools. Installation alone does not grant infrastructure access.",
+        );
+        assert_eq!(lmap["t3code"].pitfalls.len(), 1);
+        assert_eq!(lmap["t3code"].learnings.len(), 1);
+        assert_eq!(
+            lmap["scratch"].pitfalls.len() + lmap["scratch"].learnings.len(),
+            1
         );
     }
 }

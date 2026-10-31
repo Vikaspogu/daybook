@@ -127,6 +127,22 @@ pub struct ConsolidatedRuleDto {
     pub trigger: Option<String>,
     pub why: Option<String>,
 }
+/// Single learning or pitfall extracted from a session summary
+#[derive(Serialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct LearningItemDto {
+    /// `"pitfall"` or `"learning"`
+    pub kind: String,
+    pub text: String,
+    pub session_title: String,
+}
+
+/// Per-project grouped pitfalls and system learnings
+#[derive(Serialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct ProjectLearningsDto {
+    pub project: String,
+    pub pitfalls: Vec<LearningItemDto>,
+    pub learnings: Vec<LearningItemDto>,
+}
 
 /// Daily summary DTO
 #[derive(Serialize)]
@@ -140,6 +156,7 @@ pub struct DailySummaryDto {
     pub day_metrics: DayMetricsDto,
     pub efficiency_signals: Vec<String>,
     pub learnings: Vec<String>,
+    pub learnings_by_project: Vec<ProjectLearningsDto>,
     pub next_steps: Vec<NextStepDto>,
     pub consolidated_rules: Vec<ConsolidatedRuleDto>,
     pub project_gains: Vec<ProjectGainDto>,
