@@ -655,9 +655,8 @@ pub async fn get_daily_summary(
                 .collect();
             waste_alerts.sort_by_key(|a| std::cmp::Reverse(a.count));
 
-            let overview = format_day_overview(
-                &rows.iter().map(|r| r.project.as_str()).collect::<Vec<_>>(),
-            );
+            let overview =
+                format_day_overview(&rows.iter().map(|r| r.project.as_str()).collect::<Vec<_>>());
 
             let summary = DailySummaryDto {
                 date: date.clone(),
@@ -1244,7 +1243,10 @@ fn classify_session(
     {
         return (
             "blocked",
-            Some("Sandbox loopback error (bwrap: Failed RTM_NEWADDR: Operation not permitted)".to_string()),
+            Some(
+                "Sandbox loopback error (bwrap: Failed RTM_NEWADDR: Operation not permitted)"
+                    .to_string(),
+            ),
         );
     }
     if lower_title.contains("pong response")
@@ -1340,8 +1342,11 @@ mod tests {
 
         let blocked_md = "## Summary\nThe session could not proceed because bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted.\n\n## Key Decisions & Trade-offs\n- No repository or memory conclusions were made.\n\n## Code Changes\n- None.";
         let bfiles = extract_files_touched(blocked_md);
-        let (cat, reason) =
-            classify_session("Repository survey blocked", &summary_preview(blocked_md), &bfiles);
+        let (cat, reason) = classify_session(
+            "Repository survey blocked",
+            &summary_preview(blocked_md),
+            &bfiles,
+        );
         assert_eq!(cat, "blocked");
         assert!(reason.unwrap().contains("bwrap"));
         assert_eq!(extract_key_decision(blocked_md), None);
@@ -1378,10 +1383,7 @@ mod tests {
             extract_key_decision(work_md).as_deref(),
             Some("Kept allowlist in important-mail.yaml instead of global config to avoid false positives.")
         );
-        assert_eq!(
-            wfiles,
-            vec!["hermes/cron/important-mail.yaml".to_string()]
-        );
+        assert_eq!(wfiles, vec!["hermes/cron/important-mail.yaml".to_string()]);
 
         let review_md = "## Summary\nCompleted read-only review pass across 3 files.\n\n## Code Changes\n- None.";
         let (rcat, _) = classify_session(
