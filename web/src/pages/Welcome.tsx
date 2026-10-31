@@ -20,6 +20,15 @@ import { formatCost } from '../components/UsageCharts'
 import { useLanguage } from '../contexts/LanguageContext'
 import { OverviewStrip } from '../components/OverviewStrip'
 
+function cleanTitle(raw: string): string {
+  const cleaned = raw
+    .replace(/^\d{2}[_:]\d{2}[-_]?/, '')
+    .replace(/[-_]+/g, ' ')
+    .trim()
+  if (!cleaned) return raw
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1)
+}
+
 export function Welcome() {
   const [days, setDays] = useState<DateItem[]>([])
   const [dailyCostMap, setDailyCostMap] = useState<Map<string, number>>(new Map())
@@ -41,8 +50,6 @@ export function Welcome() {
         const dates = await fetchDates()
         setDays(dates)
 
-
-        // Load usage data for cost display
         try {
           const insights = await fetchInsights(365)
           if (insights.usage_summary?.daily_usage) {
@@ -83,7 +90,6 @@ export function Welcome() {
 
   const monthKey = useMemo(() => format(currentMonth, 'yyyy-MM'), [currentMonth])
 
-  // Compute monthly cost for the current month
   const monthlyCost = useMemo(() => {
     let total = 0
     for (const [date, cost] of dailyCostMap) {
@@ -116,7 +122,7 @@ export function Welcome() {
 
   const slideVariants = {
     enter: (direction: 'left' | 'right') => ({
-      x: direction === 'left' ? 80 : -80,
+      x: direction === 'left' ? 60 : -60,
       opacity: 0,
     }),
     center: {
@@ -124,30 +130,23 @@ export function Welcome() {
       opacity: 1,
     },
     exit: (direction: 'left' | 'right') => ({
-      x: direction === 'left' ? -80 : 80,
+      x: direction === 'left' ? -60 : 60,
       opacity: 0,
     }),
   }
 
   if (loading) {
     return (
-      <div className="max-w-6xl mx-auto px-6 py-8">
-        <h1 className="text-3xl font-bold mb-2">
-          <span className="text-orange-500 dark:text-orange-400">{t('welcome.title')}</span> {t('welcome.titleSuffix')}
-        </h1>
-        <p className="text-gray-400 mb-8 h-5 w-48 bg-gray-200 dark:bg-daily-light rounded animate-pulse" />
-        <div className="flex items-center justify-between mb-6">
-          <div className="h-8 w-40 bg-gray-200 dark:bg-daily-light rounded animate-pulse" />
-          <div className="h-8 w-20 bg-gray-200 dark:bg-daily-light rounded animate-pulse" />
-        </div>
-        <div className="grid grid-cols-7 gap-1.5">
-          {WEEKDAYS.map(d => (
-            <div key={d} className="text-center text-xs font-medium text-gray-400 dark:text-gray-500 py-2">
-              {d}
-            </div>
+      <div className="max-w-[1160px] mx-auto px-4 sm:px-6 py-6 space-y-5">
+        <div className="qp-hero h-28 animate-pulse" />
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-[10px]">
+          {[...Array(4)].map((_, i) => (
+            <div key={i} className="qp-tile animate-pulse" />
           ))}
+        </div>
+        <div className="grid grid-cols-7 gap-2">
           {[...Array(35)].map((_, i) => (
-            <div key={i} className="h-24 bg-gray-200 dark:bg-daily-light rounded-lg animate-pulse" />
+            <div key={i} className="h-24 qp-card animate-pulse" />
           ))}
         </div>
       </div>
@@ -156,77 +155,101 @@ export function Welcome() {
 
   if (days.length === 0) {
     return (
-      <div className="max-w-4xl mx-auto px-6 py-8">
-        <div className="flex flex-col items-center justify-center min-h-[60vh]">
-          <div className="text-center space-y-4">
-            <h1 className="text-4xl font-bold text-balance mb-2">
-              {t('welcome.emptyTitle')} <span className="text-orange-500 dark:text-orange-400">{t('welcome.emptyTitleHighlight')}</span>
-            </h1>
-            <p className="text-gray-500 dark:text-gray-400 text-lg max-w-md mx-auto">
-              {t('welcome.emptySubtitle')}
+      <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10">
+        <div className="qp-hero text-center py-14 space-y-4">
+          <h1 className="qp-hero-title">
+            {t('welcome.emptyTitle')} <span className="text-[#FBBF24]">{t('welcome.emptyTitleHighlight')}</span>
+          </h1>
+          <p className="text-[#94A3B8] text-sm max-w-md mx-auto">
+            {t('welcome.emptySubtitle')}
+          </p>
+          <div className="pt-4 border-t border-white/[0.06]">
+            <p className="font-mono text-xs text-[#64748B]">
+              {t('welcome.emptyHint')}
             </p>
-            <div className="mt-8 pt-8 border-t border-gray-200 dark:border-gray-800">
-              <p className="text-gray-500 text-sm">
-                {t('welcome.emptyHint')}
-              </p>
-            </div>
           </div>
         </div>
       </div>
     )
   }
 
+  const latestDay = days[0]
+
   return (
-    <div className="max-w-6xl mx-auto px-6 py-8">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold mb-2">
-          <span className="text-orange-500 dark:text-orange-400">{t('welcome.title')}</span> {t('welcome.titleSuffix')}
-        </h1>
-        <p className="text-gray-500 dark:text-gray-400">
-          {t('welcome.subtitle', {
-            count: days.length,
-            dayWord: days.length === 1 ? t('welcome.day') : t('welcome.days'),
-          })}
-        </p>
+    <div className="max-w-[1160px] mx-auto px-4 sm:px-6 py-6 space-y-6">
+      {/* Hero Summary Card */}
+      <div className="qp-hero flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="space-y-1.5">
+          <div className="qp-kicker">QUIET PRECISION · ARCHIVE LEDGER</div>
+          <h1 className="qp-hero-title">
+            <span className="text-[#FBBF24]">{t('welcome.title')}</span> {t('welcome.titleSuffix')}
+          </h1>
+          <p className="text-xs font-mono text-[#94A3B8] tabular-nums">
+            {t('welcome.subtitle', {
+              count: days.length,
+              dayWord: days.length === 1 ? t('welcome.day') : t('welcome.days'),
+            })}
+            {monthlyCost > 0 ? ` · ${formatCost(monthlyCost)} month spend` : ''}
+          </p>
+        </div>
+
+        {latestDay && (
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => navigate(`/day/${latestDay.date}`)}
+              className="qp-pill emerald hover:brightness-110"
+            >
+              <span className="qp-dot" />
+              <span className="font-mono">{latestDay.date}</span>
+              <span>Latest Brief →</span>
+            </button>
+          </div>
+        )}
       </div>
 
+      {/* 2-Up / 4-Up Interactive Control Tiles */}
       <OverviewStrip days={days} />
 
-
-      {/* Month navigation */}
-      <div className="flex items-center justify-between mb-4">
+      {/* Month Section Header */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <button
+            type="button"
             onClick={goToPrevMonth}
-            className="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-daily-light transition-colors"
+            className="size-8 rounded-xl qp-card flex items-center justify-center text-[#94A3B8] hover:text-[#F8FAFC] hover:border-white/15 transition-colors"
             aria-label="Previous month"
           >
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" className="text-gray-500 dark:text-gray-400">
-              <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="none">
+              <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
-          <h2 className="text-lg font-semibold min-w-[180px] text-center">
+          <h2 className="text-base font-extrabold tracking-tight text-[#F8FAFC] min-w-[156px] text-center font-mono">
             {format(currentMonth, 'MMMM yyyy')}
           </h2>
           <button
+            type="button"
             onClick={goToNextMonth}
-            className="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-daily-light transition-colors"
+            className="size-8 rounded-xl qp-card flex items-center justify-center text-[#94A3B8] hover:text-[#F8FAFC] hover:border-white/15 transition-colors"
             aria-label="Next month"
           >
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" className="text-gray-500 dark:text-gray-400">
-              <path d="M7.5 15L12.5 10L7.5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="none">
+              <path d="M7.5 15L12.5 10L7.5 5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
         </div>
-        <div className="flex items-center gap-3">
+
+        <div className="flex items-center gap-2">
           {monthlyCost > 0 && (
-            <span className="text-sm font-medium text-purple-500">
+            <span className="qp-pill amber font-mono tabular-nums">
+              <span className="qp-dot" />
               {formatCost(monthlyCost)}
             </span>
           )}
           <button
+            type="button"
             onClick={goToToday}
-            className="px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-daily-light transition-colors text-gray-600 dark:text-gray-300"
+            className="px-3 py-1.5 text-xs font-bold rounded-xl qp-card text-[#94A3B8] hover:text-[#F8FAFC] hover:border-white/20 transition-colors"
           >
             {t('welcome.today')}
           </button>
@@ -234,9 +257,9 @@ export function Welcome() {
       </div>
 
       {/* Weekday headers */}
-      <div className="grid grid-cols-7 gap-1.5 mb-1">
+      <div className="grid grid-cols-7 gap-2">
         {WEEKDAYS.map(d => (
-          <div key={d} className="text-center text-xs font-medium text-gray-400 dark:text-gray-500 py-2">
+          <div key={d} className="text-center qp-kicker py-1">
             {d}
           </div>
         ))}
@@ -251,8 +274,8 @@ export function Welcome() {
           initial="enter"
           animate="center"
           exit="exit"
-          transition={{ duration: 0.2, ease: 'easeInOut' }}
-          className="grid grid-cols-7 gap-1.5"
+          transition={{ duration: 0.18, ease: 'easeInOut' }}
+          className="grid grid-cols-7 gap-2"
         >
           {calendarDays.map(day => {
             const dateStr = format(day, 'yyyy-MM-dd')
@@ -264,56 +287,55 @@ export function Welcome() {
 
             return (
               <button
+                type="button"
                 key={dateStr}
                 onClick={() => hasArchive && navigate(`/day/${dateStr}`)}
                 disabled={!hasArchive}
                 className={cn(
-                  'h-24 rounded-lg p-2 flex flex-col items-start text-left transition-all duration-150 relative overflow-hidden',
+                  'h-24 rounded-[16px] p-2.5 flex flex-col items-start text-left transition-all duration-150 relative overflow-hidden',
                   !isCurrentMonth && 'opacity-30',
-                  hasArchive && 'cursor-pointer hover:ring-1 hover:ring-orange-500/50 hover:scale-[1.02] active:scale-[0.98]',
-                  !hasArchive && 'cursor-default',
                   hasArchive
-                    ? 'bg-orange-500/5 dark:bg-orange-500/10 border border-orange-500/20 dark:border-orange-500/15'
-                    : 'border border-transparent',
+                    ? archive.has_digest
+                      ? 'qp-surface-emerald cursor-pointer hover:brightness-110'
+                      : 'qp-surface-sky cursor-pointer hover:brightness-110'
+                    : 'qp-card opacity-55 cursor-default'
                 )}
               >
-                {/* Header row: day number + session count */}
                 <div className="flex items-center justify-between w-full mb-1">
                   <span
                     className={cn(
-                      'text-xs font-semibold leading-none',
-                      today && 'bg-orange-500 text-white rounded-full size-5 flex items-center justify-center text-[10px]',
-                      !today && hasArchive && 'text-gray-900 dark:text-gray-100',
-                      !today && !hasArchive && 'text-gray-400 dark:text-gray-600',
+                      'font-mono text-xs font-bold leading-none tabular-nums',
+                      today && 'px-1.5 py-0.5 rounded-md bg-[#FBBF24] text-[#0B0E14]',
+                      !today && hasArchive && 'text-[#F8FAFC]',
+                      !today && !hasArchive && 'text-[#64748B]'
                     )}
                   >
                     {format(day, 'd')}
                   </span>
 
                   {hasArchive && (
-                    <div className="flex items-center gap-1">
-                      {archive.has_digest && (
-                        <span className="size-1.5 rounded-full bg-orange-500 dark:bg-orange-400" />
+                    <span
+                      className={cn(
+                        'inline-flex items-center gap-1 font-mono text-[10px] font-semibold tabular-nums',
+                        archive.has_digest ? 'text-[#34D399]' : 'text-[#38BDF8]'
                       )}
-                      <span className="text-[10px] font-medium text-orange-500 dark:text-orange-400 leading-none">
-                        {archive.session_count}s
-                      </span>
-                    </div>
+                    >
+                      <span className="qp-dot" />
+                      {archive.session_count}s
+                    </span>
                   )}
                 </div>
 
-                {/* Daily cost */}
                 {dayCost != null && dayCost > 0 && (
-                  <span className="text-[10px] font-medium text-purple-500 dark:text-purple-400 leading-none mb-0.5">
+                  <span className="text-[11px] font-mono font-semibold text-[#FBBF24] tabular-nums leading-none mb-1">
                     {formatCost(dayCost)}
                   </span>
                 )}
 
-                {/* Daily preview: desktop only, prefer clean session titles over raw counts */}
                 {(archive?.session_titles?.length || archive?.preview) && (
-                  <p className="hidden sm:block text-[10px] leading-tight text-gray-500 dark:text-gray-400 line-clamp-2 w-full">
+                  <p className="hidden sm:block text-[10px] leading-snug text-[#94A3B8] line-clamp-2 w-full">
                     {archive.session_titles?.length
-                      ? archive.session_titles.slice(0, 2).join(' · ')
+                      ? archive.session_titles.slice(0, 2).map(cleanTitle).join(' · ')
                       : archive.preview}
                   </p>
                 )}

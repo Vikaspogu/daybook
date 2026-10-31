@@ -12,17 +12,26 @@ import { useLanguage } from '../contexts/LanguageContext'
 const formatOutcome = (outcome: string): string =>
   outcome.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 
-const getOutcomeBadgeClass = (outcome: string | null): string => {
+const getOutcomePillTone = (outcome: string | null): string => {
   switch (outcome) {
     case 'achieved':
-      return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 border-green-500/30'
+      return 'emerald'
     case 'partially_achieved':
-      return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400 border-yellow-500/30'
+      return 'amber'
     case 'not_achieved':
-      return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 border-red-500/30'
+      return 'coral'
     default:
-      return 'bg-gray-100 text-gray-600 dark:bg-gray-700/30 dark:text-gray-400 border-gray-500/20'
+      return ''
   }
+}
+
+const normalizeProjectLabel = (raw?: string): string => {
+  if (!raw) return 'workspace'
+  const base = raw.split('/').filter(Boolean).pop() ?? raw
+  if (/^\d{4}-\d{2}-\d{2}-/.test(base) || base.length > 26) {
+    return 'scratch'
+  }
+  return base
 }
 
 export function SessionDetail() {
@@ -73,11 +82,9 @@ export function SessionDetail() {
 
   if (loading && !session) {
     return (
-      <div className="max-w-4xl mx-auto px-6 py-8">
-        <div className="animate-pulse space-y-4">
-          <div className="h-8 w-64 bg-gray-200 dark:bg-daily-light rounded" />
-          <div className="h-64 bg-gray-200 dark:bg-daily-light rounded-lg" />
-        </div>
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 py-6 space-y-4">
+        <div className="qp-hero h-32 animate-pulse" />
+        <div className="qp-card h-72 animate-pulse" />
       </div>
     )
   }
@@ -92,173 +99,127 @@ export function SessionDetail() {
   const costUsd = meta?.cost_usd ?? insight?.token_usage?.total_cost_usd
 
   return (
-    <div className="max-w-4xl mx-auto px-6 py-8">
+    <div className="max-w-4xl mx-auto px-4 sm:px-6 py-6 space-y-5">
       {/* Breadcrumb */}
-      <nav className="mb-6 text-sm flex items-center flex-wrap gap-y-1">
-        <Link to="/" className="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+      <nav className="text-xs font-mono flex items-center flex-wrap gap-2">
+        <Link to="/" className="text-[#64748B] hover:text-[#F8FAFC]">
           {t('dayDetail.breadcrumbArchives')}
         </Link>
-        <span className="text-gray-400 dark:text-gray-600 mx-2">/</span>
-        <Link to={`/day/${date}`} className="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 tabular-nums">
+        <span className="text-[#475569]">/</span>
+        <Link to={`/day/${date}`} className="text-[#94A3B8] hover:text-[#F8FAFC] tabular-nums">
           {date}
         </Link>
-        <span className="text-gray-400 dark:text-gray-600 mx-2">/</span>
-        <span className="text-orange-500 dark:text-orange-400 truncate max-w-md">
+        <span className="text-[#475569]">/</span>
+        <span className="text-[#FBBF24] truncate max-w-md">
           {meta?.title || decodeURIComponent(name || '')}
         </span>
       </nav>
 
       {error && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 text-red-400 mb-6">
+        <div className="qp-surface-coral rounded-2xl p-4 text-xs font-mono text-[#FB7185]">
           {error}
         </div>
       )}
 
       {session && (
         <motion.div
-          initial={{ opacity: 0, y: 20 }}
+          initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
+          className="space-y-5"
         >
-          {/* Full Session Metadata Header */}
-          <div className="mb-6">
-            <div className="flex items-start justify-between gap-4 mb-3">
-              <h1 className="text-2xl font-bold text-balance flex-1">
-                {meta?.title || decodeURIComponent(name || '')}
-              </h1>
-
-              {/* Action Buttons */}
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  onClick={handleCopyContent}
-                  className={cn(
-                    'px-3 py-1.5 rounded-lg text-xs font-medium transition-colors',
-                    'bg-orange-500/15 text-orange-500 dark:text-orange-400 hover:bg-orange-500/25',
-                    'border border-orange-500/30 hover:border-orange-500/50',
-                    'flex items-center gap-1.5'
-                  )}
-                  title="Copy markdown content"
-                >
-                  {copySuccess ? (
-                    <>
-                      <svg className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
-                      <span>{t('sessionDetail.copied')}</span>
-                    </>
-                  ) : (
-                    <>
-                      <svg className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                      </svg>
-                      <span>{t('sessionDetail.copy')}</span>
-                    </>
-                  )}
-                </button>
+          {/* Hero Summary Card */}
+          <div className="qp-hero space-y-3.5">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1 min-w-0">
+                <div className="qp-kicker">SESSION RECORD</div>
+                <h1 className="qp-hero-title text-balance">
+                  {meta?.title || decodeURIComponent(name || '')}
+                </h1>
               </div>
+
+              <button
+                type="button"
+                onClick={handleCopyContent}
+                className="qp-pill amber font-mono shrink-0 hover:brightness-110"
+                title="Copy markdown content"
+              >
+                <span>{copySuccess ? `✓ ${t('sessionDetail.copied')}` : t('sessionDetail.copy')}</span>
+              </button>
             </div>
 
-            {/* Metadata Badges Row */}
-            <div className="flex flex-wrap items-center gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2 text-xs font-mono tabular-nums">
               {meta?.runtime && (
-                <span className="px-2 py-0.5 rounded-md bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400 font-medium">
+                <span className="qp-pill sky !py-1 !px-2.5 !text-[11px]">
+                  <span className="qp-dot" />
                   {meta.runtime}
                 </span>
               )}
               {meta?.project && (
-                <span className="px-2 py-0.5 rounded-md bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300 font-medium">
-                  {meta.project}
+                <span className="qp-pill emerald !py-1 !px-2.5 !text-[11px]">
+                  {normalizeProjectLabel(meta.project)}
                 </span>
               )}
               {meta?.git_branch && (
-                <span className="px-2 py-0.5 rounded-md bg-gray-100 text-gray-600 dark:bg-gray-800/80 dark:text-gray-400 font-mono">
-                  {meta.git_branch}
-                </span>
-              )}
-              {meta?.machine && (
-                <span className="px-2 py-0.5 rounded-md bg-gray-100 text-gray-500 dark:bg-gray-800/60 dark:text-gray-400 font-mono">
-                  {meta.machine}
+                <span className="qp-pill !py-1 !px-2.5 !text-[11px]">
+                  ⎇ {meta.git_branch}
                 </span>
               )}
               {meta?.duration && (
-                <span className="px-2 py-0.5 rounded-md bg-gray-100 text-gray-600 dark:bg-gray-800/80 dark:text-gray-300 tabular-nums">
+                <span className="qp-pill !py-1 !px-2.5 !text-[11px]">
                   {meta.duration}
                 </span>
               )}
               {totalTokens != null && totalTokens > 0 && (
-                <span className="px-2 py-0.5 rounded-md bg-gray-100 text-gray-600 dark:bg-gray-800/80 dark:text-gray-300 tabular-nums">
+                <span className="qp-pill sky !py-1 !px-2.5 !text-[11px]">
                   {formatTokenCount(totalTokens)} tok
                 </span>
               )}
-              {costUsd != null && (
-                <span className="px-2 py-0.5 rounded-md bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400 font-medium tabular-nums">
+              {costUsd != null && costUsd > 0 && (
+                <span className="qp-pill amber !py-1 !px-2.5 !text-[11px]">
                   {formatCost(costUsd)}
                 </span>
               )}
               {insight?.outcome && (
-                <span className={cn('px-2 py-0.5 rounded-full border font-medium', getOutcomeBadgeClass(insight.outcome))}>
-                  outcome: {formatOutcome(insight.outcome)}
-                </span>
-              )}
-              {insight && (
-                <span
-                  className={cn(
-                    'px-2 py-0.5 rounded-full border font-medium',
-                    insight.friction_types.length > 0
-                      ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 border-amber-500/30'
-                      : 'bg-gray-100 text-gray-500 dark:bg-gray-800/60 dark:text-gray-400 border-gray-500/20'
-                  )}
-                >
-                  friction: {insight.friction_types.length > 0
-                    ? insight.friction_types.map(f => f.replace(/_/g, ' ')).join(', ')
-                    : 'none'}
-                </span>
-              )}
-              {meta?.cwd && (
-                <span className="font-mono text-gray-400 dark:text-gray-500 truncate max-w-xs" title={meta.cwd}>
-                  {meta.cwd}
+                <span className={cn('qp-pill !py-1 !px-2.5 !text-[11px]', getOutcomePillTone(insight.outcome))}>
+                  <span className="qp-dot" />
+                  {formatOutcome(insight.outcome)}
                 </span>
               )}
             </div>
           </div>
 
-          {/* Tab Switcher */}
-          <div className="flex gap-1 mb-4 bg-gray-100 dark:bg-daily-dark/50 rounded-lg p-1 w-fit">
+          {/* 2-Up Tab Switcher */}
+          <div className="grid grid-cols-2 gap-2 max-w-sm">
             <button
+              type="button"
               onClick={() => setActiveTab('summary')}
               className={cn(
-                'px-4 py-1.5 rounded-md text-sm font-medium transition-colors',
-                activeTab === 'summary'
-                  ? 'bg-white dark:bg-daily-light text-orange-500 shadow-sm'
-                  : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
+                'qp-quick-btn !h-12',
+                activeTab === 'summary' ? 'amber' : 'text-[#94A3B8] hover:text-[#F8FAFC]'
               )}
             >
-              {t('sessionDetail.tabSummary')}
+              <span className="text-xs font-bold">{t('sessionDetail.tabSummary')}</span>
             </button>
             <button
+              type="button"
               onClick={() => setActiveTab('conversation')}
               className={cn(
-                'px-4 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-1.5',
-                activeTab === 'conversation'
-                  ? 'bg-white dark:bg-daily-light text-orange-500 shadow-sm'
-                  : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
+                'qp-quick-btn !h-12',
+                activeTab === 'conversation' ? 'sky' : 'text-[#94A3B8] hover:text-[#F8FAFC]'
               )}
             >
-              <svg className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-              </svg>
-              {t('sessionDetail.tabConversation')}
+              <span className="text-xs font-bold">{t('sessionDetail.tabConversation')}</span>
             </button>
           </div>
 
-          {/* Tab Content */}
           {activeTab === 'summary' ? (
-            <div className="bg-gray-50 dark:bg-daily-light rounded-xl p-6 border border-gray-200 dark:border-orange-500/20 transition-colors">
+            <div className="qp-card p-6">
               <div className="markdown-content">
                 <MarkdownRenderer content={session.content} />
               </div>
             </div>
           ) : (
-            <div className="bg-gray-50 dark:bg-daily-light rounded-xl border border-gray-200 dark:border-orange-500/20 transition-colors overflow-hidden">
+            <div className="qp-card overflow-hidden">
               <ChatView date={date!} name={name!} />
             </div>
           )}

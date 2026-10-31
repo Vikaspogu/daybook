@@ -9,15 +9,15 @@ export default {
     extend: {
       colors: {
         'daily': {
-          primary: '#f97316',
-          secondary: '#fb923c',
-          accent: '#fdba74',
-          dark: '#0a0a0a',
-          light: '#1a1a1a',
+          primary: '#f59e0b',
+          secondary: '#fbbf24',
+          accent: '#fde68a',
+          dark: '#0B0E14',
+          light: '#131822',
         }
       },
       fontFamily: {
-        sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
+        sans: ['Figtree', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
         mono: ['JetBrains Mono', 'Fira Code', 'ui-monospace', 'monospace'],
       },
     },

@@ -21,37 +21,54 @@ import { useLanguage } from '../contexts/LanguageContext'
 
 type InsightTab = 'charts' | 'sessions'
 
-const COLORS = ['#f97316', '#fb923c', '#fdba74', '#fed7aa', '#ffedd5', '#a3e635', '#4ade80', '#2dd4bf', '#38bdf8', '#818cf8']
+const COLORS = ['#34D399', '#38BDF8', '#FBBF24', '#FB7185', '#A78BFA', '#2DD4BF', '#60A5FA', '#F472B6']
 
-function StatCard({ label, value, sub }: { label: string; value: string | number; sub?: string }) {
+function ControlStatTile({
+  icon,
+  label,
+  value,
+  sub,
+  tone = '',
+}: {
+  icon: string
+  label: string
+  value: string | number
+  sub?: string
+  tone?: 'emerald' | 'sky' | 'amber' | 'coral' | ''
+}) {
   return (
-    <div className="bg-gray-50 dark:bg-daily-light rounded-xl p-5 border border-gray-200 dark:border-gray-800">
-      <p className="text-sm text-gray-500 dark:text-gray-400 mb-1">{label}</p>
-      <p className="text-3xl font-bold text-orange-500 dark:text-orange-400 tabular-nums">{value}</p>
-      {sub && <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">{sub}</p>}
+    <div className={cn('qp-tile', tone)}>
+      <div className="qp-tile-icon">{icon}</div>
+      <div className="qp-tile-name">{label}</div>
+      <div className="qp-tile-state font-mono">
+        {value}
+        {sub ? ` · ${sub}` : ''}
+      </div>
     </div>
   )
 }
 
 function ChartCard({
   title,
+  meta,
   className,
   children,
 }: {
   title: string
+  meta?: string
   className?: string
   children: React.ReactNode
 }) {
   return (
     <motion.div
-      initial={{ opacity: 0, y: 20 }}
+      initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
-      className={cn(
-        'bg-gray-50 dark:bg-daily-light rounded-xl p-5 border border-gray-200 dark:border-gray-800',
-        className
-      )}
+      className={cn('qp-card p-5 space-y-4', className)}
     >
-      <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4">{title}</h3>
+      <div className="flex items-center justify-between gap-2 pb-2 border-b border-white/[0.06]">
+        <h3 className="qp-kicker">{title}</h3>
+        {meta && <span className="qp-meta">{meta}</span>}
+      </div>
       {children}
     </motion.div>
   )
@@ -60,10 +77,10 @@ function ChartCard({
 function CustomTooltip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null
   return (
-    <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 shadow-lg">
-      <p className="text-xs text-gray-500 dark:text-gray-400">{label}</p>
+    <div className="qp-card px-3 py-2 shadow-xl">
+      <p className="text-[11px] font-mono text-[#94A3B8]">{label}</p>
       {payload.map((p: any, i: number) => (
-        <p key={i} className="text-sm font-medium tabular-nums" style={{ color: p.color }}>
+        <p key={i} className="text-xs font-mono font-bold tabular-nums" style={{ color: p.color }}>
           {p.value} {p.name || 'sessions'}
         </p>
       ))}
@@ -108,243 +125,270 @@ export function Insights() {
 
   if (loading) {
     return (
-      <div className="max-w-6xl mx-auto px-6 py-8">
-        <h1 className="text-3xl font-bold mb-8">
-          <span className="text-orange-500 dark:text-orange-400">{t('insights.title')}</span>
-        </h1>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-          {[...Array(3)].map((_, i) => (
-            <div key={i} className="h-28 bg-gray-200 dark:bg-daily-light rounded-xl animate-pulse" />
+      <div className="max-w-[1280px] mx-auto px-4 sm:px-6 py-6 space-y-5">
+        <div className="qp-hero h-32 animate-pulse" />
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-[10px]">
+          {[...Array(4)].map((_, i) => (
+            <div key={i} className="qp-tile animate-pulse" />
           ))}
         </div>
-        <div className="h-64 bg-gray-200 dark:bg-daily-light rounded-xl animate-pulse" />
+        <div className="qp-card h-64 animate-pulse" />
       </div>
     )
   }
 
   if (!data) {
     return (
-      <div className="max-w-6xl mx-auto px-6 py-8">
-        <h1 className="text-3xl font-bold mb-4">
-          <span className="text-orange-500 dark:text-orange-400">{t('insights.title')}</span>
-        </h1>
-        <p className="text-gray-500">{t('insights.failed')}</p>
+      <div className="max-w-[1280px] mx-auto px-4 sm:px-6 py-6">
+        <div className="qp-hero">
+          <h1 className="qp-hero-title text-[#FBBF24]">{t('insights.title')}</h1>
+          <p className="text-xs font-mono text-[#94A3B8] mt-1">{t('insights.failed')}</p>
+        </div>
       </div>
     )
   }
 
-  const avgSessions = data.total_days > 0
-    ? (data.total_sessions / data.total_days).toFixed(1)
-    : '0'
+  const avgSessions = data.total_days > 0 ? (data.total_sessions / data.total_days).toFixed(1) : '0'
 
-  const digestRate = data.total_days > 0
-    ? Math.round((data.daily_stats.filter(d => d.has_digest).length / data.total_days) * 100)
-    : 0
+  const digestRate =
+    data.total_days > 0
+      ? Math.round((data.daily_stats.filter(d => d.has_digest).length / data.total_days) * 100)
+      : 0
 
   const hasLangs = data.language_distribution.length > 0
   const hasTypes = data.session_type_distribution.length > 0
   const bothDist = hasLangs && hasTypes
 
   return (
-    <div className="max-w-6xl mx-auto px-6 py-8">
-      {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4 mb-8">
-        <div>
-          <h1 className="text-3xl font-bold">
-            <span className="text-orange-500 dark:text-orange-400">{t('insights.title')}</span>
-          </h1>
-          <p className="text-gray-500 dark:text-gray-400 mt-1">
-            {t('insights.subtitle')}
-          </p>
+    <div className="max-w-[1280px] mx-auto px-4 sm:px-6 py-6 space-y-6">
+      {/* Hero Summary Card */}
+      <div className="qp-hero space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-4 pb-3 border-b border-white/[0.06]">
+          <div className="space-y-1">
+            <div className="qp-kicker">QUIET PRECISION · TELEMETRY & VELOCITY</div>
+            <h1 className="qp-hero-title">
+              <span className="text-[#FBBF24]">{t('insights.title')}</span> · {days}d Window
+            </h1>
+            <p className="text-xs font-mono text-[#94A3B8] tabular-nums">
+              {t('insights.subtitle')}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap gap-1.5">
+            {[7, 14, 30, 90].map(d => (
+              <button
+                type="button"
+                key={d}
+                onClick={() => setDays(d)}
+                className={cn(
+                  'qp-pill font-mono tabular-nums !py-1 !px-3',
+                  days === d ? 'amber' : 'hover:text-[#F8FAFC]'
+                )}
+              >
+                {days === d && <span className="qp-dot" />}
+                {d}d
+              </button>
+            ))}
+          </div>
         </div>
-        <div className="flex gap-2">
-          {[7, 14, 30, 90].map(d => (
-            <button
-              key={d}
-              onClick={() => setDays(d)}
-              className={`px-3 py-1.5 text-sm rounded-lg transition-colors tabular-nums ${
-                days === d
-                  ? 'bg-orange-500 text-white'
-                  : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
-              }`}
-            >
-              {d}d
-            </button>
-          ))}
+
+        {/* 4-Up Interactive Control Tiles */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-[10px]">
+          <ControlStatTile
+            icon="DY"
+            label={t('insights.totalDays')}
+            value={`${data.total_days} days`}
+            tone="emerald"
+          />
+          <ControlStatTile
+            icon="SN"
+            label={t('insights.totalSessions')}
+            value={`${data.total_sessions} runs`}
+            tone="sky"
+          />
+          <ControlStatTile
+            icon="AVG"
+            label={t('insights.avgSessions')}
+            value={`${avgSessions} / day`}
+            tone="amber"
+          />
+          <ControlStatTile
+            icon="DG"
+            label={t('insights.digestRate')}
+            value={`${digestRate}%`}
+            sub={t('insights.digestRateSub')}
+            tone={digestRate >= 70 ? 'emerald' : 'sky'}
+          />
         </div>
       </div>
 
-      {/* Tab bar */}
-      <div className="flex gap-1 bg-gray-100 dark:bg-gray-800 rounded-lg p-1 mb-6 w-fit">
-        {([
-          { key: 'charts' as InsightTab, label: t('insights.tabCharts') },
-          { key: 'sessions' as InsightTab, label: t('insights.tabSessions'), count: problemCount },
-        ]).map(tab => (
-          <button
-            key={tab.key}
-            onClick={() => setActiveTab(tab.key)}
-            className={cn(
-              'px-4 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-2',
-              activeTab === tab.key
-                ? 'bg-white dark:bg-daily-light text-orange-500 dark:text-orange-400 shadow-sm'
-                : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
-            )}
-          >
-            {tab.label}
-            {tab.count != null && (
-              <span
-                className={cn(
-                  'px-1.5 py-0.5 rounded-full text-[11px] font-semibold tabular-nums',
-                  tab.count > 0
-                    ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
-                    : 'bg-gray-200 text-gray-500 dark:bg-gray-700 dark:text-gray-400'
-                )}
-              >
-                {tab.count}
-              </span>
-            )}
-          </button>
-        ))}
+      {/* 2-Up Quick-Action Tab Bar */}
+      <div className="grid grid-cols-2 gap-2 max-w-md">
+        <button
+          type="button"
+          onClick={() => setActiveTab('charts')}
+          className={cn(
+            'qp-quick-btn !h-12',
+            activeTab === 'charts' ? 'sky' : 'text-[#94A3B8] hover:text-[#F8FAFC]'
+          )}
+        >
+          <span className="text-xs font-bold">{t('insights.tabCharts')}</span>
+          <span className="font-mono text-[10px] opacity-80">Usage & Trends</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('sessions')}
+          className={cn(
+            'qp-quick-btn !h-12',
+            activeTab === 'sessions'
+              ? problemCount > 0
+                ? 'coral'
+                : 'emerald'
+              : 'text-[#94A3B8] hover:text-[#F8FAFC]'
+          )}
+        >
+          <span className="text-xs font-bold">{t('insights.tabSessions')}</span>
+          <span className="font-mono text-[10px] tabular-nums opacity-85">
+            {problemCount} flagged
+          </span>
+        </button>
       </div>
 
       {/* === Charts Tab === */}
       {activeTab === 'charts' && (
-        <>
-          {/* Stats Overview */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-            <StatCard label={t('insights.totalDays')} value={data.total_days} />
-            <StatCard label={t('insights.totalSessions')} value={data.total_sessions} />
-            <StatCard label={t('insights.avgSessions')} value={avgSessions} />
-            <StatCard label={t('insights.digestRate')} value={`${digestRate}%`} sub={t('insights.digestRateSub')} />
-          </div>
-
+        <div className="space-y-6">
           {/* Token Usage Section */}
           {data.usage_summary && data.usage_summary.total_sessions > 0 && (
-            <>
-              <div className="mb-4">
-                <h2 className="text-lg font-semibold text-gray-800 dark:text-gray-200">{t('insights.tokenUsage')}</h2>
-                <p className="text-sm text-gray-500 dark:text-gray-400">{t('insights.tokenUsageDesc')}</p>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between px-0.5">
+                <h2 className="qp-kicker">{t('insights.tokenUsage')}</h2>
+                <span className="qp-meta">{t('insights.tokenUsageDesc')}</span>
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-                <StatCard
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-[10px]">
+                <ControlStatTile
+                  icon="TK"
                   label={t('insights.totalTokens')}
                   value={formatTokenCount(
                     data.usage_summary.total_input_tokens +
-                    data.usage_summary.total_output_tokens +
-                    data.usage_summary.total_cache_creation_tokens +
-                    data.usage_summary.total_cache_read_tokens
+                      data.usage_summary.total_output_tokens +
+                      data.usage_summary.total_cache_creation_tokens +
+                      data.usage_summary.total_cache_read_tokens
                   )}
-                  sub={`${data.usage_summary.total_sessions} sessions`}
+                  sub={`${data.usage_summary.total_sessions}s`}
+                  tone="sky"
                 />
-                <StatCard
+                <ControlStatTile
+                  icon="IN"
                   label={t('insights.inputTokens')}
                   value={formatTokenCount(data.usage_summary.total_input_tokens)}
                 />
-                <StatCard
+                <ControlStatTile
+                  icon="OUT"
                   label={t('insights.outputTokens')}
                   value={formatTokenCount(data.usage_summary.total_output_tokens)}
                 />
-                <StatCard
+                <ControlStatTile
+                  icon="$"
                   label={t('insights.totalCost')}
                   value={formatCost(data.usage_summary.total_cost_usd)}
-                  sub={`cache: ${formatTokenCount(data.usage_summary.total_cache_read_tokens)} read`}
+                  sub={`${formatTokenCount(data.usage_summary.total_cache_read_tokens)} cache`}
+                  tone="amber"
                 />
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                <ChartCard title={t('insights.tokenTimeline')}>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                <ChartCard title={t('insights.tokenTimeline')} meta="TOKENS / DAY">
                   <UsageTimeline data={data.usage_summary.daily_usage} />
                 </ChartCard>
-                <ChartCard title={t('insights.dailyCost')}>
+                <ChartCard title={t('insights.dailyCost')} meta="USD / DAY">
                   <CostTimeline data={data.usage_summary.daily_usage} />
                 </ChartCard>
               </div>
 
               {data.usage_summary.model_distribution.length > 0 && (
-                <div className="mb-4">
-                  <ChartCard title={t('insights.modelDistribution')}>
-                    <ModelPieChart data={data.usage_summary.model_distribution} />
-                  </ChartCard>
-                </div>
+                <ChartCard title={t('insights.modelDistribution')} meta="MODELS">
+                  <ModelPieChart data={data.usage_summary.model_distribution} />
+                </ChartCard>
               )}
-            </>
+            </div>
           )}
 
           {/* Trend Analysis */}
           <InsightsTrends trends={data.trends} />
 
           {/* Activity Timeline */}
-          <ChartCard title={t('insights.activityTimeline')}>
+          <ChartCard title={t('insights.activityTimeline')} meta="SESSIONS / DAY">
             {data.daily_stats.length > 0 ? (
               <ResponsiveContainer width="100%" height={200}>
                 <AreaChart data={data.daily_stats}>
                   <defs>
                     <linearGradient id="colorSessions" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#f97316" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="#f97316" stopOpacity={0} />
+                      <stop offset="5%" stopColor="#38BDF8" stopOpacity={0.32} />
+                      <stop offset="95%" stopColor="#38BDF8" stopOpacity={0} />
                     </linearGradient>
                   </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" opacity={0.2} />
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" opacity={0.5} />
                   <XAxis
                     dataKey="date"
-                    tick={{ fontSize: 11, fill: '#9ca3af' }}
+                    tick={{ fontSize: 11, fill: '#94A3B8' }}
                     tickFormatter={(v: string) => v.slice(5)}
                   />
-                  <YAxis tick={{ fontSize: 11, fill: '#9ca3af' }} allowDecimals={false} />
+                  <YAxis tick={{ fontSize: 11, fill: '#94A3B8' }} allowDecimals={false} />
                   <Tooltip content={<CustomTooltip />} />
                   <Area
                     type="monotone"
                     dataKey="session_count"
-                    stroke="#f97316"
+                    stroke="#38BDF8"
                     strokeWidth={2}
                     fill="url(#colorSessions)"
                   />
                 </AreaChart>
               </ResponsiveContainer>
             ) : (
-              <p className="text-sm text-gray-500 dark:text-gray-400 py-8 text-center">
+              <p className="text-xs font-mono text-[#64748B] py-8 text-center">
                 {t('insights.noSessionDetails')}
               </p>
             )}
           </ChartCard>
 
-          {/* Balanced Distribution Grid — pairs Languages + Session Types when both exist, full-width when only one */}
+          {/* Balanced Distribution Grid */}
           {(hasLangs || hasTypes) && (
-            <div className={cn('grid grid-cols-1 gap-4 mt-4', bothDist && 'md:grid-cols-2')}>
+            <div className={cn('grid grid-cols-1 gap-5', bothDist && 'lg:grid-cols-2')}>
               {hasLangs && (
-                <ChartCard title={t('insights.languages')}>
+                <ChartCard title={t('insights.languages')} meta="TOP LANGUAGES">
                   <ResponsiveContainer width="100%" height={240}>
                     <BarChart data={data.language_distribution.slice(0, 8)} layout="vertical">
-                      <CartesianGrid strokeDasharray="3 3" stroke="#374151" opacity={0.2} />
-                      <XAxis type="number" tick={{ fontSize: 11, fill: '#9ca3af' }} allowDecimals={false} />
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" opacity={0.5} />
+                      <XAxis type="number" tick={{ fontSize: 11, fill: '#94A3B8' }} allowDecimals={false} />
                       <YAxis
                         type="category"
                         dataKey="name"
-                        tick={{ fontSize: 12, fill: '#9ca3af' }}
+                        tick={{ fontSize: 12, fill: '#94A3B8' }}
                         width={100}
                       />
                       <Tooltip content={<CustomTooltip />} />
-                      <Bar dataKey="count" fill="#38bdf8" radius={[0, 4, 4, 0]} />
+                      <Bar dataKey="count" fill="#34D399" radius={[0, 6, 6, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
                 </ChartCard>
               )}
 
               {hasTypes && (
-                <ChartCard title={t('insights.sessionTypes')}>
-                  <div className="flex flex-wrap gap-3">
+                <ChartCard title={t('insights.sessionTypes')} meta="DISTRIBUTION">
+                  <div className="flex flex-wrap gap-2.5">
                     {data.session_type_distribution.map((item, i) => (
                       <div
                         key={item.name}
-                        className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700"
+                        className="qp-pill !py-1.5 !px-3 font-mono tabular-nums"
                       >
-                        <div
-                          className="w-3 h-3 rounded-full"
-                          style={{ backgroundColor: COLORS[i % COLORS.length] }}
+                        <span
+                          className="qp-dot"
+                          style={{ color: COLORS[i % COLORS.length] }}
                         />
-                        <span className="text-sm text-gray-600 dark:text-gray-300">{item.name}</span>
-                        <span className="text-sm font-bold text-orange-500 dark:text-orange-400 tabular-nums">{item.count}</span>
+                        <span className="text-[#F8FAFC]">{item.name}</span>
+                        <span className="text-[#FBBF24] font-bold">{item.count}</span>
                       </div>
                     ))}
                   </div>
@@ -352,7 +396,7 @@ export function Insights() {
               )}
             </div>
           )}
-        </>
+        </div>
       )}
 
       {/* === Problem Sessions Tab === */}
@@ -361,11 +405,11 @@ export function Insights() {
           {problemSessions.length > 0 ? (
             <InsightsProblemView sessionDetails={problemSessions} />
           ) : (
-            <div className="text-center py-12 px-6 bg-gray-50 dark:bg-daily-light rounded-xl border border-dashed border-gray-300 dark:border-gray-700">
-              <p className="text-sm font-medium text-gray-600 dark:text-gray-300">
+            <div className="qp-card text-center py-12 px-6">
+              <p className="text-sm font-bold text-[#F8FAFC]">
                 {t('insights.problemNoIssues')}
               </p>
-              <p className="text-xs text-gray-400 dark:text-gray-500 mt-1 max-w-md mx-auto">
+              <p className="text-xs font-mono text-[#64748B] mt-1 max-w-md mx-auto">
                 {t('insights.noSessionDetails')}
               </p>
             </div>
