@@ -798,6 +798,17 @@ pub async fn get_daily_summary(
 
             let overview =
                 format_day_overview(&rows.iter().map(|r| r.project.as_str()).collect::<Vec<_>>());
+            let raw_content = render_daily_markdown(
+                session_count,
+                work_count,
+                review_count,
+                blocked_count,
+                &day_metrics,
+                &efficiency_signals,
+                &next_steps,
+                &learnings_by_project,
+                &project_gains,
+            );
 
             let summary = DailySummaryDto {
                 date: date.clone(),
@@ -820,7 +831,7 @@ pub async fn get_daily_summary(
                 commands,
                 reflections: None,
                 tomorrow_focus: Vec::new(),
-                raw_content: String::new(),
+                raw_content,
                 file_path: String::new(),
             };
             Json(ApiResponse::success(summary))
@@ -1803,6 +1814,97 @@ fn build_workflow_coaching(
     next_steps.truncate(3);
     (signals, next_steps)
 }
+
+#[allow(clippy::too_many_arguments)]
+fn render_daily_markdown(
+    session_count: usize,
+    work_count: usize,
+    review_count: usize,
+    blocked_count: usize,
+    day_metrics: &DayMetricsDto,
+    efficiency_signals: &[String],
+    next_steps: &[NextStepDto],
+    learnings_by_project: &[ProjectLearningsDto],
+    project_gains: &[ProjectGainDto],
+) -> String {
+    if session_count == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let cache_pct = day_metrics
+        .cache_hit_rate
+        .map(|r| format!("{}%", (r * 100.0).round() as i64))
+        .unwrap_or_else(|| "—".to_string());
+    out.push_str(&format!(
+        "Metrics: {session_count} sessions ({work_count} work, {review_count} review, {blocked_count} blocked) | Cost: ${:.2} | Cache hit: {cache_pct} | Tests: {} | Failed tools: {}\n",
+        day_metrics.total_cost_usd, day_metrics.test_runs, day_metrics.failed_tool_calls
+    ));
+
+    if !efficiency_signals.is_empty() {
+        out.push_str("\n## Cost, Cache & Command Health\n");
+        for sig in efficiency_signals {
+            out.push_str(&format!("- {sig}\n"));
+        }
+    }
+
+    if !next_steps.is_empty() {
+        out.push_str("\n## Recommended Next Steps\n");
+        for step in next_steps {
+            out.push_str(&format!(
+                "- [{}] **{}**: {}\n",
+                step.tag, step.title, step.detail
+            ));
+        }
+    }
+
+    if !learnings_by_project.is_empty() {
+        out.push_str("\n## Pitfalls & Learnings — By Project\n");
+        for group in learnings_by_project {
+            out.push_str(&format!("\n### {}\n", group.project));
+            for item in &group.pitfalls {
+                if item.session_title.is_empty() {
+                    out.push_str(&format!("- [PITFALL] {}\n", item.text));
+                } else {
+                    out.push_str(&format!(
+                        "- [PITFALL] {} _(Session: {})_\n",
+                        item.text, item.session_title
+                    ));
+                }
+            }
+            for item in &group.learnings {
+                if item.session_title.is_empty() {
+                    out.push_str(&format!("- [LEARNING] {}\n", item.text));
+                } else {
+                    out.push_str(&format!(
+                        "- [LEARNING] {} _(Session: {})_\n",
+                        item.text, item.session_title
+                    ));
+                }
+            }
+        }
+    }
+
+    if !project_gains.is_empty() {
+        out.push_str("\n## What Shipped & Why — By Project\n");
+        for gain in project_gains {
+            out.push_str(&format!(
+                "\n### {} ({} work, {} review, ${:.2})\n",
+                gain.project, gain.work_count, gain.review_count, gain.total_cost_usd
+            ));
+            for acc in &gain.accomplishments {
+                out.push_str(&format!("- {acc}\n"));
+            }
+            for dec in &gain.key_decisions {
+                out.push_str(&format!("- **Why / Decision:** {dec}\n"));
+            }
+            if !gain.files_touched.is_empty() {
+                out.push_str(&format!("- **Files:** {}\n", gain.files_touched.join(", ")));
+            }
+        }
+    }
+
+    out.trim_end().to_string()
+}
 fn normalize_display_path(raw: &str) -> String {
     let trimmed = raw.trim().trim_start_matches("./");
     if let Some((_, after_repos)) = trimmed.split_once("/git-repos/") {
@@ -2751,6 +2853,29 @@ mod tests {
         assert_eq!(
             lmap["scratch"].pitfalls.len() + lmap["scratch"].learnings.len(),
             1
+        );
+
+        let proj_learnings: Vec<ProjectLearningsDto> = lmap.into_values().collect();
+        let md = render_daily_markdown(
+            15,
+            5,
+            8,
+            2,
+            &metrics,
+            &signals,
+            &next_steps,
+            &proj_learnings,
+            &gains,
+        );
+        assert!(md.contains("## Cost, Cache & Command Health"));
+        assert!(md.contains("## Recommended Next Steps"));
+        assert!(md.contains("## Pitfalls & Learnings — By Project"));
+        assert!(md.contains("### t3code"));
+        assert!(md.contains("[PITFALL] The text fallback appeared"));
+        assert!(md.contains("## What Shipped & Why — By Project"));
+        assert_eq!(
+            render_daily_markdown(0, 0, 0, 0, &metrics, &[], &[], &[], &[]),
+            ""
         );
     }
 }
