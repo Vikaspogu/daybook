@@ -113,19 +113,8 @@ pub struct SessionBriefRow {
     pub summary_md: String,
     /// Parsed from usage_json at read time; None when absent or malformed.
     pub cost_usd: Option<f64>,
-}
-
-/// Extract total_cost_usd from a stored usage_json blob; None when absent or malformed.
-fn usage_cost(usage_json: &str) -> Option<f64> {
-    /// The stored blob is UsageRecord-shaped; only the cost field is read.
-    #[derive(serde::Deserialize)]
-    struct CostOnly {
-        cost_usd: Option<f64>,
-    }
-    if usage_json.is_empty() {
-        return None;
-    }
-    serde_json::from_str::<CostOnly>(usage_json).ok()?.cost_usd
+    pub usage: UsageRecord,
+    pub aggregates: AggregatesRecord,
 }
 
 /// One session row shaped for the stats report (S4), with the JSON columns
@@ -230,7 +219,7 @@ pub fn aggregate_stats(rows: &[StatRow]) -> StatsReport {
     }
 }
 
-fn pooled_hit_rate(input: u64, cache_read: u64) -> Option<f64> {
+pub fn pooled_hit_rate(input: u64, cache_read: u64) -> Option<f64> {
     let denom = input + cache_read;
     if denom > 0 {
         Some(cache_read as f64 / denom as f64)
@@ -664,14 +653,19 @@ impl Ledger {
     pub fn session_briefs(&self, date: &str) -> Result<Vec<SessionBriefRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-"SELECT machine, session_id, runtime, project, COALESCE(title, ''),
-                git_branch, started_utc, ended_utc, COALESCE(summary_md, ''), COALESCE(usage_json, '')
+            "SELECT machine, session_id, runtime, project, COALESCE(title, ''),
+                git_branch, started_utc, ended_utc, COALESCE(summary_md, ''),
+                COALESCE(usage_json, ''), COALESCE(aggregates_json, '')
                 FROM sessions
                 WHERE journal_date = ?1
-                ORDER BY COALESCE(started_utc, pushed_at), machine, session_id"
+                ORDER BY COALESCE(started_utc, pushed_at), machine, session_id",
         )?;
         let rows = stmt
             .query_map(rusqlite::params![date], |row| {
+                let usage: UsageRecord =
+                    serde_json::from_str(row.get::<_, String>(9)?.as_str()).unwrap_or_default();
+                let aggregates: AggregatesRecord =
+                    serde_json::from_str(row.get::<_, String>(10)?.as_str()).unwrap_or_default();
                 Ok(SessionBriefRow {
                     machine: row.get(0)?,
                     session_id: row.get(1)?,
@@ -682,7 +676,9 @@ impl Ledger {
                     started_utc: row.get(6)?,
                     ended_utc: row.get(7)?,
                     summary_md: row.get(8)?,
-                    cost_usd: usage_cost(row.get::<_, String>(9)?.as_str()),
+                    cost_usd: usage.cost_usd,
+                    usage,
+                    aggregates,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -700,12 +696,17 @@ impl Ledger {
     ) -> Result<Option<SessionBriefRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-                "SELECT machine, session_id, runtime, project, COALESCE(title, ''),
-                git_branch, started_utc, ended_utc, COALESCE(summary_md, ''), COALESCE(usage_json, '')
+            "SELECT machine, session_id, runtime, project, COALESCE(title, ''),
+                git_branch, started_utc, ended_utc, COALESCE(summary_md, ''),
+                COALESCE(usage_json, ''), COALESCE(aggregates_json, '')
                 FROM sessions
                 WHERE journal_date = ?1 AND machine = ?2 AND session_id = ?3",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![date, machine, session_id], |row| {
+            let usage: UsageRecord =
+                serde_json::from_str(row.get::<_, String>(9)?.as_str()).unwrap_or_default();
+            let aggregates: AggregatesRecord =
+                serde_json::from_str(row.get::<_, String>(10)?.as_str()).unwrap_or_default();
             Ok(SessionBriefRow {
                 machine: row.get(0)?,
                 session_id: row.get(1)?,
@@ -716,7 +717,9 @@ impl Ledger {
                 started_utc: row.get(6)?,
                 ended_utc: row.get(7)?,
                 summary_md: row.get(8)?,
-                cost_usd: usage_cost(row.get::<_, String>(9)?.as_str()),
+                cost_usd: usage.cost_usd,
+                usage,
+                aggregates,
             })
         })?;
         Ok(rows.next().transpose()?)

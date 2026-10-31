@@ -95,6 +95,39 @@ pub struct WasteAlertDto {
     pub hint: String,
 }
 
+/// Day-level token, cache, cost, and tool-health scorecard
+#[derive(Serialize, Default, Clone)]
+pub struct DayMetricsDto {
+    pub total_tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_hit_rate: Option<f64>,
+    pub total_cost_usd: f64,
+    pub test_runs: u64,
+    pub failed_tool_calls: u64,
+    pub interrupted: u64,
+}
+
+/// Actionable next step derived from the day's sessions and metrics
+#[derive(Serialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct NextStepDto {
+    pub tag: String,
+    pub title: String,
+    pub detail: String,
+}
+
+/// Consolidated 3-line reusable workflow rule extracted from `## Potential Skills/Commands`
+#[derive(Serialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct ConsolidatedRuleDto {
+    pub project: String,
+    pub name: String,
+    pub summary: String,
+    pub trigger: Option<String>,
+    pub why: Option<String>,
+}
+
 /// Daily summary DTO
 #[derive(Serialize)]
 pub struct DailySummaryDto {
@@ -104,6 +137,11 @@ pub struct DailySummaryDto {
     pub work_count: usize,
     pub review_count: usize,
     pub blocked_count: usize,
+    pub day_metrics: DayMetricsDto,
+    pub efficiency_signals: Vec<String>,
+    pub learnings: Vec<String>,
+    pub next_steps: Vec<NextStepDto>,
+    pub consolidated_rules: Vec<ConsolidatedRuleDto>,
     pub project_gains: Vec<ProjectGainDto>,
     pub waste_alerts: Vec<WasteAlertDto>,
     pub sessions: Vec<String>,

@@ -501,13 +501,19 @@ pub async fn get_daily_summary(
             let mut work_count = 0usize;
             let mut review_count = 0usize;
             let mut blocked_count = 0usize;
+            let mut day_metrics = DayMetricsDto::default();
             let mut by_project: std::collections::BTreeMap<String, ProjectGainDto> =
                 std::collections::BTreeMap::new();
             let mut review_fallbacks: std::collections::BTreeMap<String, Vec<String>> =
                 std::collections::BTreeMap::new();
             let mut waste_map: std::collections::BTreeMap<(String, String), (usize, f64)> =
                 std::collections::BTreeMap::new();
-            let mut commands = Vec::new();
+            let mut consolidated_rules: Vec<ConsolidatedRuleDto> = Vec::new();
+            let mut work_learnings: Vec<String> = Vec::new();
+            let mut review_learnings: Vec<String> = Vec::new();
+            let mut cost_by_session: Vec<(String, String, String, f64)> = Vec::new();
+            let mut followup_candidates: Vec<(String, String, String)> = Vec::new();
+            let mut empty_reviewer_noted = false;
 
             for r in &rows {
                 let title = session_display_title(r);
@@ -515,6 +521,39 @@ pub async fn get_daily_summary(
                 let files = extract_files_touched(&r.summary_md);
                 let (category, blocker_reason) = classify_session(&title, &preview, &files);
                 let cost = r.cost_usd.unwrap_or(0.0);
+
+                day_metrics.input_tokens = day_metrics.input_tokens.saturating_add(r.usage.input);
+                day_metrics.output_tokens =
+                    day_metrics.output_tokens.saturating_add(r.usage.output);
+                day_metrics.cache_read_tokens = day_metrics
+                    .cache_read_tokens
+                    .saturating_add(r.usage.cache_read);
+                day_metrics.cache_creation_tokens = day_metrics
+                    .cache_creation_tokens
+                    .saturating_add(r.usage.cache_creation);
+                day_metrics.total_cost_usd += cost;
+                day_metrics.test_runs =
+                    day_metrics.test_runs.saturating_add(r.aggregates.test_runs);
+                day_metrics.failed_tool_calls = day_metrics
+                    .failed_tool_calls
+                    .saturating_add(r.aggregates.failed_tool_calls);
+                day_metrics.interrupted = day_metrics
+                    .interrupted
+                    .saturating_add(r.aggregates.interrupted);
+
+                if cost > 0.0 {
+                    cost_by_session.push((
+                        title.clone(),
+                        r.project.clone(),
+                        r.runtime.clone(),
+                        cost,
+                    ));
+                }
+
+                let lower_md = r.summary_md.to_lowercase();
+                if lower_md.contains("empty output") || lower_md.contains("returned no output") {
+                    empty_reviewer_noted = true;
+                }
 
                 let entry = by_project
                     .entry(r.project.clone())
@@ -541,12 +580,34 @@ pub async fn get_daily_summary(
                         if let Some(dec) = extract_key_decision(&r.summary_md) {
                             if entry.key_decisions.len() < 3 && !entry.key_decisions.contains(&dec)
                             {
-                                entry.key_decisions.push(dec);
+                                entry.key_decisions.push(dec.clone());
                             }
+                            let dec_l = dec.to_lowercase();
+                            if dec_l.contains("findings-only")
+                                || dec_l.contains("without applying")
+                                || dec_l.contains("deferred")
+                                || dec_l.contains("follow-up")
+                                || dec_l.contains("later")
+                            {
+                                followup_candidates.push((r.project.clone(), title.clone(), dec));
+                            }
+                        } else if lower_md.contains("findings-only")
+                            || lower_md.contains("deferred")
+                        {
+                            followup_candidates.push((
+                                r.project.clone(),
+                                title.clone(),
+                                takeaway.clone(),
+                            ));
                         }
                         for f in files {
                             if entry.files_touched.len() < 8 && !entry.files_touched.contains(&f) {
                                 entry.files_touched.push(f);
+                            }
+                        }
+                        for l in extract_learnings(&r.summary_md).into_iter().take(2) {
+                            if !work_learnings.contains(&l) {
+                                work_learnings.push(l);
                             }
                         }
                     }
@@ -564,6 +625,11 @@ pub async fn get_daily_summary(
                         if fb.len() < 2 && !fb.contains(&line) {
                             fb.push(line);
                         }
+                        for l in extract_learnings(&r.summary_md).into_iter().take(1) {
+                            if !review_learnings.contains(&l) {
+                                review_learnings.push(l);
+                            }
+                        }
                     }
                     _ => {
                         blocked_count += 1;
@@ -577,22 +643,57 @@ pub async fn get_daily_summary(
                     }
                 }
 
-                if let Some(start) = r.summary_md.find("## Potential Skills/Commands\n") {
-                    let rest = &r.summary_md[start..];
-                    let end = rest
-                        .find("\n## ")
-                        .map(|i| start + i)
-                        .unwrap_or(r.summary_md.len());
-                    for line in r.summary_md[start..end].lines().skip(1) {
-                        let line = line.trim().trim_start_matches("- ").trim();
-                        if is_junk_hint(line) {
-                            continue;
+                for rule in extract_consolidated_rules(&r.project, &r.summary_md) {
+                    if let Some(existing) = consolidated_rules.iter_mut().find(|c| {
+                        c.project.eq_ignore_ascii_case(&rule.project)
+                            && c.name.eq_ignore_ascii_case(&rule.name)
+                    }) {
+                        if existing.trigger.is_none() {
+                            existing.trigger = rule.trigger;
                         }
-                        commands.push(SummaryCardDto {
-                            title: format!("{} — {}", r.project, line),
-                            content: line.to_string(),
-                        });
+                        if existing.why.is_none() {
+                            existing.why = rule.why;
+                        }
+                    } else if consolidated_rules.len() < 12 {
+                        consolidated_rules.push(rule);
                     }
+                }
+            }
+
+            day_metrics.total_tokens = day_metrics
+                .input_tokens
+                .saturating_add(day_metrics.output_tokens)
+                .saturating_add(day_metrics.cache_read_tokens)
+                .saturating_add(day_metrics.cache_creation_tokens);
+            day_metrics.cache_hit_rate = crate::ledger::pooled_hit_rate(
+                day_metrics.input_tokens,
+                day_metrics.cache_read_tokens,
+            );
+
+            let commands: Vec<SummaryCardDto> = consolidated_rules
+                .iter()
+                .map(|rule| {
+                    let mut body = rule.summary.clone();
+                    if let Some(t) = &rule.trigger {
+                        body.push_str(&format!("\n- **Trigger:** {t}"));
+                    }
+                    if let Some(w) = &rule.why {
+                        body.push_str(&format!("\n- **Why:** {w}"));
+                    }
+                    SummaryCardDto {
+                        title: format!("{} — {}", rule.project, rule.name),
+                        content: body,
+                    }
+                })
+                .collect();
+
+            let mut learnings = work_learnings;
+            for l in review_learnings {
+                if learnings.len() >= 4 {
+                    break;
+                }
+                if !learnings.contains(&l) {
+                    learnings.push(l);
                 }
             }
 
@@ -655,6 +756,19 @@ pub async fn get_daily_summary(
                 .collect();
             waste_alerts.sort_by_key(|a| std::cmp::Reverse(a.count));
 
+            let (efficiency_signals, next_steps) = build_workflow_coaching(
+                session_count,
+                work_count,
+                review_count,
+                blocked_count,
+                &day_metrics,
+                &project_gains,
+                &waste_alerts,
+                &mut cost_by_session,
+                &followup_candidates,
+                empty_reviewer_noted,
+            );
+
             let overview =
                 format_day_overview(&rows.iter().map(|r| r.project.as_str()).collect::<Vec<_>>());
 
@@ -665,6 +779,11 @@ pub async fn get_daily_summary(
                 work_count,
                 review_count,
                 blocked_count,
+                day_metrics,
+                efficiency_signals,
+                learnings,
+                next_steps,
+                consolidated_rules,
                 project_gains,
                 waste_alerts,
                 sessions,
@@ -686,7 +805,6 @@ pub async fn get_daily_summary(
         }
     }
 }
-
 /// List sessions for a specific date (ledger-backed)
 pub async fn list_sessions(
     State(state): State<Arc<AppState>>,
@@ -1153,8 +1271,9 @@ fn extract_key_decision(summary_md: &str) -> Option<String> {
             .trim()
             .trim_start_matches("- ")
             .trim_start_matches("* ")
-            .trim();
-        if is_junk_hint(cleaned) {
+            .trim()
+            .replace("**", "");
+        if is_junk_hint(&cleaned) {
             continue;
         }
         let lower = cleaned.to_lowercase();
@@ -1168,13 +1287,294 @@ fn extract_key_decision(summary_md: &str) -> Option<String> {
         let out = if cleaned.chars().count() > 220 {
             format!("{}...", cleaned.chars().take(220).collect::<String>())
         } else {
-            cleaned.to_string()
+            cleaned
         };
         return Some(out);
     }
     None
 }
 
+fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    if s.len() >= prefix.len()
+        && s.is_char_boundary(prefix.len())
+        && s[..prefix.len()].eq_ignore_ascii_case(prefix)
+    {
+        return Some(&s[prefix.len()..]);
+    }
+    None
+}
+
+fn extract_learnings(summary_md: &str) -> Vec<String> {
+    let sec = extract_section(summary_md, "Learnings & Pitfalls");
+    let mut out = Vec::new();
+    for line in sec.lines() {
+        let cleaned = line
+            .trim()
+            .trim_start_matches("- ")
+            .trim_start_matches("* ")
+            .trim()
+            .replace("**", "");
+        if is_junk_hint(&cleaned) {
+            continue;
+        }
+        let lower = cleaned.to_lowercase();
+        if lower.starts_with("no repository")
+            || lower.starts_with("no code")
+            || lower.starts_with("no product")
+            || lower.starts_with("no files")
+            || lower.starts_with("read-only review")
+        {
+            continue;
+        }
+        let item = if cleaned.chars().count() > 220 {
+            format!("{}...", cleaned.chars().take(220).collect::<String>())
+        } else {
+            cleaned
+        };
+        if !out.contains(&item) {
+            out.push(item);
+        }
+    }
+    out
+}
+
+/// Parse 3-line `## Potential Skills/Commands` bullets (`- **[name]**: summary` +
+/// `Trigger:` + `Why:`) into consolidated rules instead of fragmenting each line into a card.
+fn extract_consolidated_rules(project: &str, summary_md: &str) -> Vec<ConsolidatedRuleDto> {
+    let mut sec = extract_section(summary_md, "Potential Skills/Commands");
+    if sec.is_empty() {
+        sec = extract_section(summary_md, "Reusable Skills & Commands");
+    }
+    let mut rules: Vec<ConsolidatedRuleDto> = Vec::new();
+    for raw_line in sec.lines() {
+        let cleaned = raw_line
+            .trim()
+            .trim_start_matches("- ")
+            .trim_start_matches("* ")
+            .trim();
+        if is_junk_hint(cleaned) {
+            continue;
+        }
+        let plain = cleaned.trim_start_matches("**").trim();
+        if let Some(rest) = strip_prefix_ci(plain, "trigger:") {
+            let val = rest
+                .trim_start_matches("**")
+                .trim()
+                .trim_start_matches(':')
+                .trim();
+            if !val.is_empty() {
+                if let Some(last) = rules.last_mut() {
+                    last.trigger = Some(val.to_string());
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = strip_prefix_ci(plain, "why:") {
+            let val = rest
+                .trim_start_matches("**")
+                .trim()
+                .trim_start_matches(':')
+                .trim();
+            if !val.is_empty() {
+                if let Some(last) = rules.last_mut() {
+                    last.why = Some(val.to_string());
+                }
+            }
+            continue;
+        }
+
+        let (raw_name, raw_summary) = if let Some((l, r)) = cleaned.split_once("**:") {
+            (l, r)
+        } else if let Some((l, r)) = cleaned.split_once(": ") {
+            (l, r)
+        } else if let Some((l, r)) = cleaned.split_once(" — ") {
+            (l, r)
+        } else {
+            (cleaned, "")
+        };
+        let name = raw_name
+            .trim_matches(|c: char| matches!(c, '*' | '`' | '[' | ']' | ' ' | ':'))
+            .to_string();
+        let summary = raw_summary
+            .trim()
+            .trim_start_matches(['*', ':', '-', '—'])
+            .trim()
+            .replace("**", "");
+        if name.is_empty() || is_junk_hint(&name) {
+            continue;
+        }
+        rules.push(ConsolidatedRuleDto {
+            project: project.to_string(),
+            name,
+            summary: if summary.is_empty() {
+                cleaned.replace("**", "")
+            } else {
+                summary
+            },
+            trigger: None,
+            why: None,
+        });
+    }
+    rules
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_workflow_coaching(
+    session_count: usize,
+    work_count: usize,
+    review_count: usize,
+    blocked_count: usize,
+    day_metrics: &DayMetricsDto,
+    project_gains: &[ProjectGainDto],
+    waste_alerts: &[WasteAlertDto],
+    cost_by_session: &mut [(String, String, String, f64)],
+    followup_candidates: &[(String, String, String)],
+    empty_reviewer_noted: bool,
+) -> (Vec<String>, Vec<NextStepDto>) {
+    let mut signals: Vec<String> = Vec::new();
+    let mut next_steps: Vec<NextStepDto> = Vec::new();
+
+    for p in project_gains {
+        if p.review_count > p.work_count && p.review_count >= 3 {
+            let detail = if empty_reviewer_noted {
+                format!(
+                    "{} review passes ran for {} work sessions in {} — reviewer empty outputs forced extra review retries before fallback.",
+                    p.review_count, p.work_count, p.project
+                )
+            } else {
+                format!(
+                    "{} review passes ran for {} work sessions in {} — multiple review rounds ran per shipped change.",
+                    p.review_count, p.work_count, p.project
+                )
+            };
+            signals.push(format!(
+                "Review loop amplification ({} reviews vs {} work in {}): {}",
+                p.review_count, p.work_count, p.project, detail
+            ));
+            if next_steps.len() < 3 {
+                next_steps.push(NextStepDto {
+                    tag: "WORKFLOW".to_string(),
+                    title: format!("Streamline pre-commit review gate in {}", p.project),
+                    detail: if empty_reviewer_noted {
+                        format!(
+                            "{} review sessions ran for {} work sessions today because a reviewer subagent returned empty output. Auto-fallback to a secondary model when a reviewer returns empty and freeze staging until reviews finish.",
+                            p.review_count, p.work_count
+                        )
+                    } else {
+                        format!(
+                            "{} review sessions ran for {} work sessions today. Batch staged edits before running review_triage so reviewers run once per slice.",
+                            p.review_count, p.work_count
+                        )
+                    },
+                });
+            }
+        }
+    }
+
+    cost_by_session.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+    if day_metrics.total_cost_usd >= 2.0 && !cost_by_session.is_empty() {
+        let top_n = cost_by_session.len().min(2);
+        let top_sum: f64 = cost_by_session[..top_n].iter().map(|x| x.3).sum();
+        let share_pct = (top_sum / day_metrics.total_cost_usd * 100.0).round();
+        let top_labels: Vec<String> = cost_by_session[..top_n]
+            .iter()
+            .map(|(t, _, rt, c)| format!("{t} [{rt}] ${c:.2}"))
+            .collect();
+        let hit_note = day_metrics
+            .cache_hit_rate
+            .map(|r| format!(" with a {:.1}% cache hit rate", r * 100.0))
+            .unwrap_or_default();
+        signals.push(format!(
+            "Spend concentration (${:.2} total): {} accounted for {:.0}% of daily spend{}.",
+            day_metrics.total_cost_usd,
+            top_labels.join(", "),
+            share_pct,
+            hit_note
+        ));
+
+        if let Some(rate) = day_metrics.cache_hit_rate {
+            if rate < 0.50 && next_steps.len() < 3 {
+                next_steps.push(NextStepDto {
+                    tag: "COST".to_string(),
+                    title: "Reuse warm threads to raise prompt-cache hit rate".to_string(),
+                    detail: format!(
+                        "Cache hit rate was {:.1}% across {:.2}M tokens (${:.2} total). Keep follow-up fixes in the same session thread instead of starting cold runs.",
+                        rate * 100.0,
+                        day_metrics.total_tokens as f64 / 1_000_000.0,
+                        day_metrics.total_cost_usd
+                    ),
+                });
+            }
+        }
+    }
+
+    if day_metrics.failed_tool_calls > 0 || day_metrics.interrupted > 0 {
+        signals.push(format!(
+            "Tool & turn friction ({} failed tool calls, {} interrupted turns across {} test runs): Inspect sessions with repeated command failures to tighten CLI flags or paths.",
+            day_metrics.failed_tool_calls, day_metrics.interrupted, day_metrics.test_runs
+        ));
+        if day_metrics.failed_tool_calls >= 5 && next_steps.len() < 3 {
+            next_steps.push(NextStepDto {
+                tag: "WORKFLOW".to_string(),
+                title: format!(
+                    "Eliminate recurring tool call errors ({} failed today)",
+                    day_metrics.failed_tool_calls
+                ),
+                detail: "Add a preflight check or skill rule for the command flags that failed repeatedly during today's runs.".to_string(),
+            });
+        }
+    }
+
+    for alert in waste_alerts.iter().take(1) {
+        signals.push(format!(
+            "Blocked background runs ({}x in {}): {}",
+            alert.count, alert.project, alert.reason
+        ));
+        if next_steps.len() < 3 {
+            next_steps.push(NextStepDto {
+                tag: "WORKFLOW".to_string(),
+                title: format!(
+                    "Resolve {} blocked run(s) in {}",
+                    alert.count, alert.project
+                ),
+                detail: alert.hint.clone(),
+            });
+        }
+    }
+
+    for (proj, title, detail) in followup_candidates {
+        if next_steps.len() >= 3 {
+            break;
+        }
+        next_steps.push(NextStepDto {
+            tag: "FOLLOW-UP".to_string(),
+            title: format!("Follow up on {title} ({proj})"),
+            detail: detail.clone(),
+        });
+    }
+
+    if signals.is_empty() && session_count > 0 {
+        signals.push(format!(
+            "Clean execution ({work_count} shipped work, {review_count} review, {blocked_count} blocked): All sessions completed with 0 tool errors."
+        ));
+    }
+
+    if next_steps.is_empty() {
+        if let Some(top_proj) = project_gains.first() {
+            if let Some(last_acc) = top_proj.accomplishments.last() {
+                next_steps.push(NextStepDto {
+                    tag: "FOLLOW-UP".to_string(),
+                    title: format!("Continue {} momentum", top_proj.project),
+                    detail: format!("Latest shipped milestone: {last_acc}"),
+                });
+            }
+        }
+    }
+
+    signals.truncate(4);
+    next_steps.truncate(3);
+    (signals, next_steps)
+}
 fn normalize_display_path(raw: &str) -> String {
     let trimmed = raw.trim().trim_start_matches("./");
     if let Some((_, after_repos)) = trimmed.split_once("/git-repos/") {
@@ -1449,6 +1849,35 @@ mod tests {
         assert_eq!(session_duration(None, Some("2026-10-30T11:00:00Z")), None);
     }
 
+    #[test]
+    fn consolidated_rules_and_learnings_merge_three_line_entries() {
+        let md = "## Summary\nAudited Kustomize overlays.\n\n## Learnings & Pitfalls\n- **Kustomize indirect references**: Check nested Kustomize overlays before flagging a directory as an orphan.\n- None.\n\n## Potential Skills/Commands\n- **[verify-api-field-population]**: Verify backend API field population before designing UI sections.\n  - Trigger: When a planned UI section renders empty despite matching API types.\n  - Why: Server handlers may return empty defaults for legacy CLI fields.\n- **`gitops-orphan-detection`**: Trace nested Kustomize overlays before flagging a directory.\n  - Trigger: Directory appears unreferenced in top-level ArgoCD apps.\n  - Why: Kustomize bases reference directories indirectly.\n";
+        let rules = extract_consolidated_rules("scratch", md);
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].project, "scratch");
+        assert_eq!(rules[0].name, "verify-api-field-population");
+        assert_eq!(
+            rules[0].summary,
+            "Verify backend API field population before designing UI sections."
+        );
+        assert_eq!(
+            rules[0].trigger.as_deref(),
+            Some("When a planned UI section renders empty despite matching API types.")
+        );
+        assert_eq!(
+            rules[0].why.as_deref(),
+            Some("Server handlers may return empty defaults for legacy CLI fields.")
+        );
+        assert_eq!(rules[1].name, "gitops-orphan-detection");
+        assert!(rules[1].trigger.is_some());
+        assert!(rules[1].why.is_some());
+
+        let learnings = extract_learnings(md);
+        assert_eq!(
+            learnings,
+            vec!["Kustomize indirect references: Check nested Kustomize overlays before flagging a directory as an orphan.".to_string()]
+        );
+    }
     fn rec() -> SessionRecord {
         SessionRecord {
             session_id: "s1".into(),
@@ -1958,5 +2387,102 @@ mod tests {
             "session detail missing summary"
         );
         assert!(body.contains("transaction"), "session detail missing body");
+    }
+
+    #[test]
+    fn workflow_coaching_computes_signals_and_next_steps() {
+        let metrics = DayMetricsDto {
+            total_tokens: 1_500_000,
+            input_tokens: 900_000,
+            output_tokens: 100_000,
+            cache_read_tokens: 400_000,
+            cache_creation_tokens: 100_000,
+            cache_hit_rate: Some(0.308),
+            total_cost_usd: 10.0,
+            test_runs: 12,
+            failed_tool_calls: 6,
+            interrupted: 1,
+        };
+        let gains = vec![ProjectGainDto {
+            project: "daybook".to_string(),
+            work_count: 5,
+            review_count: 8,
+            blocked_count: 0,
+            total_cost_usd: 8.5,
+            accomplishments: vec!["Shipped v0.1.17".to_string()],
+            key_decisions: vec![],
+            files_touched: vec![],
+        }];
+        let alerts = vec![WasteAlertDto {
+            project: "agent-farm".to_string(),
+            count: 2,
+            cost_usd: 0.0,
+            reason: "Blocked by bwrap".to_string(),
+            hint: "Disable survey".to_string(),
+        }];
+        let mut costs = vec![
+            (
+                "Session A".to_string(),
+                "daybook".to_string(),
+                "claude".to_string(),
+                6.0,
+            ),
+            (
+                "Session B".to_string(),
+                "daybook".to_string(),
+                "codex".to_string(),
+                2.5,
+            ),
+        ];
+        let followups = vec![(
+            "home-ops".to_string(),
+            "Flux audit".to_string(),
+            "Deferred drift cleanup".to_string(),
+        )];
+        let (signals, next_steps) = build_workflow_coaching(
+            15, 5, 8, 2, &metrics, &gains, &alerts, &mut costs, &followups, true,
+        );
+        assert_eq!(signals.len(), 4);
+        assert!(signals[0].contains("Review loop amplification (8 reviews vs 5 work in daybook)"));
+        assert!(signals[0].contains("reviewer empty outputs"));
+        assert!(signals[1].contains("Spend concentration ($10.00 total)"));
+        assert!(signals[1].contains("85% of daily spend"));
+        assert!(signals[2].contains("Tool & turn friction (6 failed tool calls"));
+        assert!(signals[3].contains("Blocked background runs (2x in agent-farm)"));
+        assert_eq!(next_steps.len(), 3);
+        assert_eq!(next_steps[0].tag, "WORKFLOW");
+        assert_eq!(next_steps[1].tag, "COST");
+        assert_eq!(next_steps[2].tag, "WORKFLOW");
+
+        // Clean-execution & momentum fallback when no friction signals or follow-ups exist
+        let clean_metrics = DayMetricsDto::default();
+        let clean_gains = vec![ProjectGainDto {
+            project: "daybook".to_string(),
+            work_count: 5,
+            review_count: 0,
+            blocked_count: 0,
+            total_cost_usd: 1.0,
+            accomplishments: vec!["Shipped v0.1.17".to_string()],
+            key_decisions: vec![],
+            files_touched: vec![],
+        }];
+        let mut no_costs = Vec::new();
+        let (clean_signals, clean_steps) = build_workflow_coaching(
+            5,
+            5,
+            0,
+            0,
+            &clean_metrics,
+            &clean_gains,
+            &[],
+            &mut no_costs,
+            &[],
+            false,
+        );
+        assert_eq!(clean_signals.len(), 1);
+        assert!(clean_signals[0].contains("Clean execution (5 shipped work, 0 review, 0 blocked)"));
+        assert_eq!(clean_steps.len(), 1);
+        assert_eq!(clean_steps[0].tag, "FOLLOW-UP");
+        assert!(clean_steps[0].title.contains("Continue daybook momentum"));
     }
 }

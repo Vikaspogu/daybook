@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { useApi } from '../hooks/useApi'
-import type { DailySummary, DateInsights, ProjectGain, Session, SummaryCard, WasteAlert } from '../hooks/useApi'
+import type { ConsolidatedRule, DailySummary, DateInsights, NextStepItem, ProjectGain, Session, SummaryCard, WasteAlert } from '../hooks/useApi'
 import { MarkdownRenderer } from '../components/MarkdownRenderer'
 import { cn } from '../lib/utils'
 import { formatTokenCount, formatCost } from '../components/UsageCharts'
@@ -355,6 +355,226 @@ function SessionRow({
   )
 }
 
+function BoldColonItem({ text, dotColor }: { text: string; dotColor: string }) {
+  const colonIdx = text.indexOf(': ')
+  const head = colonIdx > 0 ? text.slice(0, colonIdx) : null
+  const rest = colonIdx > 0 ? text.slice(colonIdx + 2) : text
+  return (
+    <li className="flex items-start gap-2 text-xs sm:text-sm text-gray-700 dark:text-gray-300 leading-relaxed">
+      <span className={cn('font-bold mt-0.5 flex-shrink-0', dotColor)}>•</span>
+      <span>
+        {head ? (
+          <>
+            <strong className="font-semibold text-gray-900 dark:text-gray-100">{head}:</strong>{' '}
+            {rest}
+          </>
+        ) : (
+          rest
+        )}
+      </span>
+    </li>
+  )
+}
+
+function WorkflowCoachingCard({
+  signals,
+  learnings,
+  nextSteps,
+}: {
+  signals: string[]
+  learnings: string[]
+  nextSteps: NextStepItem[]
+}) {
+  return (
+    <div className="bg-gray-50 dark:bg-daily-light rounded-2xl p-5 border border-amber-500/30 space-y-4">
+      <div className="grid gap-3 md:grid-cols-2">
+        <div className="rounded-xl p-4 bg-white dark:bg-black/20 border border-gray-200 dark:border-gray-800 space-y-2">
+          <div className="text-[11px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">
+            ⚡ Efficiency & Friction Signals
+          </div>
+          {signals.length > 0 ? (
+            <ul className="space-y-2">
+              {signals.map((sig, i) => (
+                <BoldColonItem key={i} text={sig} dotColor="text-amber-500" />
+              ))}
+            </ul>
+          ) : (
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              No workflow friction signals detected today.
+            </p>
+          )}
+        </div>
+
+        <div className="rounded-xl p-4 bg-white dark:bg-black/20 border border-gray-200 dark:border-gray-800 space-y-2">
+          <div className="text-[11px] font-bold uppercase tracking-wider text-sky-600 dark:text-sky-400">
+            💡 Top Pitfalls & Learnings Today
+          </div>
+          {learnings.length > 0 ? (
+            <ul className="space-y-2">
+              {learnings.map((item, i) => (
+                <BoldColonItem key={i} text={item} dotColor="text-sky-500" />
+              ))}
+            </ul>
+          ) : (
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              No recurring pitfalls logged across today&apos;s sessions.
+            </p>
+          )}
+        </div>
+      </div>
+
+      {nextSteps.length > 0 && (
+        <div className="rounded-xl p-4 bg-orange-500/5 border border-orange-500/25 space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-orange-600 dark:text-orange-400">
+              🎯 Recommended Next Steps & Action Items ({nextSteps.length})
+            </span>
+            <span className="text-[11px] font-mono text-gray-500 dark:text-gray-400">
+              Derived from today&apos;s friction & deferred work
+            </span>
+          </div>
+          <ul className="space-y-2">
+            {nextSteps.map((step, i) => (
+              <li
+                key={i}
+                className="flex items-start gap-2.5 text-xs sm:text-sm text-gray-700 dark:text-gray-300 leading-relaxed"
+              >
+                <span className="px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-600 dark:text-orange-400 border border-orange-500/30 font-mono text-[10px] font-bold uppercase flex-shrink-0 mt-0.5">
+                  {step.tag}
+                </span>
+                <span>
+                  <strong className="font-semibold text-gray-900 dark:text-gray-100">
+                    {step.title}:
+                  </strong>{' '}
+                  {step.detail}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ConsolidatedRulesCard({
+  rules,
+  onInstall,
+}: {
+  rules: ConsolidatedRule[]
+  onInstall: (title: string, content: string, cardType: 'skill' | 'command') => Promise<unknown>
+}) {
+  const [copiedAll, setCopiedAll] = useState(false)
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
+  const [installedIdx, setInstalledIdx] = useState<Record<number, boolean>>({})
+
+  const formatRuleMarkdown = (r: ConsolidatedRule) => {
+    const lines = [`- **[${r.name}]** (${r.project}): ${r.summary}`]
+    if (r.trigger) lines.push(`  - Trigger: ${r.trigger}`)
+    if (r.why) lines.push(`  - Why: ${r.why}`)
+    return lines.join('\n')
+  }
+
+  const handleCopyAll = async () => {
+    try {
+      const text = rules.map(formatRuleMarkdown).join('\n\n')
+      await navigator.clipboard.writeText(text)
+      setCopiedAll(true)
+      setTimeout(() => setCopiedAll(false), 2000)
+    } catch {
+      // clipboard unavailable on insecure origins
+    }
+  }
+
+  const handleCopyOne = async (r: ConsolidatedRule, idx: number) => {
+    try {
+      await navigator.clipboard.writeText(formatRuleMarkdown(r))
+      setCopiedIdx(idx)
+      setTimeout(() => setCopiedIdx(null), 2000)
+    } catch {
+      // clipboard unavailable on insecure origins
+    }
+  }
+  const handleInstallOne = async (r: ConsolidatedRule, idx: number) => {
+    if (installedIdx[idx]) return
+    try {
+      await onInstall(r.name, formatRuleMarkdown(r), 'command')
+      setInstalledIdx(prev => ({ ...prev, [idx]: true }))
+    } catch {
+      // handled by hook
+    }
+  }
+
+  return (
+    <div className="bg-gray-50 dark:bg-daily-light rounded-2xl p-5 border border-gray-200 dark:border-gray-800 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-gray-200 dark:border-gray-800">
+        <span className="text-xs text-gray-500 dark:text-gray-400">
+          Consolidated from session summaries ({rules.length} {rules.length === 1 ? 'rule' : 'rules'})
+        </span>
+        <button
+          onClick={handleCopyAll}
+          className="px-2.5 py-1 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-black/20 text-xs font-mono text-gray-700 dark:text-gray-300 hover:border-orange-400 transition-colors"
+        >
+          {copiedAll ? '✓ Copied All' : `Copy All ${rules.length} as Markdown`}
+        </button>
+      </div>
+      <div className="space-y-2.5">
+        {rules.map((r, i) => (
+          <div
+            key={`${r.project}-${r.name}-${i}`}
+            className="rounded-xl p-3.5 bg-white dark:bg-black/20 border border-gray-200 dark:border-gray-800 flex flex-col sm:flex-row sm:items-start justify-between gap-3"
+          >
+            <div className="space-y-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="px-1.5 py-0.5 rounded bg-orange-500/10 text-orange-600 dark:text-orange-400 border border-orange-500/20 font-mono text-[11px] font-semibold">
+                  {r.project}
+                </span>
+                <span className="font-mono text-xs sm:text-sm font-bold text-gray-900 dark:text-gray-100">
+                  {r.name}
+                </span>
+              </div>
+              <p className="text-xs sm:text-sm text-gray-700 dark:text-gray-300">
+                {r.summary}
+              </p>
+              {(r.trigger || r.why) && (
+                <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
+                  {r.trigger && (
+                    <>
+                      <strong className="text-gray-700 dark:text-gray-300">Trigger:</strong>{' '}
+                      {r.trigger}
+                    </>
+                  )}
+                  {r.trigger && r.why && ' · '}
+                  {r.why && (
+                    <>
+                      <strong className="text-gray-700 dark:text-gray-300">Why:</strong> {r.why}
+                    </>
+                  )}
+                </p>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5 flex-shrink-0">
+              <button
+                onClick={() => handleCopyOne(r, i)}
+                className="px-2.5 py-1 rounded-md border border-gray-200 dark:border-gray-700 text-xs font-mono text-gray-600 dark:text-gray-300 hover:border-orange-400 transition-colors"
+              >
+                {copiedIdx === i ? '✓ Copied' : 'Copy'}
+              </button>
+              <button
+                onClick={() => handleInstallOne(r, i)}
+                disabled={!!installedIdx[i]}
+                className="px-2.5 py-1 rounded-md border border-purple-500/30 text-xs font-mono text-purple-600 dark:text-purple-400 hover:bg-purple-500/10 disabled:opacity-50 transition-colors"
+              >
+                {installedIdx[i] ? '✓ Installed' : 'Install'}
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function ProjectGainCard({ gain }: { gain: ProjectGain }) {
   return (
     <div className="bg-gray-50 dark:bg-daily-light rounded-xl p-5 border border-gray-200 dark:border-gray-800 space-y-3">
@@ -595,10 +815,23 @@ export function DayDetail() {
   }
 
   const daySummary = insights?.day_summary
+  const dayMetrics = summary?.day_metrics
   const projectGains = summary?.project_gains ?? []
   const wasteAlerts = summary?.waste_alerts ?? []
+  const efficiencySignals = summary?.efficiency_signals ?? []
+  const learnings = summary?.learnings ?? []
+  const nextSteps = summary?.next_steps ?? []
+  const consolidatedRules = summary?.consolidated_rules ?? []
   const hasExtracted = (summary?.skills?.length ?? 0) + (summary?.commands?.length ?? 0) > 0
 
+  const totalTokens = dayMetrics?.total_tokens || daySummary?.total_tokens || 0
+  const cacheHitPct =
+    dayMetrics?.cache_hit_rate != null ? Math.round(dayMetrics.cache_hit_rate * 1000) / 10 : null
+  const displayCost = dayMetrics?.total_cost_usd || totalCost
+  const pricedSessionCount = sessions.filter(s => (s.cost_usd ?? 0) > 0).length
+  const signalDenominator = counts.work + counts.review + counts.blocked
+  const signalRatioPct =
+    signalDenominator > 0 ? Math.round((counts.work / signalDenominator) * 100) : 100
   return (
     <div className="max-w-4xl mx-auto px-6 py-8 space-y-8">
       {/* Breadcrumb */}
@@ -616,16 +849,19 @@ export function DayDetail() {
         </div>
       )}
 
-      {/* === Day Brief Hero: Signal vs Noise + KPIs === */}
+      {/* === 30-Second Scorecard Hero === */}
       <div className="bg-gray-50 dark:bg-daily-light rounded-2xl p-5 border border-gray-200 dark:border-gray-800 space-y-4">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div className="flex flex-wrap items-baseline justify-between gap-2 pb-3 border-b border-gray-200 dark:border-gray-800">
           <div>
-            <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">{date}</h1>
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
+              {date} · Daily Workflow Brief
+            </h1>
             <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
               {counts.work} shipped work {counts.work === 1 ? 'session' : 'sessions'} across{' '}
-              {projectGains.length || projects.length} {(projectGains.length || projects.length) === 1 ? 'project' : 'projects'}
-              {daySummary?.total_tokens != null ? ` · ${formatTokenCount(daySummary.total_tokens)} tokens` : ''}
-              {totalCost > 0 ? ` · ${formatCost(totalCost)}` : ''}
+              {projectGains.length || projects.length}{' '}
+              {(projectGains.length || projects.length) === 1 ? 'project' : 'projects'} ·{' '}
+              {counts.review} review {counts.review === 1 ? 'pass' : 'passes'} · {counts.blocked}{' '}
+              blocked
             </p>
           </div>
           {runtimes.length > 0 && (
@@ -633,13 +869,62 @@ export function DayDetail() {
               {runtimes.map(r => (
                 <span
                   key={r}
-                  className="text-xs bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400 px-2 py-0.5 rounded-full font-mono tabular-nums"
+                  className="text-xs bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400 px-2.5 py-0.5 rounded-full font-mono tabular-nums"
                 >
                   {r} × {sessions.filter(s => s.runtime === r).length}
                 </span>
               ))}
             </div>
           )}
+        </div>
+
+        {/* 4-Box KPI Scorecard */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+          <div className="rounded-xl p-3 bg-white dark:bg-black/20 border border-gray-200 dark:border-gray-800">
+            <div className="text-[11px] text-gray-500 dark:text-gray-400">Shipped vs Review</div>
+            <div className="text-base font-bold font-mono tabular-nums text-gray-900 dark:text-gray-100 mt-0.5">
+              {counts.work} work / {counts.review} rev
+            </div>
+            <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
+              {signalRatioPct}% signal ratio
+            </div>
+          </div>
+
+          <div className="rounded-xl p-3 bg-white dark:bg-black/20 border border-gray-200 dark:border-gray-800">
+            <div className="text-[11px] text-gray-500 dark:text-gray-400">Total Spend</div>
+            <div className="text-base font-bold font-mono tabular-nums text-gray-900 dark:text-gray-100 mt-0.5">
+              {displayCost > 0 ? formatCost(displayCost) : '$0.00'}
+            </div>
+            <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
+              {pricedSessionCount} priced {pricedSessionCount === 1 ? 'session' : 'sessions'}
+            </div>
+          </div>
+
+          <div className="rounded-xl p-3 bg-white dark:bg-black/20 border border-gray-200 dark:border-gray-800">
+            <div className="text-[11px] text-gray-500 dark:text-gray-400">Tokens & Cache</div>
+            <div className="text-base font-bold font-mono tabular-nums text-gray-900 dark:text-gray-100 mt-0.5">
+              {totalTokens > 0 ? `${formatTokenCount(totalTokens)} tok` : '—'}
+            </div>
+            <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
+              {cacheHitPct != null
+                ? `${cacheHitPct}% cache hit (${formatTokenCount(dayMetrics?.cache_read_tokens ?? 0)})`
+                : 'No token telemetry'}
+            </div>
+          </div>
+
+          <div className="rounded-xl p-3 bg-white dark:bg-black/20 border border-gray-200 dark:border-gray-800">
+            <div className="text-[11px] text-gray-500 dark:text-gray-400">Tool Errors / Tests</div>
+            <div className="text-base font-bold font-mono tabular-nums text-gray-900 dark:text-gray-100 mt-0.5">
+              {dayMetrics?.failed_tool_calls ?? 0} err · {dayMetrics?.test_runs ?? 0} tests
+            </div>
+            <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
+              {(dayMetrics?.interrupted ?? 0) > 0
+                ? `${dayMetrics?.interrupted} interrupted`
+                : (dayMetrics?.failed_tool_calls ?? 0) === 0
+                  ? 'Clean execution'
+                  : 'Inspect tool failures'}
+            </div>
+          </div>
         </div>
 
         {/* Interactive Signal vs Noise Pills */}
@@ -676,9 +961,20 @@ export function DayDetail() {
         </div>
       </div>
 
-      {/* === What You Gained Today (Project Synthesis) === */}
+      {/* === 1. Workflow Coaching, Learnings & Next Steps (~90s read) === */}
+      {(efficiencySignals.length > 0 || learnings.length > 0 || nextSteps.length > 0) && (
+        <Section id="coaching" title="1 · Workflow Coaching, Learnings & Next Steps">
+          <WorkflowCoachingCard
+            signals={efficiencySignals}
+            learnings={learnings}
+            nextSteps={nextSteps}
+          />
+        </Section>
+      )}
+
+      {/* === 2. What You Gained Today (Project Synthesis) === */}
       {projectGains.length > 0 && (
-        <Section id="gains" title="What You Gained Today — By Project">
+        <Section id="gains" title="2 · What Shipped & Why — By Project">
           <div className="grid gap-4">
             {projectGains.map(gain => (
               <ProjectGainCard key={gain.project} gain={gain} />
@@ -694,7 +990,58 @@ export function DayDetail() {
         </Section>
       )}
 
-      {/* === Sessions: Segmented by Work / Reviews / Blocked === */}
+      {/* === 3. Consolidated Workflow Rules (1 card instead of N fragmented cards) === */}
+      {consolidatedRules.length > 0 ? (
+        <Section
+          id="extracted"
+          title={`3 · Consolidated Workflow Rules Extracted Today (${consolidatedRules.length})`}
+        >
+          <ConsolidatedRulesCard rules={consolidatedRules} onInstall={installCard} />
+        </Section>
+      ) : (
+        hasExtracted &&
+        summary && (
+          <Section id="extracted" title={t('dayDetail.sectionExtracted')}>
+            <div className="space-y-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                {summary.skills.map((card, i) => (
+                  <SkillCommandCard
+                    key={`skill-${card.title}-${i}`}
+                    card={card}
+                    type="skill"
+                    onInstall={installCard}
+                  />
+                ))}
+                {summary.commands.map((card, i) => (
+                  <SkillCommandCard
+                    key={`cmd-${card.title}-${i}`}
+                    card={card}
+                    type="command"
+                    onInstall={installCard}
+                  />
+                ))}
+              </div>
+              {skippedProjects.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-xs text-gray-400 dark:text-gray-500">
+                    {t('dayDetail.noExtraction')}
+                  </span>
+                  {skippedProjects.map(p => (
+                    <span
+                      key={p}
+                      className="text-xs text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-gray-800/50 px-2 py-0.5 rounded-full"
+                    >
+                      {p}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </Section>
+        )
+      )}
+
+      {/* === 4. Sessions: Segmented by Work / Reviews / Blocked === */}
       <Section id="sessions" title={t('dayDetail.sectionSessions')}>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap gap-1.5">
@@ -769,35 +1116,6 @@ export function DayDetail() {
           </div>
         )}
       </Section>
-
-      {/* === Extracted: skills/commands hint cards (only when present) === */}
-      {hasExtracted && summary && (
-        <Section id="extracted" title={t('dayDetail.sectionExtracted')}>
-          <div className="space-y-3">
-            <div className="grid gap-3 sm:grid-cols-2">
-              {summary.skills.map((card, i) => (
-                <SkillCommandCard key={`skill-${card.title}-${i}`} card={card} type="skill" onInstall={installCard} />
-              ))}
-              {summary.commands.map((card, i) => (
-                <SkillCommandCard key={`cmd-${card.title}-${i}`} card={card} type="command" onInstall={installCard} />
-              ))}
-            </div>
-            {skippedProjects.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-xs text-gray-400 dark:text-gray-500">{t('dayDetail.noExtraction')}</span>
-                {skippedProjects.map(p => (
-                  <span
-                    key={p}
-                    className="text-xs text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-gray-800/50 px-2 py-0.5 rounded-full"
-                  >
-                    {p}
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-        </Section>
-      )}
     </div>
   )
 }

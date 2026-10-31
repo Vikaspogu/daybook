@@ -34,12 +34,44 @@ export interface WasteAlert {
   hint: string
 }
 
+export interface DayMetrics {
+  total_tokens: number
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+  cache_hit_rate?: number | null
+  total_cost_usd: number
+  test_runs: number
+  failed_tool_calls: number
+  interrupted: number
+}
+
+export interface NextStepItem {
+  tag: string
+  title: string
+  detail: string
+}
+
+export interface ConsolidatedRule {
+  project: string
+  name: string
+  summary: string
+  trigger?: string | null
+  why?: string | null
+}
+
 export interface DailySummary {
   overview?: string
   session_count?: number
   work_count?: number
   review_count?: number
   blocked_count?: number
+  day_metrics?: DayMetrics
+  efficiency_signals?: string[]
+  learnings?: string[]
+  next_steps?: NextStepItem[]
+  consolidated_rules?: ConsolidatedRule[]
   project_gains?: ProjectGain[]
   waste_alerts?: WasteAlert[]
   insights: SummaryCard[]
