@@ -272,7 +272,7 @@ async fn push_after_archive(
         config,
         &meta.session_id,
         meta.agent.as_str(),
-        &meta.project().unwrap_or(cwd.clone()),
+        &crate::ledger::normalize_project(meta.project().as_deref().unwrap_or(&cwd)),
         journal_date,
         parsed.title.clone(),
         parsed.start.clone(),

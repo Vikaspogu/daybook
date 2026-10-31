@@ -360,15 +360,102 @@ pub fn normalize_journal_date(fallback_date: &str, started_utc: Option<&str>) ->
     utc.with_timezone(&offset).format("%Y-%m-%d").to_string()
 }
 
-/// One-time migration (PRAGMA user_version = 1) that rebuckets pre-existing UTC-dated
-/// rows using `normalize_journal_date` inside a single transaction.
+/// Fixed prompt prefixes for automated Hindsight background repository surveys.
+pub const SYNTHETIC_SURVEY_PREFIXES: &[&str] = &[
+    "You are performing a one-time structural survey of THIS repository to seed its Hindsight",
+    "You are running a one-shot background codebase survey for Hindsight",
+];
+
+/// Exact prompt strings for automated single-turn `PONG` connectivity probes.
+pub const SYNTHETIC_PONG_PROMPTS: &[&str] = &[
+    "Reply with the single word PONG and nothing else.",
+    "Reply with EXACTLY: PONG",
+    "Say PONG",
+    "Reply with PONG",
+];
+
+/// Normalize T3 scratch directory paths to `"scratch"`.
+pub fn normalize_project(project: &str) -> String {
+    let trimmed = project.trim();
+    if trimmed.contains("/.t3/scratch/") {
+        return "scratch".to_string();
+    }
+    trimmed.to_string()
+}
+
+/// Extract the slug from YAML frontmatter `title: "HH_MM-slug"` (stripping optional `HH_MM-`).
+fn frontmatter_title_slug(summary_md: &str) -> Option<&str> {
+    let mut lines = summary_md.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            break;
+        }
+        if let Some(rest) = trimmed.strip_prefix("title:") {
+            let val = rest.trim().trim_matches('"').trim_matches('\'');
+            let b = val.as_bytes();
+            if b.len() > 6
+                && b[0..2].iter().all(|c| c.is_ascii_digit())
+                && b[2] == b'_'
+                && b[3..5].iter().all(|c| c.is_ascii_digit())
+                && b[5] == b'-'
+            {
+                return Some(&val[6..]);
+            }
+            return Some(val);
+        }
+    }
+    None
+}
+
+/// True when a session record is an automated Hindsight background survey or
+/// a single-turn `PONG` readiness probe rather than user work.
+/// Matches known raw survey prefixes or exact PONG strings on `title`, or
+/// exact YAML frontmatter `title:` slugs on unmodified `codex` archives.
+pub fn is_synthetic_noise_record(title: Option<&str>, summary_md: &str) -> bool {
+    if let Some(t) = title.map(str::trim) {
+        let matches_title = SYNTHETIC_SURVEY_PREFIXES.iter().any(|p| t.starts_with(p))
+            || SYNTHETIC_PONG_PROMPTS
+                .iter()
+                .any(|p| t.eq_ignore_ascii_case(p));
+        if matches_title && (summary_md.is_empty() || summary_md.contains("_No files modified._")) {
+            return true;
+        }
+    }
+    if let Some(slug) = frontmatter_title_slug(summary_md) {
+        let is_survey_or_pong_slug = matches!(
+            slug,
+            "blocked-repository-survey"
+                | "repository-survey-blocked"
+                | "blocked-hindsight-survey"
+                | "hindsight-survey-blocked"
+                | "blocked-memory-survey"
+                | "memory-survey-blocked"
+                | "exact-pong-response"
+                | "stdin-pong-response"
+        );
+        is_survey_or_pong_slug
+            && summary_md.contains("tags: [codex, session-archive]")
+            && summary_md.contains("_No files modified._")
+    } else {
+        false
+    }
+}
+
+/// Schema data migrations (PRAGMA user_version):
+/// - v1: rebucket pre-existing UTC-dated rows using `normalize_journal_date`
+/// - v2: purge automated Hindsight survey / PONG probe rows and normalize
+///   `/.t3/scratch/...` project names to `"scratch"`
 fn reconcile_journal_dates(conn: &Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version >= 1 {
+    if version >= 2 {
         return Ok(());
     }
     let tx = conn.unchecked_transaction()?;
-    {
+    if version < 1 {
         let mut stmt = tx.prepare(
             "SELECT id, journal_date, started_utc FROM sessions WHERE started_utc IS NOT NULL AND started_utc != ''",
         )?;
@@ -385,7 +472,35 @@ fn reconcile_journal_dates(conn: &Connection) -> Result<()> {
             }
         }
     }
-    tx.execute_batch("PRAGMA user_version = 1;")?;
+    if version < 2 {
+        let mut stmt = tx.prepare(
+            "SELECT id, project, COALESCE(title, ''), COALESCE(summary_md, '') FROM sessions",
+        )?;
+        let rows: Vec<(i64, String, String, String)> = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut purged = 0usize;
+        for (id, project, title, summary_md) in rows {
+            if is_synthetic_noise_record(Some(&title), &summary_md) {
+                tx.execute("DELETE FROM sessions WHERE id = ?1", rusqlite::params![id])?;
+                purged += 1;
+                continue;
+            }
+            let norm_project = normalize_project(&project);
+            if norm_project != project {
+                tx.execute(
+                    "UPDATE sessions SET project = ?1 WHERE id = ?2",
+                    rusqlite::params![norm_project, id],
+                )?;
+            }
+        }
+        if purged > 0 {
+            eprintln!("[daybook] v2 migration purged {purged} synthetic survey/probe rows");
+        }
+    }
+    tx.execute_batch("PRAGMA user_version = 2;")?;
     tx.commit()?;
     Ok(())
 }
@@ -434,6 +549,9 @@ impl Ledger {
 
     /// D5 upsert. Callers must send the full record every time.
     pub fn upsert_session(&self, r: &SessionRecord) -> Result<UpsertOutcome> {
+        if is_synthetic_noise_record(r.title.as_deref(), &r.summary_md) {
+            return Ok(UpsertOutcome::Noop);
+        }
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
         let existing: Option<(i64, String)> = conn
@@ -463,6 +581,7 @@ impl Ledger {
         }
 
         let journal_date = normalize_journal_date(&r.journal_date, r.started_utc.as_deref());
+        let project = normalize_project(&r.project);
         let usage = serde_json::to_string(&r.usage)?;
         let aggs = serde_json::to_string(&r.aggregates)?;
         conn.execute(
@@ -483,7 +602,7 @@ impl Ledger {
                 r.session_id,
                 r.machine,
                 r.runtime,
-                r.project,
+                project,
                 journal_date,
                 r.started_utc,
                 r.ended_utc,
@@ -1001,8 +1120,11 @@ mod tests {
                     session_id, machine, runtime, project, journal_date,
                     started_utc, version, summary_md, content_hash, pushed_at
                 ) VALUES (
-                    's1', 'vm1', 'codex', 'daybook', '2026-10-31',
-                    '2026-10-31T00:15:00Z', 1, '## Summary\nEvening work.', 'h1', '2026-10-31T00:20:00Z'
+                    's1', 'vm1', 'codex', '/home/agent/.t3/scratch/2026-10-28-i-want-to-create-a-02113651', '2026-10-31',
+                    '2026-10-31T00:15:00Z', 1, '---\ntitle: \"20_15-fix-survey-filter\"\n---\n## Summary\nDiscussed blocked-repository-survey and exact-pong-response in prose.', 'h1', '2026-10-31T00:20:00Z'
+                ), (
+                    's2', 'vm1', 'codex', 'durable-sre-agent', '2026-10-30',
+                    '2026-10-30T12:00:00Z', 1, '---\ntitle: \"00_27-blocked-repository-survey\"\ntags: [codex, session-archive]\n---\n# 00_27-blocked-repository-survey\n\n## Code Changes\n\n_No files modified._\n', 'h2', '2026-10-30T12:05:00Z'
                 )",
                 [],
             )
@@ -1012,12 +1134,52 @@ mod tests {
         let dates = ledger.date_infos().unwrap();
         assert_eq!(dates.len(), 1);
         assert_eq!(dates[0].date, "2026-10-30");
+        assert_eq!(dates[0].session_count, 1);
+        let briefs = ledger.session_briefs("2026-10-30").unwrap();
+        assert_eq!(briefs.len(), 1);
+        assert_eq!(briefs[0].project, "scratch");
+
+        let mut noise = record_md(
+            "s3",
+            1,
+            "h3",
+            "---\r\ntitle: '00_58-exact-pong-response'\r\ntags: [codex, session-archive]\r\n---\r\n## Code Changes\r\n\r\n_No files modified._\r\n",
+        );
+        noise.project = "/home/agent/.t3/scratch/2026-10-28-i-want-to-create-a-02113651".into();
+        assert_eq!(ledger.upsert_session(&noise).unwrap(), UpsertOutcome::Noop);
+        assert!(is_synthetic_noise_record(
+            Some("You are performing a one-time structural survey of THIS repository to seed its Hindsight memory bank"),
+            ""
+        ));
+        assert!(is_synthetic_noise_record(
+            Some("Reply with EXACTLY: PONG"),
+            ""
+        ));
+        assert!(!is_synthetic_noise_record(
+            Some("Reply with EXACTLY: PONG"),
+            "## Code Changes\n\nModified src/main.rs\n"
+        ));
+        assert!(!is_synthetic_noise_record(
+            Some("Real user session"),
+            "---\ntitle: \"00_58-exact-pong-response\"\ntags: [pi, session-archive]\n---\n## Code Changes\n\n_No files modified._\n"
+        ));
+        assert!(!is_synthetic_noise_record(
+            Some("Real user session"),
+            "---\ntitle: \"00_58-exact-pong-response\"\ntags: [codex, session-archive]\n---\n## Code Changes\n\nModified src/main.rs\n"
+        ));
+
+        assert_eq!(
+            normalize_project("/home/agent/.t3/scratch/2026-10-28-i-want-to-create-a-02113651"),
+            "scratch"
+        );
+        assert_eq!(normalize_project("-"), "-");
+        assert_eq!(normalize_project("daybook"), "daybook");
 
         let conn = ledger.conn.lock().unwrap();
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(user_version, 1);
+        assert_eq!(user_version, 2);
         reconcile_journal_dates(&conn).unwrap();
     }
 }

@@ -142,10 +142,25 @@ impl ParsedSession {
         ];
         // codex exec prepends AGENTS.md as a user message, so the prompt is
         // not always first — check the first few user messages.
-        data.user_messages
-            .iter()
-            .take(3)
-            .any(|m| MARKERS.iter().any(|mk| m.trim_start().starts_with(mk)))
+        if data.user_messages.iter().take(3).any(|m| {
+            let trimmed = m.trim_start();
+            MARKERS.iter().any(|mk| trimmed.starts_with(mk))
+                || crate::ledger::SYNTHETIC_SURVEY_PREFIXES
+                    .iter()
+                    .any(|mk| trimmed.starts_with(mk))
+        }) {
+            return true;
+        }
+        // Single-turn health-check / readiness probes (`Reply with the single word PONG...`).
+        data.files_modified.is_empty()
+            && data.user_messages.len() <= 3
+            && data.assistant_messages.len() <= 2
+            && data.user_messages.last().is_some_and(|m| {
+                let t = m.trim();
+                crate::ledger::SYNTHETIC_PONG_PROMPTS
+                    .iter()
+                    .any(|p| t.eq_ignore_ascii_case(p))
+            })
     }
 }
 
@@ -953,6 +968,19 @@ mod tests {
         // a real interactive session does not match
         let real = mk(None, "Fix the login bug in daybook please");
         assert!(!ParsedSession::from_daybook_prompt(&real.data));
+        // Hindsight structural survey after AGENTS.md is internal
+        let survey = mk(
+            Some("# AGENTS.md instructions"),
+            "You are performing a one-time structural survey of THIS repository to seed its Hindsight memory bank",
+        );
+        assert!(ParsedSession::from_daybook_prompt(&survey.data));
+        // Single-turn PONG probe is internal, but >3 user messages is not
+        let pong = mk(Some("# AGENTS.md instructions"), "Reply with exactly: PONG");
+        assert!(ParsedSession::from_daybook_prompt(&pong.data));
+        let mut long_pong = pong.data.clone();
+        long_pong.user_messages.push("extra 1".to_string());
+        long_pong.user_messages.push("extra 2".to_string());
+        assert!(!ParsedSession::from_daybook_prompt(&long_pong));
     }
 
     #[test]
