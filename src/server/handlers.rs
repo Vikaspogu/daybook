@@ -1305,7 +1305,14 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 fn extract_learnings(summary_md: &str) -> Vec<String> {
-    let sec = extract_section(summary_md, "Learnings & Pitfalls");
+    let sec = {
+        let s = extract_section(summary_md, "Learnings");
+        if s.is_empty() {
+            extract_section(summary_md, "Learnings & Pitfalls")
+        } else {
+            s
+        }
+    };
     let mut out = Vec::new();
     for line in sec.lines() {
         let cleaned = line
@@ -2484,5 +2491,9 @@ mod tests {
         assert_eq!(clean_steps.len(), 1);
         assert_eq!(clean_steps[0].tag, "FOLLOW-UP");
         assert!(clean_steps[0].title.contains("Continue daybook momentum"));
+        assert_eq!(
+            extract_learnings("## Learnings\n- Always verify heading prefixes.\n"),
+            vec!["Always verify heading prefixes.".to_string()]
+        );
     }
 }
