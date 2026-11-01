@@ -609,8 +609,9 @@ pub async fn get_daily_summary(
                         }
                         for l in extract_learnings(&r.summary_md).into_iter().take(3) {
                             push_project_learning(&mut learnings_map, &r.project, &title, &l);
-                            if !work_learnings.contains(&l) {
-                                work_learnings.push(l);
+                            let clean = strip_learning_tag_prefix(&l);
+                            if !work_learnings.contains(&clean) {
+                                work_learnings.push(clean);
                             }
                         }
                     }
@@ -630,8 +631,9 @@ pub async fn get_daily_summary(
                         }
                         for l in extract_learnings(&r.summary_md).into_iter().take(2) {
                             push_project_learning(&mut learnings_map, &r.project, &title, &l);
-                            if !review_learnings.contains(&l) {
-                                review_learnings.push(l);
+                            let clean = strip_learning_tag_prefix(&l);
+                            if !review_learnings.contains(&clean) {
+                                review_learnings.push(clean);
                             }
                         }
                     }
@@ -644,13 +646,21 @@ pub async fn get_daily_summary(
                         let w = waste_map.entry((r.project.clone(), reason)).or_default();
                         w.0 += 1;
                         w.1 += cost;
+                        for l in extract_learnings(&r.summary_md).into_iter().take(2) {
+                            push_project_learning(&mut learnings_map, &r.project, &title, &l);
+                        }
                     }
                 }
 
                 for rule in extract_consolidated_rules(&r.project, &r.summary_md) {
                     if let Some(existing) = consolidated_rules.iter_mut().find(|c| {
-                        c.project.eq_ignore_ascii_case(&rule.project)
-                            && c.name.eq_ignore_ascii_case(&rule.name)
+                        c.scope == rule.scope
+                            && if rule.scope == "global-skill" {
+                                c.name.eq_ignore_ascii_case(&rule.name)
+                            } else {
+                                c.project.eq_ignore_ascii_case(&rule.project)
+                                    && c.name.eq_ignore_ascii_case(&rule.name)
+                            }
                     }) {
                         if existing.trigger.is_none() {
                             existing.trigger = rule.trigger;
@@ -658,6 +668,16 @@ pub async fn get_daily_summary(
                         if existing.why.is_none() {
                             existing.why = rule.why;
                         }
+                        if existing.actions.is_empty() && !rule.actions.is_empty() {
+                            existing.actions = rule.actions;
+                        }
+                        if existing.verification.is_none() {
+                            existing.verification = rule.verification;
+                        }
+                        if existing.evidence.is_none() {
+                            existing.evidence = rule.evidence;
+                        }
+                        existing.draft_markdown = build_rule_draft_markdown(existing);
                     } else if consolidated_rules.len() < 12 {
                         consolidated_rules.push(rule);
                     }
@@ -674,20 +694,21 @@ pub async fn get_daily_summary(
                 day_metrics.cache_read_tokens,
             );
 
+            let skills: Vec<SummaryCardDto> = consolidated_rules
+                .iter()
+                .filter(|rule| rule.scope == "global-skill")
+                .map(|rule| SummaryCardDto {
+                    title: rule.name.clone(),
+                    content: rule.draft_markdown.clone(),
+                })
+                .collect();
+
             let commands: Vec<SummaryCardDto> = consolidated_rules
                 .iter()
-                .map(|rule| {
-                    let mut body = rule.summary.clone();
-                    if let Some(t) = &rule.trigger {
-                        body.push_str(&format!("\n- **Trigger:** {t}"));
-                    }
-                    if let Some(w) = &rule.why {
-                        body.push_str(&format!("\n- **Why:** {w}"));
-                    }
-                    SummaryCardDto {
-                        title: format!("{} — {}", rule.project, rule.name),
-                        content: body,
-                    }
+                .filter(|rule| rule.scope == "repo-rule")
+                .map(|rule| SummaryCardDto {
+                    title: format!("{} — {}", rule.project, rule.name),
+                    content: rule.draft_markdown.clone(),
                 })
                 .collect();
 
@@ -827,7 +848,7 @@ pub async fn get_daily_summary(
                 waste_alerts,
                 sessions,
                 insights,
-                skills: Vec::new(),
+                skills,
                 commands,
                 reflections: None,
                 tomorrow_focus: Vec::new(),
@@ -1391,8 +1412,32 @@ fn extract_learnings(summary_md: &str) -> Vec<String> {
     out
 }
 
+fn strip_learning_tag_prefix(text: &str) -> String {
+    let trimmed = text.trim();
+    for prefix in ["[pitfall]", "[learning]", "pitfall:", "learning:"] {
+        if let Some(rest) = strip_prefix_ci(trimmed, prefix) {
+            return rest
+                .trim_start_matches([':', '-', '—', ' '])
+                .trim()
+                .to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 fn classify_learning_kind(text: &str) -> &'static str {
-    let lower = text.to_lowercase();
+    let trimmed = text.trim();
+    if strip_prefix_ci(trimmed, "[pitfall]").is_some()
+        || strip_prefix_ci(trimmed, "pitfall:").is_some()
+    {
+        return "pitfall";
+    }
+    if strip_prefix_ci(trimmed, "[learning]").is_some()
+        || strip_prefix_ci(trimmed, "learning:").is_some()
+    {
+        return "learning";
+    }
+    let lower = trimmed.to_lowercase();
     const PITFALL_MARKERS: &[&str] = &[
         "does not",
         "do not",
@@ -1433,7 +1478,6 @@ fn classify_learning_kind(text: &str) -> &'static str {
         "learning"
     }
 }
-
 fn learning_stem_tokens(text: &str) -> std::collections::BTreeSet<String> {
     const STOPWORDS: &[&str] = &[
         "that", "this", "with", "from", "were", "have", "into", "when", "while", "their", "than",
@@ -1515,6 +1559,11 @@ fn push_project_learning(
     session_title: &str,
     text: &str,
 ) {
+    let kind = classify_learning_kind(text);
+    let clean_text = strip_learning_tag_prefix(text);
+    if clean_text.is_empty() {
+        return;
+    }
     let entry = map
         .entry(project.to_string())
         .or_insert_with(|| ProjectLearningsDto {
@@ -1526,14 +1575,13 @@ fn push_project_learning(
         .pitfalls
         .iter()
         .chain(entry.learnings.iter())
-        .any(|existing| is_similar_learning(&existing.text, text));
+        .any(|existing| is_similar_learning(&existing.text, &clean_text));
     if already_present {
         return;
     }
-    let kind = classify_learning_kind(text);
     let item = LearningItemDto {
         kind: kind.to_string(),
-        text: text.to_string(),
+        text: clean_text,
         session_title: session_title.to_string(),
     };
     if kind == "pitfall" {
@@ -1545,46 +1593,200 @@ fn push_project_learning(
     }
 }
 
-/// Parse 3-line `## Potential Skills/Commands` bullets (`- **[name]**: summary` +
-/// `Trigger:` + `Why:`) into consolidated rules instead of fragmenting each line into a card.
+fn is_one_off_host_incident(
+    name: &str,
+    summary: &str,
+    trigger: Option<&str>,
+    why: Option<&str>,
+    actions: &[String],
+) -> bool {
+    let mut combined = format!(
+        "{} {} {} {}",
+        name,
+        summary,
+        trigger.unwrap_or(""),
+        why.unwrap_or("")
+    );
+    for act in actions {
+        combined.push(' ');
+        combined.push_str(act);
+    }
+    let lower = combined.to_lowercase();
+    const HOST_INCIDENT_MARKERS: &[&str] = &[
+        "python-venv-preflight",
+        "python3.12-venv",
+        "operating-system package",
+        "docker-group-refresh",
+        "sg docker",
+        "supplementary groups",
+        "rtm_newaddr",
+        "bubblewrap",
+    ];
+    HOST_INCIDENT_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+fn classify_legacy_rule_scope(project: &str) -> &'static str {
+    let proj = project.trim();
+    if proj.is_empty()
+        || proj.eq_ignore_ascii_case("scratch")
+        || proj.eq_ignore_ascii_case("unknown")
+        || proj.eq_ignore_ascii_case("default")
+    {
+        "global-skill"
+    } else {
+        "repo-rule"
+    }
+}
+
+fn yaml_double_quote(value: &str) -> String {
+    let cleaned = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\r', '\n'], " ");
+    format!("\"{}\"", cleaned.trim())
+}
+
+fn build_rule_draft_markdown(rule: &ConsolidatedRuleDto) -> String {
+    if rule.scope == "global-skill" {
+        let desc = match &rule.trigger {
+            Some(t) if !t.is_empty() => format!("{} Trigger: {}", rule.summary, t),
+            _ => rule.summary.clone(),
+        };
+        let when_to_use = rule
+            .trigger
+            .as_deref()
+            .filter(|t| !t.is_empty())
+            .unwrap_or(rule.summary.as_str());
+        let procedure = if !rule.actions.is_empty() {
+            rule.actions
+                .iter()
+                .enumerate()
+                .map(|(idx, act)| format!("{}. {}", idx + 1, act))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else if let Some(w) = rule.why.as_deref().filter(|w| !w.is_empty()) {
+            format!("1. {}\n2. {}", rule.summary, w)
+        } else {
+            format!("1. {}", rule.summary)
+        };
+        let verification_section = rule
+            .verification
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .map(|v| format!("\n\n## Verification\n\n{v}"))
+            .unwrap_or_default();
+        format!(
+            "---\nname: {}\ndescription: {}\n---\n\n# {}\n\n## When to use\n\n{}\n\n## Procedure\n\n{}{}",
+            yaml_double_quote(&rule.name),
+            yaml_double_quote(&desc),
+            rule.name,
+            when_to_use,
+            procedure,
+            verification_section
+        )
+    } else {
+        let mut lines = vec![format!("- **{}**: {}", rule.name, rule.summary)];
+        if let Some(t) = rule.trigger.as_deref().filter(|t| !t.is_empty()) {
+            lines.push(format!("  - When: {t}"));
+        }
+        if !rule.actions.is_empty() {
+            lines.push(format!("  - Do: {}", rule.actions.join(" ")));
+        } else if let Some(w) = rule.why.as_deref().filter(|w| !w.is_empty()) {
+            lines.push(format!("  - Rule: {w}"));
+        }
+        if let Some(v) = rule.verification.as_deref().filter(|v| !v.is_empty()) {
+            lines.push(format!("  - Verify: {v}"));
+        }
+        lines.join("\n")
+    }
+}
+
+/// Parse `## Potential Skills/Commands` bullets (both v2 `Scope`/`Trigger`/`Action`/`Verify`/`Evidence`
+/// and legacy `Trigger`/`Why` entries) into structured `ConsolidatedRuleDto` items.
 fn extract_consolidated_rules(project: &str, summary_md: &str) -> Vec<ConsolidatedRuleDto> {
     let mut sec = extract_section(summary_md, "Potential Skills/Commands");
     if sec.is_empty() {
         sec = extract_section(summary_md, "Reusable Skills & Commands");
     }
-    let mut rules: Vec<ConsolidatedRuleDto> = Vec::new();
+    let mut raw_rules: Vec<ConsolidatedRuleDto> = Vec::new();
     for raw_line in sec.lines() {
-        let cleaned = raw_line
-            .trim()
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("<!--") {
+            continue;
+        }
+        let cleaned = trimmed
             .trim_start_matches("- ")
             .trim_start_matches("* ")
             .trim();
-        if is_junk_hint(cleaned) {
+        if is_junk_hint(cleaned) || cleaned.starts_with("<!--") {
             continue;
         }
         let plain = cleaned.trim_start_matches("**").trim();
-        if let Some(rest) = strip_prefix_ci(plain, "trigger:") {
-            let val = rest
-                .trim_start_matches("**")
+
+        let strip_detail_val = |rest: &str| -> String {
+            rest.trim_start_matches("**")
                 .trim()
-                .trim_start_matches(':')
-                .trim();
-            if !val.is_empty() {
-                if let Some(last) = rules.last_mut() {
-                    last.trigger = Some(val.to_string());
+                .trim_start_matches([':', '：'])
+                .trim()
+                .to_string()
+        };
+
+        if let Some(rest) = strip_prefix_ci(plain, "scope:") {
+            let val = strip_detail_val(rest).to_lowercase();
+            if let Some(last) = raw_rules.last_mut() {
+                if val.contains("global-skill") || val == "global" || val == "skill" {
+                    last.scope = "global-skill".to_string();
+                } else if val.contains("repo-rule") || val == "repo" || val == "rule" {
+                    last.scope = "repo-rule".to_string();
                 }
             }
             continue;
         }
-        if let Some(rest) = strip_prefix_ci(plain, "why:") {
-            let val = rest
-                .trim_start_matches("**")
-                .trim()
-                .trim_start_matches(':')
-                .trim();
+        if let Some(rest) =
+            strip_prefix_ci(plain, "trigger:").or_else(|| strip_prefix_ci(plain, "触发条件"))
+        {
+            let val = strip_detail_val(rest);
             if !val.is_empty() {
-                if let Some(last) = rules.last_mut() {
-                    last.why = Some(val.to_string());
+                if let Some(last) = raw_rules.last_mut() {
+                    last.trigger = Some(val);
+                }
+            }
+            continue;
+        }
+        if let Some(rest) =
+            strip_prefix_ci(plain, "why:").or_else(|| strip_prefix_ci(plain, "原因"))
+        {
+            let val = strip_detail_val(rest);
+            if !val.is_empty() {
+                if let Some(last) = raw_rules.last_mut() {
+                    last.why = Some(val);
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = strip_prefix_ci(plain, "action:") {
+            let val = strip_detail_val(rest);
+            if !val.is_empty() {
+                if let Some(last) = raw_rules.last_mut() {
+                    last.actions.push(val);
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = strip_prefix_ci(plain, "verify:") {
+            let val = strip_detail_val(rest);
+            if !val.is_empty() {
+                if let Some(last) = raw_rules.last_mut() {
+                    last.verification = Some(val);
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = strip_prefix_ci(plain, "evidence:") {
+            let val = strip_detail_val(rest);
+            if !val.is_empty() {
+                if let Some(last) = raw_rules.last_mut() {
+                    last.evidence = Some(val);
                 }
             }
             continue;
@@ -1610,9 +1812,10 @@ fn extract_consolidated_rules(project: &str, summary_md: &str) -> Vec<Consolidat
         if name.is_empty() || is_junk_hint(&name) {
             continue;
         }
-        rules.push(ConsolidatedRuleDto {
+        raw_rules.push(ConsolidatedRuleDto {
             project: project.to_string(),
             name,
+            scope: String::new(),
             summary: if summary.is_empty() {
                 cleaned.replace("**", "")
             } else {
@@ -1620,9 +1823,39 @@ fn extract_consolidated_rules(project: &str, summary_md: &str) -> Vec<Consolidat
             },
             trigger: None,
             why: None,
+            actions: Vec::new(),
+            verification: None,
+            evidence: None,
+            draft_markdown: String::new(),
         });
     }
-    rules
+
+    let is_scratch = project.trim().is_empty()
+        || project.eq_ignore_ascii_case("scratch")
+        || project.eq_ignore_ascii_case("unknown");
+
+    raw_rules
+        .into_iter()
+        .filter_map(|mut rule| {
+            if rule.scope.is_empty() {
+                if is_one_off_host_incident(
+                    &rule.name,
+                    &rule.summary,
+                    rule.trigger.as_deref(),
+                    rule.why.as_deref(),
+                    &rule.actions,
+                ) {
+                    return None;
+                }
+                rule.scope = classify_legacy_rule_scope(&rule.project).to_string();
+            } else if rule.scope == "repo-rule" && is_scratch {
+                // Scratch directories do not have a repository AGENTS.md policy destination.
+                return None;
+            }
+            rule.draft_markdown = build_rule_draft_markdown(&rule);
+            Some(rule)
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2186,6 +2419,7 @@ mod tests {
         assert_eq!(rules.len(), 2);
         assert_eq!(rules[0].project, "scratch");
         assert_eq!(rules[0].name, "verify-api-field-population");
+        assert_eq!(rules[0].scope, "global-skill");
         assert_eq!(
             rules[0].summary,
             "Verify backend API field population before designing UI sections."
@@ -2198,6 +2432,9 @@ mod tests {
             rules[0].why.as_deref(),
             Some("Server handlers may return empty defaults for legacy CLI fields.")
         );
+        assert!(rules[0]
+            .draft_markdown
+            .starts_with("---\nname: \"verify-api-field-population\"\n"));
         assert_eq!(rules[1].name, "gitops-orphan-detection");
         assert!(rules[1].trigger.is_some());
         assert!(rules[1].why.is_some());
@@ -2206,6 +2443,50 @@ mod tests {
         assert_eq!(
             learnings,
             vec!["Kustomize indirect references: Check nested Kustomize overlays before flagging a directory as an orphan.".to_string()]
+        );
+    }
+
+    #[test]
+    fn consolidated_rules_v2_and_host_incident_filtering() {
+        let v2_md = "## Summary\nAudited Home Assistant and investigation workflow.\n\n## Learnings & Pitfalls\n- [PITFALL] Script failed because python3.12-venv was missing on the host.\n- [LEARNING] Fallback handler preserves backward compatibility.\n\n## Potential Skills/Commands\n<!-- daybook:workflow-candidates:v2 -->\n  - Trigger: Orphan detail line before any candidate is ignored safely.\n- **[validate-investigation-evidence]**: Require verified tool outputs before accepting an incident hypothesis.\n  - Scope: global-skill\n  - Trigger: When investigating an incident where a tool call returned HTTP 5xx or failed.\n  - Action: Reject citations backed by failed commands or 5xx responses.\n  - Action: Collect fresh, successful evidence from an independent source.\n  - Verify: Confirm every accepted hypothesis cites a successful tool output.\n  - Evidence: Prometheus HTTP 503 responses were previously cited as proof.\n\n- **[python-venv-preflight]**: Check python3.12-venv before running setup.\n  - Trigger: Setup aborts because python3.12-venv is missing.\n  - Why: Supplied by a separate operating-system package.\n\n- **[home-assistant-dependency-audit]**: Audit indirect references before removing HACS components.\n  - Scope: repo-rule\n  - Trigger: When a HACS integration appears unused in the main configuration.\n  - Action: Search nested YAML includes, custom templates, and Node-RED flows.\n  - Verify: Run the Home Assistant configuration check and confirm zero missing references.\n  - Evidence: Indirect references lived inside Node-RED flows.\n";
+        let rules = extract_consolidated_rules("home-ops", v2_md);
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].name, "validate-investigation-evidence");
+        assert_eq!(rules[0].scope, "global-skill");
+        assert_eq!(
+            rules[0].trigger.as_deref(),
+            Some("When investigating an incident where a tool call returned HTTP 5xx or failed.")
+        );
+        assert!(rules[0].why.is_none());
+        assert_eq!(rules[0].actions.len(), 2);
+        assert!(rules[0].verification.is_some());
+        assert!(rules[0]
+            .draft_markdown
+            .contains("## Procedure\n\n1. Reject citations"));
+        assert_eq!(rules[1].name, "home-assistant-dependency-audit");
+        assert_eq!(rules[1].scope, "repo-rule");
+        assert!(rules[1]
+            .draft_markdown
+            .starts_with("- **home-assistant-dependency-audit**:"));
+        assert!(rules[1]
+            .draft_markdown
+            .contains("  - Do: Search nested YAML"));
+
+        // Verify explicit [PITFALL] and [LEARNING] tags override keyword heuristics
+        let mut map = std::collections::BTreeMap::new();
+        for l in extract_learnings(v2_md) {
+            push_project_learning(&mut map, "home-ops", "session-1", &l);
+        }
+        let group = map.get("home-ops").expect("home-ops group");
+        assert_eq!(group.pitfalls.len(), 1);
+        assert_eq!(
+            group.pitfalls[0].text,
+            "Script failed because python3.12-venv was missing on the host."
+        );
+        assert_eq!(group.learnings.len(), 1);
+        assert_eq!(
+            group.learnings[0].text,
+            "Fallback handler preserves backward compatibility."
         );
     }
     fn rec() -> SessionRecord {

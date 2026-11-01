@@ -29,12 +29,7 @@ pub async fn run_skill(
     let skill_content = engine.extract_skill(&session_content, None).await?;
 
     // Check if skill is extractable
-    if skill_content.trim().starts_with("NOT_EXTRACTABLE:") {
-        let reason = skill_content
-            .trim()
-            .strip_prefix("NOT_EXTRACTABLE:")
-            .unwrap_or("Unknown reason")
-            .trim();
+    if let Some(reason) = not_extractable_reason(&skill_content) {
         println!();
         println!("[daybook] ⚠ Skill not extractable: {}", reason);
         println!();
@@ -131,9 +126,14 @@ pub async fn run_command(
 
     println!("[daybook] Extracting command from session...");
 
-    // Extract command using Claude
+    // Extract command using summarizer engine
     let command_content = engine.extract_command(&session_content, None).await?;
 
+    if let Some(reason) = not_extractable_reason(&command_content) {
+        println!();
+        println!("[daybook] ⚠ Command not extractable: {}", reason);
+        return Ok(());
+    }
     // Determine output path
     let output_path = if let Some(path) = output {
         path
@@ -242,6 +242,25 @@ fn extract_name_from_content(content: &str, default: &str) -> String {
     default.to_string()
 }
 
+/// Parse a `NOT_EXTRACTABLE:` rejection response, tolerating optional markdown code fences.
+fn not_extractable_reason(content: &str) -> Option<&str> {
+    let trimmed = content
+        .trim()
+        .trim_start_matches("```markdown")
+        .trim_start_matches("```text")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    trimmed.strip_prefix("NOT_EXTRACTABLE:").map(|r| {
+        let reason = r.trim();
+        if reason.is_empty() {
+            "Unknown reason"
+        } else {
+            reason
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +287,22 @@ Instructions here."#;
             extract_name_from_content(content, "default"),
             "my-command-name"
         );
+    }
+
+    #[test]
+    fn test_not_extractable_reason_handles_plain_empty_and_fenced() {
+        assert_eq!(
+            not_extractable_reason("NOT_EXTRACTABLE: Repository-specific rule"),
+            Some("Repository-specific rule")
+        );
+        assert_eq!(
+            not_extractable_reason("NOT_EXTRACTABLE:   "),
+            Some("Unknown reason")
+        );
+        assert_eq!(
+            not_extractable_reason("```markdown\nNOT_EXTRACTABLE: One-off fix\n```"),
+            Some("One-off fix")
+        );
+        assert_eq!(not_extractable_reason("---\nname: my-skill\n---"), None);
     }
 }

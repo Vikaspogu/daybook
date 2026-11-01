@@ -56,9 +56,14 @@ export interface NextStepItem {
 export interface ConsolidatedRule {
   project: string
   name: string
+  scope?: 'global-skill' | 'repo-rule'
   summary: string
   trigger?: string | null
   why?: string | null
+  actions?: string[]
+  verification?: string | null
+  evidence?: string | null
+  draft_markdown?: string
 }
 
 export interface LearningItem {

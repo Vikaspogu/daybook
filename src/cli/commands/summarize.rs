@@ -214,7 +214,7 @@ pub(crate) async fn run_summarization(
     Ok(())
 }
 
-/// Check if skill_hints suggest extractable knowledge
+/// Check if skill_hints suggest extractable global skill knowledge
 fn should_extract_skill(skill_hints: &str) -> bool {
     let hints_lower = skill_hints.to_lowercase();
 
@@ -222,12 +222,21 @@ fn should_extract_skill(skill_hints: &str) -> bool {
     if hints_lower.contains("none identified")
         || hints_lower.contains("no skills")
         || hints_lower.contains("no potential")
+        || skill_hints.contains("未发现可沉淀技能")
+        || skill_hints.contains("未发现可复用候选项")
         || skill_hints.trim().is_empty()
     {
         return false;
     }
 
-    // Check for skill markers (name, trigger, etc.)
+    // Versioned v2 candidates: only extract when at least one global-skill exists
+    if skill_hints.contains("<!-- daybook:workflow-candidates:v2 -->") {
+        let normalized = hints_lower.replace('*', "");
+        return normalized.contains("scope: global-skill")
+            || normalized.contains("scope:global-skill");
+    }
+
+    // Legacy skill markers (name, trigger, etc.)
     hints_lower.contains("**") || hints_lower.contains("trigger:") || hints_lower.contains("- ")
 }
 
@@ -295,4 +304,28 @@ fn extract_skill_name(content: &str) -> String {
     // Fallback with timestamp
     let timestamp = chrono::Local::now().format("%H%M%S");
     format!("skill-{}", timestamp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::summarizer::Prompts;
+
+    #[test]
+    fn should_extract_skill_respects_v2_scope_and_prompt_contract() {
+        let en = Prompts::default_session_summary_template("en");
+        let zh = Prompts::default_session_summary_template("zh");
+        assert!(en.contains("<!-- daybook:workflow-candidates:v2 -->"));
+        assert!(zh.contains("<!-- daybook:workflow-candidates:v2 -->"));
+
+        assert!(!should_extract_skill(""));
+        assert!(!should_extract_skill("None identified in this session."));
+        assert!(!should_extract_skill("本次会话未发现可复用候选项。"));
+
+        let v2_repo_only = "<!-- daybook:workflow-candidates:v2 -->\n- **[home-assistant-dependency-audit]**: Check indirect YAML references.\n  - Scope: repo-rule\n  - Trigger: When removing a HACS component.";
+        assert!(!should_extract_skill(v2_repo_only));
+
+        let v2_with_global = "<!-- daybook:workflow-candidates:v2 -->\n- **[validate-investigation-evidence]**: Verify tool HTTP status.\n  - Scope: global-skill\n  - Trigger: When evaluating incident hypotheses.";
+        assert!(should_extract_skill(v2_with_global));
+    }
 }

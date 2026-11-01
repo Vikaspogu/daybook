@@ -118,14 +118,20 @@ pub struct NextStepDto {
     pub detail: String,
 }
 
-/// Consolidated 3-line reusable workflow rule extracted from `## Potential Skills/Commands`
+/// Consolidated reusable skill or repository instruction rule extracted from `## Potential Skills/Commands`
 #[derive(Serialize, Default, Clone, Debug, PartialEq, Eq)]
 pub struct ConsolidatedRuleDto {
     pub project: String,
     pub name: String,
+    /// `"global-skill"` or `"repo-rule"`
+    pub scope: String,
     pub summary: String,
     pub trigger: Option<String>,
     pub why: Option<String>,
+    pub actions: Vec<String>,
+    pub verification: Option<String>,
+    pub evidence: Option<String>,
+    pub draft_markdown: String,
 }
 /// Single learning or pitfall extracted from a session summary
 #[derive(Serialize, Default, Clone, Debug, PartialEq, Eq)]

@@ -474,121 +474,229 @@ function ProjectLearningsSection({
 
 function ConsolidatedRulesCard({
   rules,
-  onInstall,
 }: {
   rules: ConsolidatedRule[]
-  onInstall: (title: string, content: string, cardType: 'skill' | 'command') => Promise<unknown>
 }) {
-  const [copiedAll, setCopiedAll] = useState(false)
-  const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
-  const [installedIdx, setInstalledIdx] = useState<Record<number, boolean>>({})
+  const [copiedKey, setCopiedKey] = useState<string | null>(null)
 
-  const formatRuleMarkdown = (r: ConsolidatedRule) => {
-    const lines = [`- **[${r.name}]** (${normalizeProjectLabel(r.project)}): ${r.summary}`]
-    if (r.trigger) lines.push(`  - Trigger: ${r.trigger}`)
-    if (r.why) lines.push(`  - Why: ${r.why}`)
-    return lines.join('\n')
+  const resolveScope = (r: ConsolidatedRule): 'global-skill' | 'repo-rule' => {
+    if (r.scope === 'global-skill' || r.scope === 'repo-rule') return r.scope
+    const proj = (r.project ?? '').trim().toLowerCase()
+    return !proj || proj === 'scratch' || proj === 'default' || proj === 'unknown'
+      ? 'global-skill'
+      : 'repo-rule'
   }
 
-  const handleCopyAll = async () => {
+  const formatRuleDraft = (r: ConsolidatedRule) =>
+    r.draft_markdown?.trim() || `- **${r.name}**: ${r.summary}`
+
+  const copyText = async (key: string, text: string) => {
     try {
-      const text = rules.map(formatRuleMarkdown).join('\n\n')
       await navigator.clipboard.writeText(text)
-      setCopiedAll(true)
-      setTimeout(() => setCopiedAll(false), 2000)
+      setCopiedKey(key)
+      setTimeout(() => setCopiedKey(prev => (prev === key ? null : prev)), 2000)
     } catch {
       // clipboard unavailable
     }
   }
 
-  const handleCopyOne = async (r: ConsolidatedRule, idx: number) => {
-    try {
-      await navigator.clipboard.writeText(formatRuleMarkdown(r))
-      setCopiedIdx(idx)
-      setTimeout(() => setCopiedIdx(null), 2000)
-    } catch {
-      // clipboard unavailable
-    }
-  }
-
-  const handleInstallOne = async (r: ConsolidatedRule, idx: number) => {
-    if (installedIdx[idx]) return
-    try {
-      await onInstall(r.name, formatRuleMarkdown(r), 'command')
-      setInstalledIdx(prev => ({ ...prev, [idx]: true }))
-    } catch {
-      // handled by hook
-    }
-  }
+  const globalSkills = rules.filter(r => resolveScope(r) === 'global-skill')
+  const repoRules = rules.filter(r => resolveScope(r) === 'repo-rule')
+  const repoGroups = Array.from(
+    repoRules.reduce((acc, rule) => {
+      const proj = normalizeProjectLabel(rule.project)
+      const list = acc.get(proj) ?? []
+      list.push(rule)
+      acc.set(proj, list)
+      return acc
+    }, new Map<string, ConsolidatedRule[]>()),
+  )
 
   return (
-    <div className="qp-card p-4 space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-white/[0.06]">
-        <span className="text-xs text-[#94A3B8]">
-          Consolidated from session summaries ({rules.length} {rules.length === 1 ? 'rule' : 'rules'})
-        </span>
-        <button
-          type="button"
-          onClick={handleCopyAll}
-          className="px-2.5 py-1 rounded-lg border border-amber-400/30 bg-amber-500/10 text-xs font-mono text-[#FBBF24] hover:bg-amber-500/20 transition-colors tabular-nums"
-        >
-          {copiedAll ? '✓ Copied All' : `Copy All (${rules.length})`}
-        </button>
-      </div>
-      <div className="space-y-2.5">
-        {rules.map((r, i) => (
-          <div
-            key={`${r.project}-${r.name}-${i}`}
-            className="rounded-xl p-3 bg-[#0B0E14]/65 border border-white/[0.06] flex flex-col sm:flex-row sm:items-start justify-between gap-3"
-          >
-            <div className="space-y-1 min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-[#FBBF24] border border-amber-400/30 font-mono text-[10px] font-semibold">
-                  {normalizeProjectLabel(r.project)}
-                </span>
-                <span className="font-mono text-xs font-bold text-[#F8FAFC]">
-                  {r.name}
+    <div className="space-y-4">
+      {globalSkills.length > 0 && (
+        <div className="qp-card p-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-white/[0.06]">
+            <div className="space-y-0.5">
+              <div className="flex items-center gap-2">
+                <span className="qp-dot text-[#34D399]" />
+                <h3 className="qp-card-title">Global Reusable Skills</h3>
+                <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-[#34D399] border border-emerald-400/30 font-mono text-[10px] font-semibold">
+                  ~/.agents/skills/&lt;name&gt;/SKILL.md
                 </span>
               </div>
-              <p className="text-xs text-[#94A3B8] leading-relaxed">
-                {r.summary}
+              <p className="text-xs text-[#94A3B8]">
+                Cross-repository workflows portable across any project ({globalSkills.length}{' '}
+                {globalSkills.length === 1 ? 'skill' : 'skills'})
               </p>
-              {(r.trigger || r.why) && (
-                <p className="text-[11px] text-[#64748B] leading-relaxed">
-                  {r.trigger && (
-                    <>
-                      <strong className="text-[#94A3B8]">Trigger:</strong> {r.trigger}
-                    </>
-                  )}
-                  {r.trigger && r.why && ' · '}
-                  {r.why && (
-                    <>
-                      <strong className="text-[#94A3B8]">Why:</strong> {r.why}
-                    </>
-                  )}
-                </p>
-              )}
             </div>
-            <div className="flex items-center gap-1.5 flex-shrink-0">
+            <button
+              type="button"
+              onClick={() =>
+                copyText(
+                  'all-skills',
+                  globalSkills.map(formatRuleDraft).join('\n\n'),
+                )
+              }
+              className="px-2.5 py-1 rounded-lg border border-emerald-400/30 bg-emerald-500/10 text-xs font-mono text-[#34D399] hover:bg-emerald-500/20 transition-colors tabular-nums"
+            >
+              {copiedKey === 'all-skills'
+                ? '✓ Copied All SKILL.md'
+                : `Copy All SKILL.md (${globalSkills.length})`}
+            </button>
+          </div>
+          <div className="space-y-2.5">
+            {globalSkills.map((r, i) => {
+              const key = `skill-${r.name}-${i}`
+              const actionText =
+                r.actions && r.actions.length > 0 ? r.actions.join(' ') : r.why
+              return (
+                <div
+                  key={key}
+                  className="rounded-xl p-3 bg-[#0B0E14]/65 border border-white/[0.06] flex flex-col sm:flex-row sm:items-start justify-between gap-3"
+                >
+                  <div className="space-y-1 min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-[#34D399] border border-emerald-400/30 font-mono text-[10px] font-semibold">
+                        global-skill
+                      </span>
+                      <span className="font-mono text-xs font-bold text-[#F8FAFC]">
+                        {r.name}
+                      </span>
+                      <span className="text-[10px] font-mono text-[#64748B]">
+                        from {normalizeProjectLabel(r.project)}
+                      </span>
+                    </div>
+                    <p className="text-xs text-[#94A3B8] leading-relaxed">
+                      {r.summary}
+                    </p>
+                    {(r.trigger || actionText || r.verification) && (
+                      <div className="text-[11px] text-[#64748B] leading-relaxed space-y-0.5 pt-0.5">
+                        {r.trigger && (
+                          <p>
+                            <strong className="text-[#94A3B8]">When:</strong> {r.trigger}
+                          </p>
+                        )}
+                        {actionText && (
+                          <p>
+                            <strong className="text-[#94A3B8]">Procedure:</strong> {actionText}
+                          </p>
+                        )}
+                        {r.verification && (
+                          <p>
+                            <strong className="text-[#94A3B8]">Verify:</strong> {r.verification}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => copyText(key, formatRuleDraft(r))}
+                      className="px-2.5 py-1 rounded-lg border border-emerald-400/30 bg-emerald-500/10 text-[11px] font-mono text-[#34D399] hover:bg-emerald-500/20 transition-colors"
+                    >
+                      {copiedKey === key ? '✓ Copied SKILL.md' : 'Copy SKILL.md'}
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {repoGroups.map(([projectName, groupRules]) => {
+        const groupKey = `repo-group-${projectName}`
+        return (
+          <div key={groupKey} className="qp-card p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-white/[0.06]">
+              <div className="space-y-0.5">
+                <div className="flex items-center gap-2">
+                  <span className="qp-dot text-[#FBBF24]" />
+                  <h3 className="qp-card-title">{projectName} Repository Rules</h3>
+                  <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-[#FBBF24] border border-amber-400/30 font-mono text-[10px] font-semibold">
+                    {projectName}/AGENTS.md
+                  </span>
+                </div>
+                <p className="text-xs text-[#94A3B8]">
+                  Project-specific instructions to append to <code className="font-mono text-[#F8FAFC]">{projectName}/AGENTS.md</code> ({groupRules.length}{' '}
+                  {groupRules.length === 1 ? 'rule' : 'rules'})
+                </p>
+              </div>
               <button
                 type="button"
-                onClick={() => handleCopyOne(r, i)}
-                className="px-2.5 py-1 rounded-lg border border-white/10 text-[11px] font-mono text-[#94A3B8] hover:text-[#F8FAFC] hover:border-white/25 transition-colors"
+                onClick={() =>
+                  copyText(
+                    groupKey,
+                    `## Workflow & Validation Rules\n\n${groupRules.map(formatRuleDraft).join('\n')}`,
+                  )
+                }
+                className="px-2.5 py-1 rounded-lg border border-amber-400/30 bg-amber-500/10 text-xs font-mono text-[#FBBF24] hover:bg-amber-500/20 transition-colors tabular-nums"
               >
-                {copiedIdx === i ? '✓ Copied' : 'Copy'}
+                {copiedKey === groupKey
+                  ? `✓ Copied ${projectName}/AGENTS.md`
+                  : `Copy for ${projectName}/AGENTS.md (${groupRules.length})`}
               </button>
-              <button
-                type="button"
-                onClick={() => handleInstallOne(r, i)}
-                disabled={!!installedIdx[i]}
-                className="px-2.5 py-1 rounded-lg border border-emerald-400/30 text-[11px] font-mono text-[#34D399] hover:bg-emerald-500/10 disabled:opacity-50 transition-colors"
-              >
-                {installedIdx[i] ? '✓ Installed' : 'Install'}
-              </button>
+            </div>
+            <div className="space-y-2.5">
+              {groupRules.map((r, i) => {
+                const key = `repo-${projectName}-${r.name}-${i}`
+                const doText =
+                  r.actions && r.actions.length > 0 ? r.actions.join(' ') : r.why
+                return (
+                  <div
+                    key={key}
+                    className="rounded-xl p-3 bg-[#0B0E14]/65 border border-white/[0.06] flex flex-col sm:flex-row sm:items-start justify-between gap-3"
+                  >
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-[#FBBF24] border border-amber-400/30 font-mono text-[10px] font-semibold">
+                          {projectName}/AGENTS.md
+                        </span>
+                        <span className="font-mono text-xs font-bold text-[#F8FAFC]">
+                          {r.name}
+                        </span>
+                      </div>
+                      <p className="text-xs text-[#94A3B8] leading-relaxed">
+                        {r.summary}
+                      </p>
+                      {(r.trigger || doText || r.verification) && (
+                        <div className="text-[11px] text-[#64748B] leading-relaxed space-y-0.5 pt-0.5">
+                          {r.trigger && (
+                            <p>
+                              <strong className="text-[#94A3B8]">When:</strong> {r.trigger}
+                            </p>
+                          )}
+                          {doText && (
+                            <p>
+                              <strong className="text-[#94A3B8]">Do:</strong> {doText}
+                            </p>
+                          )}
+                          {r.verification && (
+                            <p>
+                              <strong className="text-[#94A3B8]">Verify:</strong> {r.verification}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 flex-shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => copyText(key, formatRuleDraft(r))}
+                        className="px-2.5 py-1 rounded-lg border border-white/10 text-[11px] font-mono text-[#94A3B8] hover:text-[#F8FAFC] hover:border-white/25 transition-colors"
+                      >
+                        {copiedKey === key ? '✓ Copied Rule' : 'Copy Rule'}
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           </div>
-        ))}
-      </div>
+        )
+      })}
     </div>
   )
 }
@@ -1025,10 +1133,10 @@ export function DayDetail() {
           {consolidatedRules.length > 0 ? (
             <Section
               id="extracted"
-              title="4 · Consolidated Workflow Rules"
-              meta={`${consolidatedRules.length} RULES`}
+              title="4 · Reusable Skills & Repo AGENTS.md Rules"
+              meta={`${consolidatedRules.length} CANDIDATES`}
             >
-              <ConsolidatedRulesCard rules={consolidatedRules} onInstall={installCard} />
+              <ConsolidatedRulesCard rules={consolidatedRules} />
             </Section>
           ) : (
             hasExtracted &&
