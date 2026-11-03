@@ -1,34 +1,28 @@
-# Daily
+# Daybook
 
-![Daily](assets/logo.png)
+![Daybook](assets/daybook-icon.png)
 
 English | [中文](README.zh-CN.md)
 
+> *Every coding agent session makes your engineering workflow sharper.*
 
-> <i> Every Claude code chat makes you better. </i>
+**More than a log — a multi-agent context archive and operational ledger.**
 
-**More than a log — a system that compounds your context.**
+Daybook automatically discovers, summarizes, and distills reusable knowledge from your AI coding sessions across **Claude Code**, **Codex**, and **Pi**. It works both as a local archive and as a centralized SQLite ledger server with a **Quiet Precision / Dark Obsidian** operational dashboard.
 
-Daily is a context archive system for [Claude Code](https://claude.ai/code) that automatically records, summarizes, and distills reusable skills from your AI-assisted work sessions. The more you use it, the stronger your personal context library becomes.
-
-![Daily-show](assets/daily-show.gif)
-
-## Why Daily?
-
-Every session holds valuable insights — problem-solving patterns, workflow optimizations, and domain knowledge. But these insights fade. Daily captures them automatically and transforms them into **reusable skills and commands** that compound over time.
-
-> **Compound Context**: Like compound interest for your expertise. Each session adds to your personal knowledge base, making future sessions more powerful — whether you're coding, writing, researching, or learning.
+![Daybook Dashboard](assets/daily-show.gif)
 
 ## Features
 
-- **Automatic Recording** - Hooks into Claude Code to capture session transcripts
-- **Smart Summarization** - Background AI processing generates meaningful summaries
-- **Daily Insights** - Aggregates all sessions into actionable daily summary
-- **Skill Extraction** - Distill reusable skills and commands from your sessions — your context library compounds over time
+- **Multi-Agent Session Discovery** — Scans local transcripts from Claude Code (`~/.claude/projects/`), Codex (`~/.codex/sessions/`), and Pi (`~/.pi/agent/sessions/`), resolving git worktrees back to their parent repository.
+- **Agent-Agnostic Summarization** — Summarizes concrete outcomes, decisions, pitfalls, and reusable knowledge without assuming a single coding agent.
+- **Three-Way Knowledge Classification (`v2`)** — Separates cross-repo **Global Reusable Skills** (`~/.agents/skills/<name>/SKILL.md` or `~/.claude/skills/<name>/SKILL.md`), project-specific **Repository Rules** (`<repo>/AGENTS.md` / `CLAUDE.md`), and one-off host/session **Learnings & Pitfalls**.
+- **Central SQLite Ledger & Multi-Host Sync** — Push sessions from multiple machines (`daybook scan`) to a central server (`daybook serve` / `daybook show`) with bearer token authentication (`daybook token`) and offline queue (`~/.daybook/pending/`) retry.
+- **5-Minute Daily Brief Dashboard** — High-contrast **Quiet Precision / Dark Obsidian** web UI (`web/`) showing what shipped by project, cost/cache/command telemetry, workflow coaching, scoped copy-ready skills and `AGENTS.md` rules, and expandable session cards.
 
 ## Installation
 
-### One-line Install (Recommended)
+### One-line Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Vikaspogu/daybook/main/scripts/install.sh | bash
@@ -39,176 +33,137 @@ curl -fsSL https://raw.githubusercontent.com/Vikaspogu/daybook/main/scripts/inst
 ```bash
 git clone https://github.com/Vikaspogu/daybook.git
 cd daybook
+cd web && npm install && npm run build && cd ..
 cargo install --path .
 ```
 
 ## Quick Start
 
 ```bash
-# 1. Initialize Daily
-daily init
+# 1. Initialize Daybook configuration (~/.daybook)
+daybook init
 
-# 2. Install Claude Code hooks
-daily install
+# 2. Discover and summarize sessions across Claude Code, Codex, and Pi
+daybook scan --day today
 
-# 3. View today's archive
-daily show
+# 3. Open the Quiet Precision web dashboard (default: http://127.0.0.1:31456)
+daybook show
+
+# 4. Query a day's brief or 7-day stats from the terminal (queries a running `daybook show` / `daybook serve` instance or configured `push.url`)
+daybook query
+daybook stats --week
 ```
 
-## How It Works
+## Knowledge Classification (`v2` Taxonomy)
 
-1. **Session End** - Claude Code triggers SessionEnd hook
-2. **Background Job** - Non-blocking process spawned for summarization
-3. **AI Summarization** - Claude API processes transcript
-4. **Session Archive** - Individual session saved to `~/.claude/daily/{date}/{task}.md`
-5. **Skill Sedimentation** - Auto-evaluates if session contains extractable knowledge
-6. **Digest** - Sessions are consolidated into `daily.md` via manual `daily digest` or auto-trigger
+When summarizing a session, Daybook classifies every lesson into one of three destinations so global skills, repository rules, and one-off debugging notes are never mixed together:
 
-## Skill Sedimentation (Auto-Learning)
+1. **Global Reusable Skill (`Scope: global-skill`)**
+   - **Destination**: `~/.agents/skills/<name>/SKILL.md` (dashboard copy draft) or `~/.claude/skills/<name>/SKILL.md` (via `daybook review-skills --install`)
+   - **Criteria**: Portable multi-step workflow, diagnostic sequence, or verification playbook that applies across repositories without depending on one repo's private layout or services.
+   - **Dashboard Action**: Rendered under **Global Reusable Skills** with one-click `Copy SKILL.md` and `Copy All SKILL.md` (complete YAML frontmatter + `When to use`, `Procedure`, and `Verification` sections).
+2. **Repository Instruction Rule (`Scope: repo-rule`)**
+   - **Destination**: `<repo>/AGENTS.md` (or `CLAUDE.md`)
+   - **Criteria**: Durable instruction tied to a specific repository's architecture, file layout, service dependencies, or validation steps.
+   - **Dashboard Action**: Grouped by project under **Repository Rules (`<repo>/AGENTS.md`)** with `Copy Rule` and `Copy for <repo>/AGENTS.md`.
+3. **Session Learning or Pitfall (`[PITFALL]` / `[LEARNING]`)**
+   - **Destination**: Session `## Learnings` and the dashboard's **Pitfalls & Gotchas / Codebase Learnings — By Project** section.
+   - **Criteria**: One-off host/package incidents (e.g., missing system packages, shell group refreshes), environment quirks, or factual codebase observations.
 
-Daily automatically identifies and extracts reusable knowledge from your sessions. When a session ends, it evaluates whether the work contains skills worth preserving using the **"Three Questions" quality gate**:
+### Managing Local Pending Skills
 
-1. **Did you hit a wall?**  - Was there debugging, trial-and-error, or non-obvious discovery?
-2. **Will it happen again?** - Is this a recurring problem, not a one-time edge case?
-3. **Can you explain it?** - Can the solution be clearly described and verified?
-
-### How It Works
-
-```
-SessionEnd → Summarize → Quality Gate → Pending Skills → SessionStart Reminder
-```
-
-1. When your session ends, Daily analyzes if there's extractable knowledge
-2. Skills that pass the quality gate are saved to `~/.claude/daily/pending-skills/`
-3. On your next session start, you'll see a reminder:
-
-```
-[daily] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[daily] 2 pending skill(s) waiting for review:
-[daily]   • 2024-01-18/fix-econnrefused
-[daily]   • 2024-01-17/next-build-optimization
-[daily]
-[daily] Review with: daily review-skills
-[daily] Or ask Claude: "review my pending skills"
-[daily] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-### Managing Pending Skills
+When `daybook summarize` detects a `Scope: global-skill` candidate that passes the 3-question quality gate, it saves a pending skill draft to `~/.daybook/pending-skills/<YYYY-MM-DD>/<name>.md`:
 
 ```bash
-# List all pending skills
-daily review-skills
+# List pending skills waiting for review
+daybook review-skills
 
-# Install a skill to ~/.claude/skills/ (Claude will auto-use it)
-daily review-skills --install 2024-01-18/fix-econnrefused
+# Install a pending skill to ~/.claude/skills/<name>/SKILL.md
+daybook review-skills --install 2026-11-01/validate-investigation-evidence
 
-# Delete a skill you don't need
-daily review-skills --delete 2024-01-18/fix-econnrefused
+# Delete a pending skill
+daybook review-skills --delete 2026-11-01/validate-investigation-evidence
 ```
-
-Once installed, skills are placed in `~/.claude/skills/{skill-name}/SKILL.md` where Claude Code automatically discovers and applies them when relevant conditions are detected.
 
 ## Commands
 
-| Command                          | Description                                                     |
-| -------------------------------- | --------------------------------------------------------------- |
-| `daily init`                     | Initialize system and create storage directory                  |
-| `daily init -i`                  | Interactive setup with directory selection and digest config    |
-| `daily install`                  | Install Claude Code hooks and slash commands                    |
-| `daily show`                     | Open web dashboard in browser (default: http://127.0.0.1:31456) |
-| `daily show --port 8080`         | Start dashboard on custom port                                  |
-| `daily show --no-open`           | Start server without opening browser                            |
-| `daily view`                     | View today's archive (interactive date selection)               |
-| `daily view --date 2024-01-15`   | View archive for specific date                                  |
-| `daily view --list`              | List all sessions for the day                                   |
-| `daily today`                    | Quick alias for today's archive                                 |
-| `daily yest`                     | Quick alias for yesterday's archive                             |
-| `daily digest`                   | Consolidate today's sessions into daily.md                      |
-| `daily digest --date 2024-01-15` | Digest sessions for specific date                               |
-| `daily config --show`            | Show current configuration                                      |
-| `daily extract-skill`            | Extract reusable skill from session                             |
-| `daily extract-command`          | Extract reusable command from session                           |
-| `daily review-skills`            | List pending skills waiting for review                          |
-| `daily review-skills --install`  | Install a pending skill to ~/.claude/skills/                    |
-| `daily review-skills --delete`   | Delete a pending skill                                          |
-| `daily jobs list`                | List background jobs                                            |
-| `daily jobs log <id>`            | View job logs                                                   |
+| Command | Description |
+| --- | --- |
+| `daybook init` | Initialize Daybook configuration and storage directory (`~/.daybook`) |
+| `daybook scan [--day today\|yesterday\|all\|YYYY-MM-DD]` | Discover sessions across Claude Code, Codex, and Pi, summarize, and push to server |
+| `daybook show [--port 31456] [--no-open]` | Start the web dashboard + ledger API server |
+| `daybook serve [--host 0.0.0.0] [--port 31457]` | Run the headless SQLite ledger ingest & query server |
+| `daybook query [YYYY-MM-DD]` | Print one day's work overview and session summaries from the ledger server |
+| `daybook stats [--week \| --month \| --days N]` | Show session, token, cost, cache-hit, and friction metrics |
+| `daybook token [--list \| --label <name> \| --revoke <label>]` | Mint, list, or revoke machine ingest bearer tokens (`dbk_...`) |
+| `daybook view [--date YYYY-MM-DD] [--list]` | View local markdown archives interactively or by date |
+| `daybook today` / `daybook yest` | Quick aliases for today's or yesterday's local archive |
+| `daybook digest [yest] [--date YYYY-MM-DD] [--force]` | Consolidate a day's local session markdown files into `daily.md` |
+| `daybook extract-skill` / `daybook extract-command` | Manually extract a reusable skill or command from an archived session |
+| `daybook review-skills [--install <id> \| --delete <id>]` | Review, install (to `~/.claude/skills/<name>/SKILL.md`), or delete locally extracted pending skills |
+| `daybook config [--show \| -i]` | Show or interactively update configuration |
+| `daybook insights [--days 30]` | Generate trend analysis from local archives |
+| `daybook jobs <list\|log\|kill\|cleanup>` | Inspect or manage background summarization jobs |
 
-### Claude Code Slash Commands
+## Central Server & Multi-Host Configuration
 
-After `daily install`, these commands are available in Claude Code:
+View current config and its resolved path with `daybook config --show` (default on Linux: `~/.config/daybook/config.toml`).
 
-| Command              | Description                           |
-| -------------------- | ------------------------------------- |
-| `/daily-view`        | View daily archive                    |
-| `/daily-get-skill`   | Extract skill from session insights   |
-| `/daily-get-command` | Extract command from session insights |
+```toml
+[storage]
+path = "/home/you/.daybook"
 
-## Configuration
+[summarization]
+model = "sonnet"
+summary_language = "en"
 
-View current config with `daily config --show`.
+[server]
+port = 31457
+db_path = "/home/you/.daybook/ledger.db3"
+admin_token = "dbk_..."
 
-Config file location (macOS): `~/Library/Application Support/rs.daily/config.toml`
-
-Key settings:
-
-- `storage.path` - Archive storage location (default: `~/.claude/daily`)
-- `summarization.model` - AI model for summarization (default: `sonnet`)
-- `summarization.digest_time` - Auto-digest trigger time (default: `06:00`)
-- `summarization.auto_digest_enabled` - Enable/disable auto-digest (default: `true`)
-- `hooks.enable_session_end` - Enable/disable auto-archiving
-
-### Digest System
-
-Sessions are archived individually as `{task-name}.md` files. The digest process consolidates all sessions into a single `daily.md`:
-
-- **Manual digest**: Run `daily digest` to consolidate today's sessions
-- **Auto-digest**: On each session start, if current time >= `digest_time` and yesterday has un-digested sessions, they will be automatically digested
-
-After digest, individual session files are removed, keeping only the consolidated `daily.md`.
-
-## Archive Structure
-
-```
-~/.claude/daily/
-├── 2024-01-15/              # After digest (sessions consolidated)
-│   └── daily.md             # Daily summary with all sessions
-├── 2024-01-16/              # Before digest (sessions pending)
-│   ├── daily.md             # Placeholder
-│   ├── fix-bug-143052.md    # Session archive
-│   └── new-feature-152310.md # Session archive
-├── pending-skills/          # Auto-extracted skills awaiting review
-│   └── 2024-01-16/
-│       └── fix-econnrefused.md
-└── jobs/
-    └── *.json, *.log        # Background job tracking
+[push]
+url = "https://daybook.example.com"
+token = "dbk_..."
+machine = "workstation-01"
 ```
 
-Note: After running `daily digest`, individual session files are removed and consolidated into `daily.md`.
+- **Local + Push Reliability**: When `push.url` and `push.token` are configured, `daybook scan` pushes summarized sessions to `POST /api/ingest`. If the server is unreachable, records are parked in `~/.daybook/pending/` and replayed automatically on the next scan.
+
+## Archive & Ledger Structure
+
+```text
+~/.daybook/
+├── ledger.db3               # Central SQLite ledger (sessions, usage, machine tokens)
+├── pending/                 # Parked ingest records awaiting retry when offline
+├── 2026-11-01/              # Local markdown archives by session start date (UTC)
+│   ├── daily.md             # Consolidated daily summary
+│   └── <session-task>.md    # Individual session archive
+├── pending-skills/          # Auto-extracted global skills (<YYYY-MM-DD>/<name>.md)
+└── jobs/                    # Background summarization job metadata & logs
+```
 
 ## Development
 
 ```bash
-# First time setup: build web assets (required before cargo run)
+# 1. Build embedded web dashboard assets (required before cargo build/test)
 cd web && npm install && npm run build && cd ..
 
-# Web dashboard (requires two terminals)
-cargo run -- show --no-open    # Terminal 1: API server
-cd web && npm run dev          # Terminal 2: Vite dev server → http://localhost:5173
+# 2. Run dashboard + API server locally
+cargo run -- show --no-open    # Terminal 1: Rust API + static server
+cd web && npm run dev          # Terminal 2: Vite dev server -> http://localhost:5173
 
-# Marketing site
-cd site && npm run dev
-
-# Build & test
-cargo build --release
+# 3. Format, lint, and test
+cargo fmt --all -- --check
+cargo clippy -- -D warnings
 cargo test
 ```
 
 ## Requirements
 
-- Rust 1.70+ (for building)
-- Node.js 18+ (for web/site development)
-- Claude Code CLI
+- Rust toolchain (`cargo`, edition 2021, for building from source)
+- Node.js & npm (for building `web/` or `site/`)
+- Claude CLI (`claude`) for LLM session summarization
 
 ## License
 

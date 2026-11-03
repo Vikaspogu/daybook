@@ -1,20 +1,25 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to coding agents when working with code in this repository.
 
-**Important**: When making changes to interfaces, features, architecture, or workflows, review and update `assets/dataflow.png` and `README.md` accordingly.
+**Important**: When making changes to interfaces, features, architecture, or workflows, review and update `README.md` and `design.md` accordingly.
 
 ## Build and Development Commands
 
 ```bash
-# Build
+# Build web frontend first (embedded into the Rust binary via rust-embed)
+cd web && npm install && npm run build && cd ..
+
+# Build Rust binary (`daybook`)
 cargo build
 cargo build --release
 
-# Run
+# Run CLI commands
 cargo run -- <command>
 
-# Test
+# Test & Lint (requires web/dist from build step above)
+cargo fmt --all -- --check
+cargo clippy -- -D warnings
 cargo test
 cargo test <test_name>         # Run specific test
 cargo test -- --nocapture      # Show test output
@@ -25,62 +30,54 @@ cargo install --path .
 
 ## Project Structure
 
-```
-daily/
-├── src/              # Rust CLI source code (daily binary)
-├── site/             # Product website (marketing/docs) - React + Vite
-│                     # Run: cd site && npm run dev
-├── web/              # Dashboard UI for `daily show` - React + Vite
-│                     # Run: cd web && npm run dev
-│                     # Served by Rust server at runtime
-├── hooks/            # Claude Code hook shell scripts (installed to ~/.claude/hooks/)
-├── commands/         # Claude Code slash command templates (installed to ~/.claude/commands/)
-├── scripts/          # Installation scripts (install.sh)
-├── assets/           # Documentation assets (dataflow.png, screenshots)
-└── .github/          # CI/CD workflows
+```text
+daybook/
+├── src/              # Rust CLI & server source code (`daybook` binary)
+├── web/              # Quiet Precision / Dark Obsidian dashboard UI (`daybook show`) - React + Vite
+│                     # Embedded into the Rust server via `rust-embed` (`web/dist`)
+├── site/             # Public marketing/docs website - React + Vite
+├── hooks/            # Optional Claude Code hook registration (hooks/hooks.json; handlers live in src/hooks/)
+├── commands/         # Slash command templates
+├── scripts/          # Installation scripts (`install.sh`)
+├── assets/           # Brand icons (`daybook-icon.png`, `logo.png`) and docs assets
+├── design.md         # Quiet Precision / Dark Obsidian UI & component specification
+└── .github/          # CI, Docker (`ghcr.io/vikaspogu/daybook`), and Release workflows
 ```
 
 **Important distinction**:
-- `site/` = Public website for promotion and documentation
-- `web/` = User-facing dashboard embedded in `daily show` command
+- `web/` = Operational dashboard embedded in `daybook show` (governed by `design.md`)
+- `site/` = Public marketing website
 
 ## Architecture Overview
 
-Daily is a context archive system for Claude Code that automatically records and summarizes AI-assisted work sessions using Claude Code hooks.
+Daybook is a multi-agent context archive and operational ledger that discovers, summarizes, and indexes AI coding sessions across **Claude Code**, **Codex**, and **Pi**.
 
 ### Data Flow
 
-1. **Session Start Hook** (`hooks/session_start.rs`) - Creates daily folder structure (`~/.claude/daily/YYYY-MM-DD/`)
-2. **Session End Hook** (`hooks/session_end.rs`) - Spawns background summarization process
-3. **Summarization** (`summarizer/engine.rs`) - Invokes Claude CLI to process transcripts and generate summaries
-4. **Archive Storage** (`archive/`) - Writes session and daily summary markdown files
+1. **Multi-Runtime Discovery (`src/transcript/adapters.rs`, `src/cli/commands/scan.rs`)**:
+   - Discovers transcripts from `~/.claude/projects/`, `~/.codex/sessions/`, and `~/.pi/agent/sessions/`.
+   - Resolves git worktrees (`.git` file pointers and `.t3/worktrees/<repo>/...` paths) back to the parent repository and buckets sessions by their UTC start timestamp.
+2. **Agent-Agnostic Summarization (`src/summarizer/engine.rs`, `src/summarizer/prompts.rs`)**:
+   - Summarizes sessions into `topic`, `summary`, `decisions`, `learnings` (`[PITFALL]` / `[LEARNING]`), and `skill_hints` (`<!-- daybook:workflow-candidates:v2 -->` with `Scope: global-skill` or `Scope: repo-rule`).
+3. **Local Archive & Central Ledger Push (`src/archive/`, `src/push/mod.rs`, `src/ledger/mod.rs`)**:
+   - Writes local markdown archives under `~/.daybook/YYYY-MM-DD/` and pushes `SessionRecord` payloads to `POST /api/ingest` (parking offline records in `~/.daybook/pending/`).
+4. **Server Synthesis & Dashboard (`src/server/handlers.rs`, `web/src/pages/DayDetail.tsx`)**:
+   - Synthesizes the 5-minute daily brief, project-grouped shipped outcomes, pitfalls/learnings, workflow coaching, and scoped copy-ready `SKILL.md` vs `<repo>/AGENTS.md` rules for the web dashboard and `daybook query` / `daybook stats`.
 
 ### Module Structure
 
-- `cli/` - Command parsing (clap) and command implementations
-  - `args.rs` - CLI argument definitions
-  - `commands/` - Individual command handlers (init, view, install, summarize, etc.)
-- `hooks/` - Claude Code hook handlers (session_start, session_end)
-  - `input.rs` - Reads hook JSON input from stdin
-- `archive/` - Archive file management
-  - `manager.rs` - Directory structure and file I/O
-  - `session.rs` - Session archive data structure
-  - `daily.rs` - Daily summary data structure
-  - `templates.rs` - Markdown templates
-- `summarizer/` - AI summarization via Claude CLI
-  - `engine.rs` - Invokes `claude` CLI and parses JSON responses
-  - `prompts.rs` - Prompt templates for summarization
-- `transcript/` - Claude Code transcript parsing (`parser.rs`)
-- `jobs/` - Background job management (`manager.rs`)
-- `config/` - Configuration handling via confy (`settings.rs`)
-
-### Key Patterns
-
-- **Background Processing**: Session end hook spawns `daily summarize --foreground` as a detached process to avoid blocking Claude Code exit
-- **Claude CLI Invocation**: `SummarizerEngine` calls `claude --model <model> --print -p` with prompts via stdin, parses JSON from stdout
-- **Configuration**: Uses `confy` crate, config file at `~/.config/daily/config.toml`
-- **Archive Structure**: `~/.claude/daily/YYYY-MM-DD/{daily.md, session-name.md}`
+- `src/cli/` - Clap CLI definitions (`args.rs`) and command handlers (`scan`, `serve`, `show`, `query`, `stats`, `token`, `init`, `view`, `digest`, `summarize`, `extract`, `skills`, `jobs`, `config`, `insights`)
+- `src/transcript/` - Transcript parsing (`parser.rs`) and multi-runtime adapters for Claude Code, Codex, and Pi (`adapters.rs`)
+- `src/summarizer/` - LLM summarization engine (`engine.rs`) and agent-agnostic v2 prompt templates (`prompts.rs`, `template.rs`)
+- `src/ledger/mod.rs` - SQLite ledger schema, session upsert, token management (`dbk_...`), and stats queries
+- `src/push/mod.rs` - HTTP ingest client and offline `~/.daybook/pending/` retry queue
+- `src/server/` - Axum router (`router.rs`), API & synthesis handlers (`handlers.rs`), DTOs (`dto.rs`), and embedded static asset serving (`static_files.rs`)
+- `src/archive/` - Local markdown archive management (`manager.rs`, `session.rs`, `daily.rs`, `templates.rs`)
+- `src/usage/` - Token and model pricing calculation (`pricing.rs`, `scanner.rs`)
+- `src/hooks/` - Claude Code hook handlers (`session_start.rs`, `session_end.rs`) and JSON stdin parser (`input.rs`)
+- `src/jobs/` - Background summarization job manager (`manager.rs`)
+- `src/config/` - Configuration loading via `confy` (`settings.rs`, `~/.config/daybook/config.toml`)
 
 ### Testing
 
-Tests use `tempfile::TempDir` for isolated file system tests. Run with `cargo test`.
+Tests use `tempfile::TempDir` for isolated filesystem and SQLite ledger tests. Always ensure `web/dist` exists before running `cargo test`.
