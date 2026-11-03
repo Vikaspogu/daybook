@@ -37,7 +37,7 @@ warn() {
 }
 
 error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    echo -e "${RED}[ERROR]${NC} $1" >&2
     exit 1
 }
 
@@ -47,7 +47,7 @@ detect_platform() {
 
     case "$(uname -s)" in
         Linux*)  os="linux" ;;
-        Darwin*) os="darwin" ;;
+        Darwin*) error "Prebuilt macOS binaries are not published; install from source: git clone https://github.com/${REPO}.git && cd daybook/web && npm install && npm run build && cd .. && cargo install --path ." ;;
         MINGW*|MSYS*|CYGWIN*) os="windows" ;;
         *) error "Unsupported operating system: $(uname -s)" ;;
     esac
