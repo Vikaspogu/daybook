@@ -90,7 +90,7 @@ daybook review-skills --delete 2026-11-01/validate-investigation-evidence
 | Command | Description |
 | --- | --- |
 | `daybook init` | Initialize Daybook configuration and storage directory (`~/.daybook`) |
-| `daybook scan [--day today\|yesterday\|all\|YYYY-MM-DD]` | Discover sessions across Claude Code, Codex, and Pi, summarize, and push to server |
+| `daybook scan [--day today\|yesterday\|all\|YYYY-MM-DD]` | Discover sessions across Claude Code, Codex, and Pi (default: today + yesterday), summarize, and push to server |
 | `daybook show [--port 31456] [--no-open]` | Start the web dashboard + ledger API server |
 | `daybook serve [--host 0.0.0.0] [--port 31457]` | Run the headless SQLite ledger ingest & query server |
 | `daybook query [YYYY-MM-DD]` | Print one day's work overview and session summaries from the ledger server |

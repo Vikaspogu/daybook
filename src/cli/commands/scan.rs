@@ -10,29 +10,34 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
     let home = dirs::home_dir().context("Failed to get home directory")?;
     let sessions = adapters::discover_sessions(&home);
 
-    let target = resolve_day(day.as_deref().unwrap_or("today"))?;
+    let targets = resolve_days(day.as_deref())?;
 
     // Cheap prefilter: Pi/Codex transcript names embed the UTC start date;
     // sessions near UTC midnight can start on an adjacent calendar date, so
     // keep a ±1 day window. Claude Code names carry no date and skip this.
-    let window: Option<Vec<String>> = target.as_ref().map(|t| {
-        let mut w = vec![t.clone()];
-        if let Ok(d) = chrono::NaiveDate::parse_from_str(t, "%Y-%m-%d") {
-            if let Some(p) = d.pred_opt() {
-                w.push(p.to_string());
-            }
-            if let Some(s) = d.succ_opt() {
-                w.push(s.to_string());
+    let window: Option<Vec<String>> = targets.as_ref().map(|ts| {
+        let mut w = Vec::new();
+        for t in ts {
+            w.push(t.clone());
+            if let Ok(d) = chrono::NaiveDate::parse_from_str(t, "%Y-%m-%d") {
+                if let Some(p) = d.pred_opt() {
+                    w.push(p.to_string());
+                }
+                if let Some(s) = d.succ_opt() {
+                    w.push(s.to_string());
+                }
             }
         }
+        w.sort();
+        w.dedup();
         w
     });
     eprintln!(
         "[daybook] Discovered {} sessions{}",
         sessions.len(),
-        target
-            .as_deref()
-            .map(|d| format!(" (filtering to {})", d))
+        targets
+            .as_ref()
+            .map(|ds| format!(" (filtering to {})", ds.join(", ")))
             .unwrap_or_default()
     );
 
@@ -66,8 +71,12 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
 
         // D6: the session's journal date is its transcript start date,
         // never the scan time.
-        if let Some(target) = &target {
-            if parsed.start_date().as_deref() != Some(target.as_str()) {
+        if let Some(targets) = &targets {
+            if !parsed
+                .start_date()
+                .as_deref()
+                .is_some_and(|d| targets.iter().any(|t| t == d))
+            {
                 continue;
             }
         }
@@ -104,8 +113,6 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
         skipped,
         internal
     );
-    // S3: with --no-llm absent, run the LLM pass over every session
-    // listed above (D4: codex fallback makes it work without claude).
     // S3: with --no-llm absent, run the LLM pass over every session
     // listed above (D4: codex fallback makes it work without claude).
     // Sessions already archived for their journal date are skipped, so
@@ -355,6 +362,23 @@ fn already_archived(config: &crate::config::Config, date: &str, session_id: &str
     find_session_archive(config, date, session_id).is_some()
 }
 
+/// Resolve optional `--day`: when omitted, scan both `today` and `yesterday`
+/// so sessions that finished within `STALE_SECS` of yesterday's last shutdown
+/// are picked up automatically on the next day's scan.
+fn resolve_days(day: Option<&str>) -> Result<Option<Vec<String>>> {
+    match day {
+        None => {
+            let today = chrono::Local::now().date_naive();
+            let mut days = vec![today.format("%Y-%m-%d").to_string()];
+            if let Some(yesterday) = today.pred_opt() {
+                days.push(yesterday.format("%Y-%m-%d").to_string());
+            }
+            Ok(Some(days))
+        }
+        Some(d) => Ok(resolve_day(d)?.map(|single| vec![single])),
+    }
+}
+
 /// Resolve `--day`: "today", "yesterday", "all", or a literal YYYY-MM-DD.
 fn resolve_day(day: &str) -> Result<Option<String>> {
     match day {
@@ -501,6 +525,14 @@ mod tests {
             Some("2026-10-28")
         );
         assert!(resolve_day("not-a-date").is_err());
+        let default_days = resolve_days(None).unwrap().unwrap();
+        assert_eq!(default_days.len(), 2);
+        assert!(default_days[0] > default_days[1]);
+        assert_eq!(
+            resolve_days(Some("2026-10-28")).unwrap().as_deref(),
+            Some(&["2026-10-28".to_string()][..])
+        );
+        assert!(resolve_days(Some("all")).unwrap().is_none());
     }
 
     #[test]

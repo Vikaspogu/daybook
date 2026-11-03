@@ -127,11 +127,17 @@ impl ParsedSession {
     /// fixed template lines (EN + ZH defaults; a fully custom prompt
     /// template would need its own first line here).
     fn from_daybook_prompt(data: &TranscriptData) -> bool {
-        // Covers session-summary, skill-extract, and daily-digest templates,
-        // EN + ZH. ZH daily renders "你正在分析 {{date}}...", so only the
-        // short prefix is stable; a real ZH session quoting it is the
-        // accepted dev-only edge (same trade-off as a custom template).
-        const MARKERS: [&str; 7] = [
+        // Covers v2 agent-agnostic and v1 legacy session-summary, skill-extract,
+        // command-extract, and daily-digest templates (EN + ZH).
+        const MARKERS: &[&str] = &[
+            // v2 agent-agnostic prompt headers
+            "You are analyzing an AI coding session transcript",
+            "Extract one global, agent-agnostic skill from the supplied AI coding session material",
+            "从提供的 AI 编程会话材料中提取一个全局可复用",
+            "Draft one reusable command instruction document from the supplied AI coding session material",
+            "根据提供的 AI 编程会话材料起草一份可复用的命令指令文档",
+            "Create an evidence-based daily digest of AI-assisted coding work for ",
+            // v1 legacy Claude Code prompt headers (kept for historical transcripts)
             "You are analyzing a Claude Code session transcript",
             "You are extracting a reusable skill from a Claude Code session",
             "You are analyzing Claude Code sessions from",
@@ -144,7 +150,9 @@ impl ParsedSession {
         // not always first — check the first few user messages.
         if data.user_messages.iter().take(3).any(|m| {
             let trimmed = m.trim_start();
+            let first_line = trimmed.lines().next().unwrap_or("");
             MARKERS.iter().any(|mk| trimmed.starts_with(mk))
+                || first_line.ends_with("的 AI 辅助编程工作生成基于证据的每日摘要。")
                 || crate::ledger::SYNTHETIC_SURVEY_PREFIXES
                     .iter()
                     .any(|mk| trimmed.starts_with(mk))
@@ -981,6 +989,26 @@ mod tests {
         long_pong.user_messages.push("extra 1".to_string());
         long_pong.user_messages.push("extra 2".to_string());
         assert!(!ParsedSession::from_daybook_prompt(&long_pong));
+
+        // Every current Prompts::* template (EN + ZH) must be recognized as internal.
+        use crate::summarizer::Prompts;
+        for prompt in [
+            Prompts::session_summary_with_template(None, "t", "/tmp", None, "en"),
+            Prompts::session_summary_with_template(None, "t", "/tmp", None, "zh"),
+            Prompts::extract_skill_with_template(None, "s", None, "en"),
+            Prompts::extract_skill_with_template(None, "s", None, "zh"),
+            Prompts::extract_command_with_template(None, "s", None, "en"),
+            Prompts::extract_command_with_template(None, "s", None, "zh"),
+            Prompts::daily_summary_with_template(None, "s", "2026-11-03", None, "en"),
+            Prompts::daily_summary_with_template(None, "s", "2026-11-03", None, "zh"),
+        ] {
+            let s = mk(Some("# AGENTS.md instructions"), &prompt);
+            assert!(
+                ParsedSession::from_daybook_prompt(&s.data),
+                "prompt not detected as internal: {}",
+                prompt.lines().next().unwrap_or("")
+            );
+        }
     }
 
     #[test]
