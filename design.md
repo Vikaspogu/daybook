@@ -68,5 +68,12 @@ Daybook uses a dark, tactile, high-contrast operational interface (**"Quiet Prec
 - **5-Minute Daily Brief Mapping**:
   1. **Hero & 4-Tile Telemetry Grid**: Instant 2-second scan of `Shipped vs Review` (Emerald), `Active Spend` (Amber), `Prompt Cache` (Sky Cyan), and `Command Health` (Coral Rose when errors/interrupted > 0, quiet slate when clean).
   2. **Desktop Multi-Column Operational Layout**:
-     - Left/Primary Column: **What Shipped & Why — By Project** + **Pitfalls (`Coral Rose`) & Learnings (`Sky Cyan`) — By Project**.
-     - Right/Secondary Column: **Cost, Cache & Command Health + Next Steps**, **Consolidated Workflow Rules Extracted Today**, and **Sessions** (with 3-up `60px` quick-filter strip and `66px` interactive session control tiles that expand on click to inspect full session markdown).
+     - Left/Primary Column: **What Shipped & Why — By Project** + **Pitfalls (`Coral Rose`) & Learnings (`Sky Cyan`) — By Project** (including `[PITFALL]` and `[LEARNING]` entries from `work`, `review`, and `blocked` sessions).
+     - Right/Secondary Column: **Cost, Cache & Command Health + Next Steps**, **Scoped Reusable Knowledge Cards**, and **Sessions** (with 3-up `60px` quick-filter strip and `66px` interactive session control tiles that expand on click to inspect full session markdown).
+- **Scoped Workflow Knowledge Cards (`v2` Taxonomy)**:
+  1. **Global Reusable Skills (`~/.agents/skills/<name>/SKILL.md` / `~/.claude/skills/<name>/SKILL.md`)**:
+     - Displays `Scope: global-skill` candidates with an Emerald `global-skill` badge, source project badge, imperative summary, structured `Trigger` / numbered `Action` steps / `Verify` / `Evidence` breakdown, and one-click `Copy SKILL.md` + `Copy All SKILL.md` actions.
+  2. **Repository Rules (`<repo>/AGENTS.md`)**:
+     - Groups `Scope: repo-rule` candidates by repository with a per-project header, `Copy for <repo>/AGENTS.md` group button, and per-rule `Copy Rule` button producing copy-ready imperative markdown (`### <Rule Name>` + `When` / `Do` / `Verify`).
+  3. **No Server-Side Install Button**:
+     - Because Daybook runs as a centralized multi-host ledger server, cards provide copy-ready `SKILL.md` and `AGENTS.md` payloads instead of calling a local filesystem install endpoint.
