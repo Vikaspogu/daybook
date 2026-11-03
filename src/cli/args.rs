@@ -144,7 +144,7 @@ pub enum Commands {
         #[arg(long)]
         local: bool,
 
-        /// Which day to list: today, yesterday, all, or YYYY-MM-DD (default: today)
+        /// Which day to list: today, yesterday, all, or YYYY-MM-DD (default: today and yesterday)
         #[arg(long)]
         day: Option<String>,
     },
