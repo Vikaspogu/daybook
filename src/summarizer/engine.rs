@@ -35,6 +35,17 @@ pub struct SummarizerEngine {
     config: Config,
 }
 
+fn resolve_engine<'a>(
+    configured: Option<&'a str>,
+    from_env: Option<&'a str>,
+) -> Result<Option<&'a str>> {
+    let engine = configured.or(from_env.filter(|value| !value.is_empty()));
+    match engine {
+        None | Some("codex" | "claude") => Ok(engine),
+        Some(other) => anyhow::bail!("Invalid summarization engine {other:?}; use codex or claude"),
+    }
+}
+
 impl SummarizerEngine {
     pub fn new(config: Config) -> Self {
         Self { config }
@@ -45,6 +56,24 @@ impl SummarizerEngine {
     /// `codex exec` when claude is not installed (D4: verified noninteractive
     /// in the workspace VMs).
     fn invoke_llm(&self, prompt: &str) -> Result<String> {
+        // Explicit config takes priority over the environment; invalid pins fail.
+        let env_engine = if self.config.summarization.engine.is_some() {
+            None
+        } else {
+            match std::env::var("DAYBOOK_SUMMARIZER_ENGINE") {
+                Ok(value) => Some(value),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(err) => anyhow::bail!("Invalid DAYBOOK_SUMMARIZER_ENGINE: {err}"),
+            }
+        };
+        match resolve_engine(
+            self.config.summarization.engine.as_deref(),
+            env_engine.as_deref(),
+        )? {
+            Some("codex") => return self.invoke_codex(prompt),
+            Some("claude") => return self.invoke_claude(prompt),
+            _ => {}
+        }
         let claude_available = Command::new("claude")
             .arg("--version")
             .stdout(Stdio::null())
@@ -456,6 +485,23 @@ fn extract_markdown_from_response(response: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_engine_resolution() {
+        assert_eq!(resolve_engine(None, None).unwrap(), None);
+        assert_eq!(
+            resolve_engine(Some("codex"), Some("claude")).unwrap(),
+            Some("codex")
+        );
+        assert_eq!(
+            resolve_engine(None, Some("claude")).unwrap(),
+            Some("claude")
+        );
+        assert_eq!(resolve_engine(None, Some("")).unwrap(), None);
+        assert!(resolve_engine(Some("Codex"), None).is_err());
+        assert!(resolve_engine(None, Some("invalid")).is_err());
+        assert!(resolve_engine(Some(""), Some("codex")).is_err());
+    }
 
     #[test]
     fn test_extract_summary_from_markdown() {

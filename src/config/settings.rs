@@ -99,6 +99,11 @@ pub struct SummarizationConfig {
     /// Minutes of inactivity before a transcript is considered "inactive" and eligible for auto-summarization
     #[serde(default = "default_auto_summarize_inactive_minutes")]
     pub auto_summarize_inactive_minutes: u64,
+    /// Pin the summarizer CLI: "codex" or "claude". Unset = auto-detect
+    /// (claude if installed, else codex). For hosts where claude is
+    /// installed but unused (e.g. pi-only machines).
+    #[serde(default)]
+    pub engine: Option<String>,
 }
 
 fn default_summary_language() -> String {
@@ -180,6 +185,7 @@ impl Default for Config {
             summarization: SummarizationConfig {
                 model: "haiku".into(),
                 max_tokens: 4096,
+                engine: None,
                 enable_daily_summary: true,
                 enable_extraction_hints: true,
                 digest_time: "06:00".into(),
@@ -289,6 +295,14 @@ mod tests {
         let config = Config::default();
         assert!(config.storage.path.to_string_lossy().contains(".daybook"));
         assert_eq!(config.summarization.model, "haiku");
+    }
+
+    #[test]
+    fn test_summarization_engine_config_roundtrip() {
+        let mut config = Config::default();
+        config.summarization.engine = Some("codex".into());
+        let loaded: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(loaded.summarization.engine.as_deref(), Some("codex"));
     }
 
     #[test]
