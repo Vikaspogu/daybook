@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
 
+pub mod board;
+pub use board::*;
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct UsageRecord {
     #[serde(default)]
@@ -286,6 +288,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     UNIQUE(session_id, machine)
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_date ON sessions(journal_date);
+CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
 CREATE TABLE IF NOT EXISTS tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     label TEXT NOT NULL UNIQUE,
@@ -294,6 +297,73 @@ CREATE TABLE IF NOT EXISTS tokens (
     last_used_at TEXT,
     revoked INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS board_agents (
+    project TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    machine TEXT NOT NULL,
+    runtime TEXT NOT NULL,
+    cwd TEXT NOT NULL DEFAULT '',
+    branch TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    current_task TEXT,
+    last_seen_utc TEXT NOT NULL,
+    last_seen_epoch INTEGER NOT NULL,
+    PRIMARY KEY (project, agent)
+);
+CREATE INDEX IF NOT EXISTS idx_board_agents_project_seen
+    ON board_agents(project, last_seen_epoch DESC);
+CREATE TABLE IF NOT EXISTS board_locks (
+    id TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    machine TEXT NOT NULL,
+    paths_json TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    auto INTEGER NOT NULL DEFAULT 0,
+    claimed_utc TEXT NOT NULL,
+    expires_utc TEXT NOT NULL,
+    expires_epoch INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_board_locks_project_expires
+    ON board_locks(project, expires_epoch);
+CREATE INDEX IF NOT EXISTS idx_board_locks_expires
+    ON board_locks(expires_epoch);
+CREATE INDEX IF NOT EXISTS idx_board_locks_project_agent_auto
+    ON board_locks(project, agent, auto);
+CREATE TABLE IF NOT EXISTS board_tasks (
+    project TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    priority TEXT NOT NULL DEFAULT 'medium',
+    agent TEXT,
+    machine TEXT,
+    branch TEXT,
+    note TEXT NOT NULL DEFAULT '',
+    pr_url TEXT,
+    created_utc TEXT NOT NULL,
+    updated_utc TEXT NOT NULL,
+    updated_epoch INTEGER NOT NULL,
+    PRIMARY KEY (project, task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_board_tasks_project_status
+    ON board_tasks(project, status, updated_epoch DESC);
+CREATE TABLE IF NOT EXISTS board_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT 'general',
+    agent TEXT NOT NULL,
+    machine TEXT NOT NULL,
+    body TEXT NOT NULL,
+    mentions_json TEXT NOT NULL DEFAULT '[]',
+    parent_id INTEGER,
+    created_utc TEXT NOT NULL,
+    created_epoch INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_board_messages_project_id
+    ON board_messages(project, id DESC);
+CREATE INDEX IF NOT EXISTS idx_board_messages_project_channel_id
+    ON board_messages(project, channel, id DESC);
 ";
 
 /// US Eastern (America/New_York) offset in seconds at `utc`:

@@ -27,6 +27,36 @@ pub async fn handle() -> Result<()> {
             return Ok(()); // Don't block session exit
         }
     };
+    // Release auto-claimed board locks and mark agent idle on SessionEnd
+    if let Ok(client) = crate::board::client::BoardClient::from_config(&config, false) {
+        let cwd = if input.cwd.as_os_str().is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        } else {
+            input.cwd.clone()
+        };
+        let identity = crate::board::identity::resolve_board_identity(&cwd, None, None);
+        let _ = client
+            .release_locks(&crate::ledger::BoardReleaseLocksReq {
+                project: identity.project.clone(),
+                agent: identity.agent.clone(),
+                lock_id: None,
+                all: true,
+                auto_only: true,
+                force: false,
+            })
+            .await;
+        let _ = client
+            .heartbeat(&crate::ledger::BoardHeartbeatReq {
+                project: identity.project,
+                agent: identity.agent,
+                runtime: identity.runtime,
+                branch: identity.branch,
+                cwd: identity.worktree_root.to_string_lossy().to_string(),
+                status: Some("idle".to_string()),
+                current_task: None,
+            })
+            .await;
+    }
 
     // Archive on all session end reasons to collect complete history
     // Reasons: "prompt_input_exit" (Ctrl+D), "logout", "clear", "other"

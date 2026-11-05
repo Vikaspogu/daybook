@@ -1,5 +1,6 @@
 mod archive;
 mod auto_summarize;
+mod board;
 mod cli;
 mod config;
 mod hooks;
@@ -25,10 +26,14 @@ async fn main() -> Result<()> {
             storage_path,
             yes,
             haiku,
-        } => cli::commands::init::run(storage_path, !yes, haiku).await,
+            board,
+        } => cli::commands::init::run(storage_path, !yes, haiku, board).await,
+        Commands::Board(args) => cli::commands::board::run(args).await,
         Commands::Hook { hook_type } => match hook_type {
             HookType::SessionStart => hooks::session_start::handle().await,
             HookType::SessionEnd => hooks::session_end::handle().await,
+            HookType::PreToolUse => hooks::pre_tool_use::handle().await,
+            HookType::PostToolUse => hooks::post_tool_use::handle().await,
         },
         Commands::View {
             date,

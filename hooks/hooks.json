@@ -1,12 +1,34 @@
 {
-  "description": "Daily Context Archive hooks for automatic session archiving",
+  "description": "Daybook hooks for automatic session archiving and multi-agent worktree coordination",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "daily hook session-start"
+            "command": "daybook hook session-start"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|replace|replace_match|insert",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "daybook hook pre-tool-use"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|replace|replace_match|insert",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "daybook hook post-tool-use"
           }
         ]
       }
@@ -16,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "daily hook session-end"
+            "command": "daybook hook session-end"
           }
         ]
       }

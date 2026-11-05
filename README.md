@@ -104,6 +104,8 @@ daybook review-skills --delete 2026-11-01/validate-investigation-evidence
 | `daybook config [--show \| -i]` | Show or interactively update configuration |
 | `daybook insights [--days 30]` | Generate trend analysis from local archives |
 | `daybook jobs <list\|log\|kill\|cleanup>` | Inspect or manage background summarization jobs |
+| `daybook board <status\|claim\|touch\|check\|release\|post\|messages\|task\|heartbeat\|mcp>` | Multi-agent worktree coordination board (shared file/glob locks, presence, tasks, `@mention` channels, and MCP stdio server) |
+| `daybook init --board` | Register `PreToolUse` / `PostToolUse` lock hooks in `~/.claude/settings.json` and append Agent Coordination Board protocol rules to `AGENTS.md` |
 
 ## Central Server & Multi-Host Configuration
 

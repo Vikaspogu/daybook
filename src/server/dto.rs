@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 /// Generic API response wrapper
-#[derive(Serialize)]
-pub struct ApiResponse<T: Serialize> {
+#[derive(Serialize, Deserialize)]
+pub struct ApiResponse<T> {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<T>,
@@ -414,4 +414,27 @@ pub struct UsageSummaryDto {
     pub total_sessions: usize,
     pub model_distribution: Vec<ModelUsageCountDto>,
     pub daily_usage: Vec<DailyUsageDto>,
+}
+
+// ---------------------------------------------------------------------------
+// Agent Coordination Board DTOs (`/api/board/*`)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct BoardStatusQuery {
+    pub project: Option<String>,
+    pub agent: Option<String>,
+    pub since_id: Option<i64>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct BoardCheckQuery {
+    pub project: String,
+    pub path: String,
+    pub agent: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct BoardReleaseResponseDto {
+    pub released: usize,
 }

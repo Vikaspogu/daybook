@@ -1,3 +1,4 @@
+pub mod board;
 pub mod config;
 pub mod digest;
 pub mod extract;

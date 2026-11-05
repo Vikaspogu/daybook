@@ -347,6 +347,83 @@ export interface InstallCardResponse {
   message: string
 }
 
+export interface BoardAgent {
+  project: string
+  agent: string
+  machine: string
+  runtime: string
+  cwd: string
+  branch: string
+  status: string
+  current_task?: string | null
+  last_seen_utc: string
+  last_seen_epoch: number
+}
+
+export interface BoardLock {
+  id: string
+  project: string
+  agent: string
+  machine: string
+  paths: string[]
+  note: string
+  auto: boolean
+  claimed_utc: string
+  expires_utc: string
+  expires_epoch: number
+}
+
+export interface BoardTask {
+  project: string
+  id: string
+  title: string
+  status: string
+  priority: string
+  agent?: string | null
+  machine?: string | null
+  branch?: string | null
+  note: string
+  pr_url?: string | null
+  created_utc: string
+  updated_utc: string
+  updated_epoch: number
+}
+
+export interface BoardMessage {
+  id: number
+  project: string
+  channel: string
+  agent: string
+  machine: string
+  body: string
+  mentions: string[]
+  parent_id?: number | null
+  created_utc: string
+  created_epoch: number
+}
+
+export interface BoardStatusData {
+  projects: string[]
+  project?: string | null
+  agents: BoardAgent[]
+  locks: BoardLock[]
+  tasks: BoardTask[]
+  messages: BoardMessage[]
+  unread_mentions: BoardMessage[]
+  next_since_id: number
+}
+
+export interface BoardClaimLocksResponse {
+  lock: BoardLock
+  conflicts: BoardLock[]
+}
+
+export interface BoardClaimTaskResponse {
+  ok: boolean
+  held_by?: string | null
+  task: BoardTask
+}
+
 interface ApiResponse<T> {
   success: boolean
   data?: T
@@ -460,6 +537,88 @@ export function useApi() {
     [request]
   )
 
+  const fetchBoardStatus = useCallback(
+    (project?: string, agent?: string, sinceId?: number) => {
+      const params = new URLSearchParams()
+      if (project) params.set('project', project)
+      if (agent) params.set('agent', agent)
+      if (sinceId !== undefined) params.set('since_id', String(sinceId))
+      const qs = params.toString()
+      return request<BoardStatusData>(`/board/status${qs ? `?${qs}` : ''}`)
+    },
+    [request]
+  )
+
+  const postBoardMessage = useCallback(
+    (payload: { project: string; channel: string; agent: string; body: string; parent_id?: number }) =>
+      request<BoardMessage>('/board/messages', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    [request]
+  )
+
+  const claimBoardLocks = useCallback(
+    (payload: { project: string; agent: string; paths: string[]; note?: string; ttl_minutes?: number }) =>
+      request<BoardClaimLocksResponse>('/board/locks/claim', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    [request]
+  )
+
+  const releaseBoardLocks = useCallback(
+    (payload: {
+      project: string
+      agent: string
+      lock_id?: string
+      all?: boolean
+      auto_only?: boolean
+      force?: boolean
+    }) =>
+      request<{ released: number }>('/board/locks/release', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    [request]
+  )
+
+  const claimBoardTask = useCallback(
+    (payload: {
+      project: string
+      task_id: string
+      title?: string
+      priority?: string
+      agent: string
+      branch?: string
+      note?: string
+      force?: boolean
+    }) =>
+      request<BoardClaimTaskResponse>('/board/tasks/claim', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    [request]
+  )
+
+  const updateBoardTask = useCallback(
+    (payload: {
+      project: string
+      task_id: string
+      agent: string
+      status: string
+      note?: string
+      pr_url?: string
+      release_locks?: boolean
+      force?: boolean
+    }) =>
+      request<BoardTask>('/board/tasks/update', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    [request]
+  )
+
   return {
     loading,
     error,
@@ -474,5 +633,11 @@ export function useApi() {
     fetchConversation,
     fetchDateInsights,
     installCard,
+    fetchBoardStatus,
+    postBoardMessage,
+    claimBoardLocks,
+    releaseBoardLocks,
+    claimBoardTask,
+    updateBoardTask,
   }
 }
