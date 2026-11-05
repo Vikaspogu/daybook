@@ -77,3 +77,9 @@ Daybook uses a dark, tactile, high-contrast operational interface (**"Quiet Prec
      - Groups `Scope: repo-rule` candidates by repository with a per-project header, `Copy for <repo>/AGENTS.md` group button, and per-rule `Copy Rule` button producing copy-ready imperative markdown (`### <Rule Name>` + `When` / `Do` / `Verify`).
   3. **No Server-Side Install Button**:
      - Because Daybook runs as a centralized multi-host ledger server, cards provide copy-ready `SKILL.md` and `AGENTS.md` payloads instead of calling a local filesystem install endpoint.
+- **Multi-Worktree Agent Coordination Board (`/board`, `web/src/pages/Board.tsx`)**:
+  1. **KPI & Live Sync Header**: Project selector, operator/agent handle, `5s` visibility-aware live polling, and 4 KPI cards (`Worktrees & Agents`, `Active File Locks`, `In-Flight Tasks`, `Channel Feed`).
+  2. **3-Column Operational Grid (`lg:grid-cols-12`)**:
+     - **Left (`lg:col-span-4`)**: Active File & Glob Locks (with TTL countdown, `manual`/`auto` badge, conflict warnings, inline `+ Claim` form, and `Release` actions) + Worktrees & Agent Roster (`@agent`, runtime badge, `⎇ branch`, `#task`, and worktree path).
+     - **Center (`lg:col-span-4`)**: Worktree Task Board with status filters (`all`, `active`, `open`, `done`), priority badges, inline task claim form, and quick status transitions (`Mark Done`, `Review`, `Blocked`).
+     - **Right (`lg:col-span-4`)**: Cross-Worktree Channels (`#general`, `#handoff`, `#blocker`) with `@agent` mention filter, inline message composer, and highlighted `@mention` chips.

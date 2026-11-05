@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -242,7 +242,14 @@ pub enum Commands {
         /// Use haiku model for summarization (default: sonnet)
         #[arg(long)]
         haiku: bool,
+
+        /// Configure agent coordination board (.mcp.json + hook snippets)
+        #[arg(long)]
+        board: bool,
     },
+
+    /// Multi-agent worktree coordination board (locks, tasks, messages, MCP)
+    Board(BoardArgs),
 
     /// Show or update configuration
     Config {
@@ -321,4 +328,236 @@ pub enum HookType {
 
     /// SessionEnd hook handler
     SessionEnd,
+
+    /// PreToolUse hook handler (advisory board lock check before file edits)
+    PreToolUse,
+
+    /// PostToolUse hook handler (auto-lock touch + unread @mention alert after file edits)
+    PostToolUse,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct BoardArgs {
+    /// Override project name (defaults to git parent repository name)
+    #[arg(long, global = true)]
+    pub project: Option<String>,
+
+    /// Override agent handle (defaults to DAYBOOK_AGENT or <runtime>-<worktree>)
+    #[arg(long, global = true)]
+    pub agent: Option<String>,
+
+    /// Output machine-readable JSON
+    #[arg(long, global = true)]
+    pub json: bool,
+
+    /// Force local SQLite ledger (~/.daybook/ledger.db3) instead of remote push.url
+    #[arg(long, global = true)]
+    pub local: bool,
+
+    #[command(subcommand)]
+    pub action: Option<BoardAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum BoardAction {
+    /// Show active agents, file locks, tasks, unread @mentions, and recent messages
+    Status {
+        /// Only show messages/mentions after this message id
+        #[arg(long)]
+        since_id: Option<i64>,
+    },
+
+    /// Claim advisory file or glob locks
+    Claim {
+        /// Repo-relative file paths or globs (e.g. "src/server/**")
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<String>,
+
+        /// Note explaining planned changes
+        #[arg(short = 'm', long)]
+        note: Option<String>,
+
+        /// Lock TTL in minutes (1..=240, default 30)
+        #[arg(long, default_value_t = 30)]
+        ttl: u32,
+    },
+
+    /// Auto-claim or refresh a single file lock (used by PostToolUse hooks)
+    Touch {
+        /// File path edited
+        path: String,
+
+        /// Lock TTL in minutes (1..=240, default 30)
+        #[arg(long, default_value_t = 30)]
+        ttl: u32,
+    },
+
+    /// Check if a file path is locked by another agent
+    Check {
+        /// File path to check
+        path: String,
+
+        /// Exit with code 2 when locked by another agent
+        #[arg(long)]
+        strict: bool,
+    },
+
+    /// Release locks held by this agent
+    Release {
+        /// Specific lock id to release
+        #[arg(long)]
+        id: Option<String>,
+
+        /// Release all locks held by this agent
+        #[arg(long)]
+        all: bool,
+
+        /// Release only auto-claimed locks
+        #[arg(long)]
+        auto_only: bool,
+
+        /// Force release another agent's lock on the same machine
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Post a message to the project board
+    Post {
+        /// Message body (supports @agent-handle mentions)
+        body: String,
+
+        /// Channel: general, handoff, blocker, or review
+        #[arg(long, default_value = "general")]
+        channel: String,
+
+        /// Parent message id for threaded replies
+        #[arg(long)]
+        reply_to: Option<i64>,
+    },
+
+    /// List board messages
+    Messages {
+        /// Filter by channel (general, handoff, blocker, review)
+        #[arg(long)]
+        channel: Option<String>,
+
+        /// Filter by @mentioned agent handle
+        #[arg(long)]
+        mention: Option<String>,
+
+        /// Return messages with id > since_id
+        #[arg(long)]
+        since_id: Option<i64>,
+
+        /// Max messages to return (1..=200)
+        #[arg(short = 'n', long, default_value_t = 50)]
+        limit: usize,
+    },
+
+    /// Manage shared tasks on the project board
+    Task {
+        #[command(subcommand)]
+        action: BoardTaskAction,
+    },
+
+    /// Record agent heartbeat and current branch/worktree status
+    Heartbeat {
+        /// Status: active, idle, blocked, or done
+        #[arg(long, default_value = "active")]
+        status: String,
+
+        /// Current task id or summary
+        #[arg(long)]
+        task: Option<String>,
+    },
+
+    /// Start the MCP JSON-RPC 2.0 stdio server for Claude Code, Codex, Pi, and T3 Code
+    Mcp,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum BoardTaskAction {
+    /// Create or claim a task
+    Claim {
+        /// Task identifier (e.g. "AUTH-1")
+        id: String,
+
+        /// Human-readable task title (defaults to id on creation)
+        #[arg(long)]
+        title: Option<String>,
+
+        /// Priority: low, medium, high, critical
+        #[arg(long)]
+        priority: Option<String>,
+
+        /// Override git branch name (defaults to current worktree branch)
+        #[arg(long)]
+        branch: Option<String>,
+
+        /// Status note
+        #[arg(short = 'm', long)]
+        note: Option<String>,
+
+        /// Force takeover if already claimed on this machine
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Update task status, note, or PR URL
+    Update {
+        /// Task identifier
+        id: String,
+
+        /// Status: open, claimed, review, blocked, done
+        #[arg(long)]
+        status: String,
+
+        /// Status note
+        #[arg(short = 'm', long)]
+        note: Option<String>,
+
+        /// Pull request URL (http:// or https://)
+        #[arg(long)]
+        pr: Option<String>,
+
+        /// Release locks held by this agent
+        #[arg(long)]
+        release_locks: Option<bool>,
+
+        /// Force update on this machine
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Mark a task as done and release agent locks
+    Done {
+        /// Task identifier
+        id: String,
+
+        /// Completion note
+        #[arg(short = 'm', long)]
+        note: Option<String>,
+
+        /// Pull request URL
+        #[arg(long)]
+        pr: Option<String>,
+
+        /// Release locks held by this agent (default: true)
+        #[arg(long)]
+        release_locks: bool,
+    },
+
+    /// List tasks on the project board
+    List,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_debug_assert_has_no_flag_collisions() {
+        Cli::command().debug_assert();
+    }
 }

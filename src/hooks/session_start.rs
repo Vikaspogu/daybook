@@ -19,8 +19,15 @@ pub async fn handle() -> Result<()> {
 
     // Try to read hook input, but don't fail if not available
     // (allows manual testing without stdin)
-    let _input = read_hook_input().ok();
-
+    let input = read_hook_input().ok();
+    let cwd = input
+        .as_ref()
+        .map(|i| i.cwd.clone())
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
+    sync_board_session_start(&config, &cwd).await;
     let today = Local::now().format("%Y-%m-%d").to_string();
     let daily_dir = config.today_dir();
 
@@ -78,6 +85,56 @@ _No sessions archived yet._
 
     // Exit with 0 to allow session to continue
     Ok(())
+}
+
+async fn sync_board_session_start(config: &crate::config::Config, cwd: &std::path::Path) {
+    let Ok(client) = crate::board::client::BoardClient::from_config(config, false) else {
+        return;
+    };
+    let identity = crate::board::identity::resolve_board_identity(cwd, None, None);
+    let _ = client
+        .heartbeat(&crate::ledger::BoardHeartbeatReq {
+            project: identity.project.clone(),
+            agent: identity.agent.clone(),
+            runtime: identity.runtime.clone(),
+            branch: identity.branch.clone(),
+            cwd: identity.worktree_root.to_string_lossy().to_string(),
+            status: Some("active".to_string()),
+            current_task: None,
+        })
+        .await;
+
+    if let Ok(snap) = client
+        .status(Some(&identity.project), Some(&identity.agent), None)
+        .await
+    {
+        let other_locks: Vec<_> = snap
+            .locks
+            .iter()
+            .filter(|l| l.agent != identity.agent)
+            .collect();
+        if !other_locks.is_empty() || !snap.unread_mentions.is_empty() {
+            eprintln!(
+                "[daybook board] Project '{}' coordination status (you: @{}):",
+                identity.project, identity.agent
+            );
+            for l in other_locks.iter().take(5) {
+                eprintln!(
+                    "[daybook board]   LOCK [{}] @{} -> {} ({})",
+                    l.id,
+                    l.agent,
+                    l.paths.join(", "),
+                    l.note
+                );
+            }
+            for m in snap.unread_mentions.iter().take(5) {
+                eprintln!(
+                    "[daybook board]   MENTION #{} [{}] @{}: {}",
+                    m.id, m.channel, m.agent, m.body
+                );
+            }
+        }
+    }
 }
 
 /// Check if we should auto-digest yesterday's sessions

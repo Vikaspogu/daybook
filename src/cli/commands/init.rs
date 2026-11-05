@@ -7,7 +7,12 @@ use crate::archive::ArchiveManager;
 use crate::config::{get_config_path, load_config, save_config, Config};
 
 /// Initialize the daily archive system
-pub async fn run(storage_path: Option<PathBuf>, interactive: bool, use_haiku: bool) -> Result<()> {
+pub async fn run(
+    storage_path: Option<PathBuf>,
+    interactive: bool,
+    use_haiku: bool,
+    configure_board: bool,
+) -> Result<()> {
     println!("[daybook] Initializing Daily Context Archive System...");
 
     // Load or create config
@@ -25,7 +30,7 @@ pub async fn run(storage_path: Option<PathBuf>, interactive: bool, use_haiku: bo
     let final_path = if let Some(path) = storage_path {
         // Direct path specified
         Some(expand_path(&path))
-    } else if interactive {
+    } else if interactive && !configure_board {
         // Interactive mode with fuzzy search
         select_directory_interactive()?
     } else {
@@ -39,7 +44,7 @@ pub async fn run(storage_path: Option<PathBuf>, interactive: bool, use_haiku: bo
     }
 
     // Configure language and digest settings in interactive mode
-    if interactive {
+    if interactive && !configure_board {
         configure_language_interactive(&mut config)?;
         configure_digest_interactive(&mut config)?;
     }
@@ -61,9 +66,52 @@ pub async fn run(storage_path: Option<PathBuf>, interactive: bool, use_haiku: bo
     let today_dir = manager.ensure_today_dir()?;
     println!("[daybook] Today's archive: {}", today_dir.display());
 
+    if configure_board {
+        configure_board_mcp_and_hooks()?;
+    }
+
     println!();
     println!("[daybook] Initialization complete!");
 
+    Ok(())
+}
+
+fn configure_board_mcp_and_hooks() -> Result<()> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mcp_path = cwd.join(".mcp.json");
+    let mut root: serde_json::Value = if mcp_path.exists() {
+        let raw = fs::read_to_string(&mcp_path).unwrap_or_default();
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    if !root.is_object() {
+        root = serde_json::json!({});
+    }
+    let servers = root
+        .as_object_mut()
+        .unwrap()
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(map) = servers.as_object_mut() {
+        map.insert(
+            "daybook-board".to_string(),
+            serde_json::json!({
+                "command": "daybook",
+                "args": ["board", "mcp"]
+            }),
+        );
+    }
+    fs::write(&mcp_path, serde_json::to_string_pretty(&root)? + "\n")?;
+    println!(
+        "[daybook] Registered 'daybook-board' MCP server in {}",
+        mcp_path.display()
+    );
+    println!("[daybook] Codex / Pi / T3 Code MCP command: daybook board mcp");
+    println!(
+        "[daybook] Claude Code hooks available in hooks/hooks.json (daybook hook session-start | pre-tool-use | post-tool-use | session-end)"
+    );
     Ok(())
 }
 

@@ -69,7 +69,7 @@ impl SessionMeta {
 
 /// Walk up from `start` to the nearest directory holding `.git`.
 /// A `.git` file (linked worktree) resolves through its `gitdir:` pointer.
-fn resolve_git_project(start: &Path) -> Option<String> {
+pub(crate) fn resolve_git_project(start: &Path) -> Option<String> {
     let mut dir = Some(start);
     while let Some(d) = dir {
         let git = d.join(".git");
