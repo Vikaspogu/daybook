@@ -333,7 +333,6 @@ fn prune_board_tx(tx: &Transaction<'_>, project: &str, now_epoch: i64) -> Result
         "DELETE FROM board_locks WHERE expires_epoch <= ?1",
         params![now_epoch],
     )?;
-
     // 2. Check distinct project cap if `project` is brand new
     let known_in_board: bool = tx.query_row(
         "SELECT EXISTS(
@@ -622,8 +621,8 @@ impl Ledger {
                 UNION SELECT project FROM board_locks
                 UNION SELECT project FROM board_tasks
                 UNION SELECT project FROM board_messages
-                UNION SELECT project FROM sessions WHERE project != '-' AND project != 'scratch'
-            ) WHERE project != '' ORDER BY project ASC",
+                UNION SELECT project FROM sessions WHERE project != '' AND project != '-' AND project != 'scratch'
+            ) WHERE project != '' AND LOWER(project) NOT IN ('agent', 'all') ORDER BY project ASC",
         )?;
         let projects = stmt
             .query_map([], |r| r.get::<_, String>(0))?
@@ -632,6 +631,7 @@ impl Ledger {
     }
 
     /// Pure read-only status snapshot (no SQLite writes).
+    /// Passing `Some("all")` or `Some("*")` for `project` returns active agents, locks, tasks, and messages across all projects.
     pub fn board_status(
         &self,
         project: Option<&str>,
@@ -643,9 +643,17 @@ impl Ledger {
             None => None,
         };
         let projects = self.board_projects()?;
-        let target_project = match project.map(str::trim).filter(|s| !s.is_empty()) {
-            Some(p) => Some(validate_identifier(p, "project")?),
-            None => projects.first().cloned(),
+        let is_all_projects = matches!(
+            project.map(str::trim),
+            Some(p) if p.eq_ignore_ascii_case("all") || p == "*"
+        );
+        let target_project = if is_all_projects {
+            Some("all".to_string())
+        } else {
+            match project.map(str::trim).filter(|s| !s.is_empty()) {
+                Some(p) => Some(validate_identifier(p, "project")?),
+                None => projects.first().cloned(),
+            }
         };
 
         let Some(proj) = target_project else {
@@ -660,112 +668,208 @@ impl Ledger {
                 next_since_id: since_id.unwrap_or(0),
             });
         };
-
         let now_epoch = chrono::Utc::now().timestamp();
         let conn = self.conn.lock().unwrap();
 
-        let mut agent_stmt = conn.prepare(
-            "SELECT project, agent, machine, runtime, cwd, branch, status, current_task, last_seen_utc, last_seen_epoch
-             FROM board_agents
-             WHERE project = ?1
-             ORDER BY last_seen_epoch DESC, agent ASC",
-        )?;
-        let agents = agent_stmt
-            .query_map(params![proj], |r| {
-                Ok(BoardAgentRow {
-                    project: r.get(0)?,
-                    agent: r.get(1)?,
-                    machine: r.get(2)?,
-                    runtime: r.get(3)?,
-                    cwd: r.get(4)?,
-                    branch: r.get(5)?,
-                    status: r.get(6)?,
-                    current_task: r.get(7)?,
-                    last_seen_utc: r.get(8)?,
-                    last_seen_epoch: r.get(9)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let map_agent = |r: &rusqlite::Row<'_>| -> rusqlite::Result<BoardAgentRow> {
+            Ok(BoardAgentRow {
+                project: r.get(0)?,
+                agent: r.get(1)?,
+                machine: r.get(2)?,
+                runtime: r.get(3)?,
+                cwd: r.get(4)?,
+                branch: r.get(5)?,
+                status: r.get(6)?,
+                current_task: r.get(7)?,
+                last_seen_utc: r.get(8)?,
+                last_seen_epoch: r.get(9)?,
+            })
+        };
+        let agents = if is_all_projects {
+            let mut stmt = conn.prepare(
+                "SELECT project, agent, machine, runtime, cwd, branch, status, current_task, last_seen_utc, last_seen_epoch
+                 FROM board_agents
+                 WHERE LOWER(project) NOT IN ('agent', 'all')
+                 ORDER BY last_seen_epoch DESC, project ASC, agent ASC",
+            )?;
+            let rows = stmt
+                .query_map([], map_agent)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT project, agent, machine, runtime, cwd, branch, status, current_task, last_seen_utc, last_seen_epoch
+                 FROM board_agents
+                 WHERE project = ?1
+                 ORDER BY last_seen_epoch DESC, agent ASC",
+            )?;
+            let rows = stmt
+                .query_map(params![proj], map_agent)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
 
-        let locks = query_active_locks_conn(&conn, &proj, now_epoch)?;
+        let locks = if !is_all_projects {
+            query_active_locks_conn(&conn, &proj, now_epoch)?
+        } else {
+            let mut l_stmt = conn.prepare(
+                "SELECT id, project, agent, machine, paths_json, note, auto, claimed_utc, expires_utc, expires_epoch
+                 FROM board_locks
+                 WHERE expires_epoch > ?1 AND LOWER(project) NOT IN ('agent', 'all')
+                 ORDER BY auto ASC, expires_epoch DESC, id ASC",
+            )?;
+            let rows = l_stmt
+                .query_map(params![now_epoch], |r| {
+                    let paths_s: String = r.get(4)?;
+                    let paths: Vec<String> = serde_json::from_str(&paths_s).unwrap_or_default();
+                    let auto_i: i64 = r.get(6)?;
+                    Ok(BoardLockRow {
+                        id: r.get(0)?,
+                        project: r.get(1)?,
+                        agent: r.get(2)?,
+                        machine: r.get(3)?,
+                        paths,
+                        note: r.get(5)?,
+                        auto: auto_i != 0,
+                        claimed_utc: r.get(7)?,
+                        expires_utc: r.get(8)?,
+                        expires_epoch: r.get(9)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
 
-        let mut task_stmt = conn.prepare(
-            "SELECT project, task_id, title, status, priority, agent, machine, branch, note, pr_url,
-                    created_utc, updated_utc, updated_epoch
-             FROM board_tasks
-             WHERE project = ?1
-             ORDER BY CASE status
-                 WHEN 'blocked' THEN 0
-                 WHEN 'claimed' THEN 1
-                 WHEN 'review' THEN 2
-                 WHEN 'open' THEN 3
-                 ELSE 4
-             END, updated_epoch DESC, task_id ASC",
-        )?;
-        let tasks = task_stmt
-            .query_map(params![proj], |r| {
-                Ok(BoardTaskRow {
-                    project: r.get(0)?,
-                    task_id: r.get(1)?,
-                    title: r.get(2)?,
-                    status: r.get(3)?,
-                    priority: r.get(4)?,
-                    agent: r.get(5)?,
-                    machine: r.get(6)?,
-                    branch: r.get(7)?,
-                    note: r.get(8)?,
-                    pr_url: r.get(9)?,
-                    created_utc: r.get(10)?,
-                    updated_utc: r.get(11)?,
-                    updated_epoch: r.get(12)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let map_task = |r: &rusqlite::Row<'_>| -> rusqlite::Result<BoardTaskRow> {
+            Ok(BoardTaskRow {
+                project: r.get(0)?,
+                task_id: r.get(1)?,
+                title: r.get(2)?,
+                status: r.get(3)?,
+                priority: r.get(4)?,
+                agent: r.get(5)?,
+                machine: r.get(6)?,
+                branch: r.get(7)?,
+                note: r.get(8)?,
+                pr_url: r.get(9)?,
+                created_utc: r.get(10)?,
+                updated_utc: r.get(11)?,
+                updated_epoch: r.get(12)?,
+            })
+        };
+        let tasks = if is_all_projects {
+            let mut stmt = conn.prepare(
+                "SELECT project, task_id, title, status, priority, agent, machine, branch, note, pr_url,
+                        created_utc, updated_utc, updated_epoch
+                 FROM board_tasks
+                 WHERE LOWER(project) NOT IN ('agent', 'all')
+                 ORDER BY CASE status
+                     WHEN 'blocked' THEN 0
+                     WHEN 'claimed' THEN 1
+                     WHEN 'review' THEN 2
+                     WHEN 'open' THEN 3
+                     ELSE 4
+                 END, updated_epoch DESC, task_id ASC",
+            )?;
+            let rows = stmt
+                .query_map([], map_task)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT project, task_id, title, status, priority, agent, machine, branch, note, pr_url,
+                        created_utc, updated_utc, updated_epoch
+                 FROM board_tasks
+                 WHERE project = ?1
+                 ORDER BY CASE status
+                     WHEN 'blocked' THEN 0
+                     WHEN 'claimed' THEN 1
+                     WHEN 'review' THEN 2
+                     WHEN 'open' THEN 3
+                     ELSE 4
+                 END, updated_epoch DESC, task_id ASC",
+            )?;
+            let rows = stmt
+                .query_map(params![proj], map_task)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
 
         let floor_id = since_id.unwrap_or(0);
-        let msg_sql = if floor_id > 0 {
-            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
-             FROM board_messages
-             WHERE project = ?1 AND id > ?2
-             ORDER BY id ASC
-             LIMIT 50"
-        } else {
-            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
-             FROM board_messages
-             WHERE project = ?1 AND id > ?2
-             ORDER BY id DESC
-             LIMIT 50"
+        let map_msg = |r: &rusqlite::Row<'_>| -> rusqlite::Result<BoardMessageRow> {
+            let mentions_s: String = r.get(6)?;
+            let mentions: Vec<String> = serde_json::from_str(&mentions_s).unwrap_or_default();
+            Ok(BoardMessageRow {
+                id: r.get(0)?,
+                project: r.get(1)?,
+                channel: r.get(2)?,
+                agent: r.get(3)?,
+                machine: r.get(4)?,
+                body: r.get(5)?,
+                mentions,
+                parent_id: r.get(7)?,
+                created_utc: r.get(8)?,
+                created_epoch: r.get(9)?,
+            })
         };
-        let mut msg_stmt = conn.prepare(msg_sql)?;
-        let mut messages = msg_stmt
-            .query_map(params![proj, floor_id], |r| {
-                let mentions_s: String = r.get(6)?;
-                let mentions: Vec<String> = serde_json::from_str(&mentions_s).unwrap_or_default();
-                Ok(BoardMessageRow {
-                    id: r.get(0)?,
-                    project: r.get(1)?,
-                    channel: r.get(2)?,
-                    agent: r.get(3)?,
-                    machine: r.get(4)?,
-                    body: r.get(5)?,
-                    mentions,
-                    parent_id: r.get(7)?,
-                    created_utc: r.get(8)?,
-                    created_epoch: r.get(9)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut messages = if is_all_projects {
+            let sql = if floor_id > 0 {
+                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
+                 FROM board_messages
+                 WHERE LOWER(project) NOT IN ('agent', 'all') AND id > ?1
+                 ORDER BY id ASC
+                 LIMIT 50"
+            } else {
+                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
+                 FROM board_messages
+                 WHERE LOWER(project) NOT IN ('agent', 'all') AND id > ?1
+                 ORDER BY id DESC
+                 LIMIT 50"
+            };
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt
+                .query_map(params![floor_id], map_msg)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        } else {
+            let sql = if floor_id > 0 {
+                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
+                 FROM board_messages
+                 WHERE project = ?1 AND id > ?2
+                 ORDER BY id ASC
+                 LIMIT 50"
+            } else {
+                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
+                 FROM board_messages
+                 WHERE project = ?1 AND id > ?2
+                 ORDER BY id DESC
+                 LIMIT 50"
+            };
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt
+                .query_map(params![proj, floor_id], map_msg)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
         if floor_id == 0 {
             messages.reverse();
         }
 
-        let max_id: i64 = conn
-            .query_row(
+        let max_id: i64 = if is_all_projects {
+            conn.query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM board_messages WHERE LOWER(project) NOT IN ('agent', 'all')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
+        } else {
+            conn.query_row(
                 "SELECT COALESCE(MAX(id), 0) FROM board_messages WHERE project = ?1",
                 params![proj],
                 |r| r.get(0),
             )
-            .unwrap_or(0);
+            .unwrap_or(0)
+        };
         let next_since_id = if floor_id > 0 && messages.len() == 50 {
             messages.last().map(|m| m.id).unwrap_or(floor_id)
         } else {
@@ -774,31 +878,29 @@ impl Ledger {
 
         let unread_mentions = if let Some(needle) = validated_agent {
             let like_pat = format!("%\"{needle}\"%");
-            let mut mention_stmt = conn.prepare(
-                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
-                 FROM board_messages
-                 WHERE project = ?1 AND id > ?2 AND agent != ?3 AND mentions_json LIKE ?4
-                 ORDER BY id ASC",
-            )?;
-            let rows = mention_stmt
-                .query_map(params![proj, floor_id, needle, like_pat], |r| {
-                    let mentions_s: String = r.get(6)?;
-                    let mentions: Vec<String> =
-                        serde_json::from_str(&mentions_s).unwrap_or_default();
-                    Ok(BoardMessageRow {
-                        id: r.get(0)?,
-                        project: r.get(1)?,
-                        channel: r.get(2)?,
-                        agent: r.get(3)?,
-                        machine: r.get(4)?,
-                        body: r.get(5)?,
-                        mentions,
-                        parent_id: r.get(7)?,
-                        created_utc: r.get(8)?,
-                        created_epoch: r.get(9)?,
-                    })
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let rows: Vec<BoardMessageRow> = if is_all_projects {
+                let mut stmt = conn.prepare(
+                    "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
+                     FROM board_messages
+                     WHERE LOWER(project) NOT IN ('agent', 'all') AND id > ?1 AND agent != ?2 AND mentions_json LIKE ?3
+                     ORDER BY id ASC",
+                )?;
+                let collected = stmt
+                    .query_map(params![floor_id, needle, like_pat], map_msg)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                collected
+            } else {
+                let mut stmt = conn.prepare(
+                    "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
+                     FROM board_messages
+                     WHERE project = ?1 AND id > ?2 AND agent != ?3 AND mentions_json LIKE ?4
+                     ORDER BY id ASC",
+                )?;
+                let collected = stmt
+                    .query_map(params![proj, floor_id, needle, like_pat], map_msg)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                collected
+            };
             rows.into_iter()
                 .filter(|m| m.mentions.iter().any(|x| x == &needle))
                 .collect()
@@ -969,14 +1071,22 @@ impl Ledger {
         };
         let cwd = validate_note(&req.cwd)?;
         let branch = validate_note(&req.branch)?;
-        let status = validate_agent_status(req.status.as_deref())?;
+        let status = match req
+            .status
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(s) => Some(validate_agent_status(Some(s))?),
+            None => None,
+        };
         let current_task = match req
             .current_task
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            Some(t) => Some(validate_identifier(t, "current_task")?),
+            Some(t) => Some(validate_note(t)?),
             None => None,
         };
 
@@ -991,11 +1101,26 @@ impl Ledger {
 
         tx.execute(
             "UPDATE board_agents
-             SET runtime = ?1,
+             SET runtime = CASE WHEN ?1 = 'cli' AND runtime != '' THEN runtime ELSE ?1 END,
                  cwd = CASE WHEN ?2 = '' THEN cwd ELSE ?2 END,
-                 branch = CASE WHEN ?3 = '' THEN branch ELSE ?3 END,
-                 status = ?4,
-                 current_task = COALESCE(?5, current_task),
+                 branch = CASE WHEN ?3 IN ('', 'unknown') AND branch != '' THEN branch ELSE ?3 END,
+                 status = CASE WHEN ?4 IS NOT NULL THEN ?4 WHEN status = 'blocked' THEN 'blocked' ELSE 'active' END,
+                 current_task = CASE
+                     WHEN current_task IS NOT NULL AND EXISTS (
+                         SELECT 1 FROM board_tasks t
+                         WHERE t.project = board_agents.project
+                           AND t.agent = board_agents.agent
+                           AND t.task_id = board_agents.current_task
+                           AND t.status IN ('claimed', 'review', 'blocked')
+                     ) AND (?5 IS NULL OR NOT EXISTS (
+                         SELECT 1 FROM board_tasks t2
+                         WHERE t2.project = board_agents.project
+                           AND t2.agent = board_agents.agent
+                           AND t2.task_id = ?5
+                           AND t2.status IN ('claimed', 'review', 'blocked')
+                     )) THEN current_task
+                     ELSE COALESCE(?5, current_task)
+                 END,
                  last_seen_utc = ?6,
                  last_seen_epoch = ?7
              WHERE project = ?8 AND agent = ?9",
@@ -2081,5 +2206,163 @@ mod tests {
         let persisted = snap.locks.iter().find(|l| l.id == t1.lock.id).unwrap();
         assert!(persisted.expires_epoch > t1.lock.expires_epoch);
         assert_eq!(persisted.expires_epoch, t2.lock.expires_epoch);
+
+        // Heartbeat with a session title must not overwrite an active claimed/review task_id,
+        // while a heartbeat naming a different active claimed task_id ('T-2') updates current_task.
+        let hb = ledger
+            .board_heartbeat(
+                &vm1,
+                &BoardHeartbeatReq {
+                    project: "daybook".into(),
+                    agent: "agent-a".into(),
+                    runtime: "pi".into(),
+                    branch: "main".into(),
+                    cwd: "/tmp/daybook".into(),
+                    status: None,
+                    current_task: Some("Session title that is not a task_id".into()),
+                },
+            )
+            .unwrap();
+        assert_eq!(hb.current_task.as_deref(), Some("T-1"));
+        assert_eq!(hb.status, "active");
+
+        ledger
+            .board_claim_task(
+                &vm1,
+                &BoardClaimTaskReq {
+                    project: "daybook".into(),
+                    task_id: "T-2".into(),
+                    title: Some("Second active task".into()),
+                    priority: Some("medium".into()),
+                    agent: "agent-a".into(),
+                    branch: None,
+                    note: None,
+                    force: false,
+                },
+            )
+            .unwrap();
+        let hb2 = ledger
+            .board_heartbeat(
+                &vm1,
+                &BoardHeartbeatReq {
+                    project: "daybook".into(),
+                    agent: "agent-a".into(),
+                    runtime: "pi".into(),
+                    branch: "main".into(),
+                    cwd: "/tmp/daybook".into(),
+                    status: Some("idle".into()),
+                    current_task: Some("T-2".into()),
+                },
+            )
+            .unwrap();
+        assert_eq!(hb2.current_task.as_deref(), Some("T-2"));
+        assert_eq!(hb2.status, "idle");
+        let hb_blocked = ledger
+            .board_heartbeat(
+                &vm1,
+                &BoardHeartbeatReq {
+                    project: "daybook".into(),
+                    agent: "agent-a".into(),
+                    runtime: "pi".into(),
+                    branch: "main".into(),
+                    cwd: "/tmp/daybook".into(),
+                    status: Some("blocked".into()),
+                    current_task: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(hb_blocked.status, "blocked");
+        let hb_preserve = ledger
+            .board_heartbeat(
+                &vm1,
+                &BoardHeartbeatReq {
+                    project: "daybook".into(),
+                    agent: "agent-a".into(),
+                    runtime: "cli".into(),
+                    branch: "main".into(),
+                    cwd: "/tmp/daybook".into(),
+                    status: None,
+                    current_task: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(hb_preserve.status, "blocked");
+        assert_eq!(hb_preserve.runtime, "pi");
+        // Reserved project names ('all', 'agent') are rejected on write paths
+        for reserved in ["all", "ALL", "agent", "Agent"] {
+            assert!(ledger
+                .board_heartbeat(
+                    &vm1,
+                    &BoardHeartbeatReq {
+                        project: reserved.into(),
+                        agent: "agent-a".into(),
+                        runtime: "pi".into(),
+                        branch: "main".into(),
+                        cwd: "/tmp/x".into(),
+                        status: None,
+                        current_task: None,
+                    },
+                )
+                .is_err());
+            assert!(ledger
+                .board_post_message(
+                    &vm1,
+                    &BoardPostMessageReq {
+                        project: reserved.into(),
+                        channel: Some("general".into()),
+                        agent: "agent-a".into(),
+                        body: "hi".into(),
+                        parent_id: None,
+                    },
+                )
+                .is_err());
+        }
+
+        // All-projects status ('all') aggregates agents and unread_mentions across multiple projects and advances next_since_id
+        ledger
+            .board_heartbeat(
+                &vm2,
+                &BoardHeartbeatReq {
+                    project: "other-repo".into(),
+                    agent: "agent-b".into(),
+                    runtime: "codex".into(),
+                    branch: "feat/x".into(),
+                    cwd: "/tmp/other-repo".into(),
+                    status: None,
+                    current_task: Some("Cross-project test".into()),
+                },
+            )
+            .unwrap();
+        ledger
+            .board_post_message(
+                &vm1,
+                &BoardPostMessageReq {
+                    project: "other-repo".into(),
+                    channel: Some("handoff".into()),
+                    agent: "agent-a".into(),
+                    body: "Hey @agent-b check other-repo".into(),
+                    parent_id: None,
+                },
+            )
+            .unwrap();
+        let all_snap = ledger
+            .board_status(Some("all"), Some("agent-b"), Some(0))
+            .unwrap();
+        assert_eq!(all_snap.project.as_deref(), Some("all"));
+        assert!(all_snap.agents.iter().any(|a| a.project == "daybook"));
+        assert!(all_snap.agents.iter().any(|a| a.project == "other-repo"));
+        assert_eq!(all_snap.unread_mentions.len(), 1);
+        assert_eq!(all_snap.unread_mentions[0].project, "other-repo");
+        assert!(all_snap.next_since_id > t1.next_since_id);
+        assert_eq!(all_snap.locks.len(), 1);
+        assert_eq!(all_snap.tasks.len(), 2);
+        let star_snap = ledger.board_status(Some("*"), None, None).unwrap();
+        assert_eq!(star_snap.project.as_deref(), Some("all"));
+        assert_eq!(star_snap.agents.len(), all_snap.agents.len());
+        let projects = ledger.board_projects().unwrap();
+        assert_eq!(
+            projects,
+            vec!["daybook".to_string(), "other-repo".to_string()]
+        );
     }
 }

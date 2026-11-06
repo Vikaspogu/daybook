@@ -88,6 +88,9 @@ _No sessions archived yet._
 }
 
 async fn sync_board_session_start(config: &crate::config::Config, cwd: &std::path::Path) {
+    if !crate::board::identity::is_valid_board_workspace(cwd) {
+        return;
+    }
     let Ok(client) = crate::board::client::BoardClient::from_config(config, false) else {
         return;
     };
@@ -100,7 +103,7 @@ async fn sync_board_session_start(config: &crate::config::Config, cwd: &std::pat
             branch: identity.branch.clone(),
             cwd: identity.worktree_root.to_string_lossy().to_string(),
             status: Some("active".to_string()),
-            current_task: None,
+            current_task: identity.session_title.clone(),
         })
         .await;
 

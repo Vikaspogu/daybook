@@ -214,8 +214,10 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
             }
         }
         eprintln!("[daybook] Summarized {} session(s) into the archive", ok);
+        if let Ok(client) = crate::board::client::BoardClient::from_config(&config, local) {
+            client.sync_active_sessions().await;
+        }
     }
-
     Ok(())
 }
 

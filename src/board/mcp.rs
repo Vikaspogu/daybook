@@ -243,6 +243,17 @@ async fn dispatch_tool_call(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(&identity.agent)
         .to_string();
+    let is_write_tool = matches!(
+        tool_name,
+        "daybook_board_claim"
+            | "daybook_board_release"
+            | "daybook_board_post"
+            | "daybook_board_claim_task"
+            | "daybook_board_update_task"
+    );
+    if is_write_tool && project == identity.project && agent == identity.agent {
+        client.ensure_registered_debounced(identity).await;
+    }
 
     match tool_name {
         "daybook_board_status" => {

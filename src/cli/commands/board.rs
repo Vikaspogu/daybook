@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::board::client::BoardClient;
 use crate::board::globs::normalize_repo_path;
-use crate::board::identity::resolve_board_identity;
+use crate::board::identity::{is_valid_board_workspace, resolve_board_identity};
 use crate::cli::args::{BoardAction, BoardArgs, BoardTaskAction};
 use crate::config::load_config;
 use crate::ledger::{
@@ -20,11 +20,42 @@ pub async fn run(args: BoardArgs) -> Result<()> {
     let action = args
         .action
         .unwrap_or(BoardAction::Status { since_id: None });
+    if let Some(ref explicit_proj) = args.project {
+        let p = explicit_proj.trim();
+        if p.eq_ignore_ascii_case("agent") {
+            anyhow::bail!("project name '{p}' is reserved and cannot be used as a board project");
+        }
+        if (p.eq_ignore_ascii_case("all") || p == "*")
+            && !matches!(action, BoardAction::Status { .. })
+        {
+            anyhow::bail!(
+                "project name '{p}' is reserved for read-only status queries; specify a concrete project for write actions"
+            );
+        }
+    }
+    if args.project.is_none()
+        && args.agent.is_none()
+        && matches!(
+            action,
+            BoardAction::Claim { .. }
+                | BoardAction::Touch { .. }
+                | BoardAction::Release { .. }
+                | BoardAction::Post { .. }
+                | BoardAction::Task { .. }
+        )
+        && is_valid_board_workspace(&cwd)
+    {
+        client.ensure_registered_debounced(&identity).await;
+    }
 
     match action {
         BoardAction::Status { since_id } => {
+            let status_project = match args.project.as_deref().map(str::trim) {
+                Some(p) if p.eq_ignore_ascii_case("all") || p == "*" => "all",
+                _ => identity.project.as_str(),
+            };
             let snap = client
-                .status(Some(&identity.project), Some(&identity.agent), since_id)
+                .status(Some(status_project), Some(&identity.agent), since_id)
                 .await?;
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&snap)?);
@@ -32,7 +63,7 @@ pub async fn run(args: BoardArgs) -> Result<()> {
             }
             println!(
                 "=== Daybook Board: {} (you: {} @ {}) ===",
-                identity.project, identity.agent, identity.branch
+                status_project, identity.agent, identity.branch
             );
             println!("\nActive Agents ({}):", snap.agents.len());
             if snap.agents.is_empty() {
@@ -414,7 +445,7 @@ pub async fn run(args: BoardArgs) -> Result<()> {
                     branch: identity.branch.clone(),
                     cwd: identity.worktree_root.to_string_lossy().to_string(),
                     status: Some(status),
-                    current_task: task,
+                    current_task: task.or_else(|| identity.session_title.clone()),
                 })
                 .await?;
             if args.json {

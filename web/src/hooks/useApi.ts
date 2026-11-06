@@ -375,7 +375,7 @@ export interface BoardLock {
 
 export interface BoardTask {
   project: string
-  id: string
+  task_id: string
   title: string
   status: string
   priority: string

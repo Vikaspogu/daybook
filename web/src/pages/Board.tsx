@@ -58,7 +58,8 @@ export function Board() {
     updateBoardTask,
   } = useApi()
 
-  const [selectedProject, setSelectedProject] = useState<string>('')
+  const [selectedProject, setSelectedProject] = useState<string>('all')
+  const [targetProject, setTargetProject] = useState<string>('')
   const [board, setBoard] = useState<BoardStatusData | null>(null)
   const [initialLoading, setInitialLoading] = useState(true)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -107,9 +108,6 @@ export function Board() {
         const target = projOverride !== undefined ? projOverride : selectedProject
         const snap = await fetchBoardStatus(target || undefined)
         setBoard(snap)
-        if (!selectedProject && snap.project) {
-          setSelectedProject(snap.project)
-        }
         setLastRefreshed(Date.now())
       } catch (err) {
         setActionError(err instanceof Error ? err.message : 'Failed to load board')
@@ -139,8 +137,20 @@ export function Board() {
     }
   }, [refreshBoard])
 
-  const activeProject = selectedProject || board?.project || 'daybook'
+  useEffect(() => {
+    const projects = board?.projects ?? []
+    if (projects.length > 0 && (!targetProject || !projects.includes(targetProject))) {
+      setTargetProject(projects[0])
+    }
+  }, [board?.projects, targetProject])
 
+  const activeProject = selectedProject || board?.project || 'all'
+  const writeProject =
+    activeProject === 'all'
+      ? targetProject && board?.projects?.includes(targetProject)
+        ? targetProject
+        : board?.projects?.[0] || ''
+      : activeProject
   const filteredTasks = useMemo(() => {
     const list = board?.tasks ?? []
     return list.filter((t) => {
@@ -172,9 +182,13 @@ export function Board() {
       .map((s) => s.trim())
       .filter(Boolean)
     if (paths.length === 0) return
+    if (!writeProject) {
+      setActionError('No active project on the board yet')
+      return
+    }
     try {
       const res = await claimBoardLocks({
-        project: activeProject,
+        project: writeProject,
         agent: operatorHandle || 'operator',
         paths,
         note: lockNoteInput,
@@ -215,9 +229,13 @@ export function Board() {
     e.preventDefault()
     setActionError(null)
     if (!taskIdInput.trim()) return
+    if (!writeProject) {
+      setActionError('No active project on the board yet')
+      return
+    }
     try {
       const res = await claimBoardTask({
-        project: activeProject,
+        project: writeProject,
         task_id: taskIdInput.trim(),
         title: taskTitleInput.trim() || taskIdInput.trim(),
         priority: taskPriorityInput,
@@ -226,7 +244,7 @@ export function Board() {
         note: taskNoteInput.trim() || undefined,
       })
       if (!res.ok) {
-        setActionError(`Task [${res.task.id}] is already claimed by @${res.held_by}`)
+        setActionError(`Task [${res.task.task_id}] is already claimed by @${res.held_by}`)
       } else {
         setTaskIdInput('')
         setTaskTitleInput('')
@@ -245,7 +263,7 @@ export function Board() {
     try {
       await updateBoardTask({
         project: task.project,
-        task_id: task.id,
+        task_id: task.task_id,
         agent: task.agent || operatorHandle || 'operator',
         status: nextStatus,
         release_locks: nextStatus === 'done',
@@ -261,9 +279,13 @@ export function Board() {
     e.preventDefault()
     setActionError(null)
     if (!msgBody.trim()) return
+    if (!writeProject) {
+      setActionError('No active project on the board yet')
+      return
+    }
     try {
       await postBoardMessage({
-        project: activeProject,
+        project: writeProject,
         channel: msgChannel,
         agent: operatorHandle || 'operator',
         body: msgBody.trim(),
@@ -280,12 +302,30 @@ export function Board() {
   const locks = board?.locks ?? []
   const tasks = board?.tasks ?? []
   const messages = board?.messages ?? []
-  const onlineAgentsCount = agents.filter((a) => nowSec - a.last_seen_epoch < 600 && a.status !== 'idle').length
+  const onlineAgentsCount = agents.filter((a) => nowSec - a.last_seen_epoch < 7200 && a.status !== 'idle').length
   const activeTasksCount = tasks.filter(
     (t) => t.status === 'claimed' || t.status === 'review' || t.status === 'blocked'
   ).length
   const blockerMessagesCount = messages.filter((m) => m.channel === 'blocker').length
-
+  const agentMetaMap = useMemo(() => {
+    const map = new Map<string, BoardAgent>()
+    for (const ag of agents) {
+      map.set(`${ag.project}:${ag.agent}`, ag)
+    }
+    return map
+  }, [agents])
+  const knownTaskIds = useMemo(
+    () => new Set(tasks.map((t) => `${t.project}:${t.task_id}`)),
+    [tasks]
+  )
+  const formatCurrentTask = useCallback(
+    (proj: string, task?: string | null): string => {
+      if (!task) return ''
+      const trimmed = task.trim()
+      return knownTaskIds.has(`${proj}:${trimmed}`) ? `#${trimmed}` : trimmed
+    },
+    [knownTaskIds]
+  )
   return (
     <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-6 space-y-6">
       {/* Top Bar: Title + Project Switcher + Operator Handle */}
@@ -323,15 +363,35 @@ export function Board() {
               aria-label="Select project"
               className="bg-transparent text-xs font-mono font-bold text-amber-300 focus:outline-none"
             >
-              {(board?.projects && board.projects.length > 0 ? board.projects : [activeProject]).map(
-                (proj) => (
+              <option value="all" className="bg-[#131822] text-slate-100">
+                All Projects ({board?.projects?.length ?? 0})
+              </option>
+              {(board?.projects ?? []).map((proj) => (
+                <option key={proj} value={proj} className="bg-[#131822] text-slate-100">
+                  {proj}
+                </option>
+              ))}
+            </select>
+          </div>
+          {activeProject === 'all' && (board?.projects?.length ?? 0) > 0 && (
+            <div className="flex items-center gap-1.5 bg-[#0B0E14] border border-white/[0.08] rounded-xl px-2.5 py-1.5">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                Write To
+              </span>
+              <select
+                value={writeProject}
+                onChange={(e) => setTargetProject(e.target.value)}
+                aria-label="Select target project for writes"
+                className="bg-transparent text-xs font-mono font-bold text-violet-300 focus:outline-none"
+              >
+                {(board?.projects ?? []).map((proj) => (
                   <option key={proj} value={proj} className="bg-[#131822] text-slate-100">
                     {proj}
                   </option>
-                )
-              )}
-            </select>
-          </div>
+                ))}
+              </select>
+            </div>
+          )}
 
           {/* Operator / Agent handle input */}
           <div className="flex items-center gap-1.5 bg-[#0B0E14] border border-white/[0.08] rounded-xl px-2.5 py-1.5">
@@ -407,7 +467,7 @@ export function Board() {
                 {`daybook board status\ndaybook board claim "src/server/**"\ndaybook board post -c handoff "@t3-a1 done"`}
               </pre>
               <p className="text-[11px] text-slate-400">
-                Every worktree resolves back to `{activeProject}` automatically while keeping its own worktree handle.
+                Every worktree resolves back to `{activeProject === 'all' ? 'its parent repository' : activeProject}` automatically while keeping its own worktree handle.
               </p>
             </div>
           </div>
@@ -549,7 +609,7 @@ export function Board() {
                     type="submit"
                     className="w-full py-1.5 rounded-lg bg-amber-400 text-slate-950 font-bold text-xs hover:bg-amber-300 transition-colors"
                   >
-                    Claim Lock ({lockTtlInput}m TTL)
+                    Claim Lock in {writeProject || 'project'} ({lockTtlInput}m TTL)
                   </button>
                 </form>
               )}
@@ -566,10 +626,21 @@ export function Board() {
                       className="p-3 rounded-xl bg-[#0B0E14]/90 border border-white/[0.07] space-y-2"
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-1.5 min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                          <span className="px-1.5 py-0.5 rounded bg-violet-500/15 border border-violet-500/25 text-[10px] font-mono font-semibold text-violet-300">
+                            {lock.project}
+                          </span>
                           <span className="font-mono text-xs font-bold text-amber-300 truncate">
                             @{lock.agent}
                           </span>
+                          {(() => {
+                            const lockAgentTitle = agentMetaMap.get(`${lock.project}:${lock.agent}`)?.current_task
+                            return lockAgentTitle ? (
+                              <span className="text-[11px] font-semibold text-slate-200 truncate">
+                                · {formatCurrentTask(lock.project, lockAgentTitle)}
+                              </span>
+                            ) : null
+                          })()}
                           <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-white/[0.05] text-slate-400">
                             {lock.auto ? 'auto' : 'manual'}
                           </span>
@@ -625,51 +696,56 @@ export function Board() {
                 <div className="space-y-2.5">
                   {agents.map((ag: BoardAgent) => {
                     const ageSec = nowSec - ag.last_seen_epoch
-                    const isFresh = ageSec < 600 && ag.status !== 'idle'
+                    const isFresh = ageSec < 7200 && ag.status !== 'idle'
                     return (
                       <div
-                        key={ag.agent}
+                        key={`${ag.project}:${ag.agent}`}
                         className="p-3 rounded-xl bg-[#0B0E14]/90 border border-white/[0.07] space-y-1.5"
                       >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <span
-                              className={`size-2 rounded-full shrink-0 ${
-                                isFresh
-                                  ? 'bg-emerald-400'
-                                  : ageSec < 1800
-                                    ? 'bg-amber-400'
-                                    : 'bg-slate-600'
-                              }`}
-                            />
-                            <span className="font-mono text-xs font-bold text-slate-100 truncate">
-                              @{ag.agent}
-                            </span>
-                            <span className="px-1.5 py-0.5 rounded bg-white/[0.06] text-[10px] font-mono text-slate-300">
-                              {ag.runtime}
-                            </span>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 space-y-1">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span
+                                className={`size-2 rounded-full shrink-0 ${
+                                  isFresh
+                                    ? 'bg-emerald-400'
+                                    : ageSec < 14400
+                                      ? 'bg-amber-400'
+                                      : 'bg-slate-600'
+                                }`}
+                              />
+                              <span className="text-xs font-bold text-slate-100 truncate">
+                                {formatCurrentTask(ag.project, ag.current_task) || `@${ag.agent}`}
+                              </span>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5 pl-4">
+                              <span className="px-1.5 py-0.5 rounded bg-violet-500/15 border border-violet-500/25 text-[10px] font-mono font-semibold text-violet-300">
+                                {ag.project}
+                              </span>
+                              <span className="font-mono text-[11px] font-semibold text-amber-300">
+                                @{ag.agent}
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded bg-white/[0.06] text-[10px] font-mono text-slate-300">
+                                {ag.runtime}
+                              </span>
+                            </div>
                           </div>
                           <span className="text-[10px] font-mono text-slate-400 shrink-0">
                             {formatRelativeSeconds(ag.last_seen_epoch)}
                           </span>
                         </div>
 
-                        <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono">
+                        <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono pl-4">
                           {ag.branch && (
                             <span className="px-1.5 py-0.5 rounded bg-sky-500/10 border border-sky-500/20 text-sky-300">
                               ⎇ {ag.branch}
-                            </span>
-                          )}
-                          {ag.current_task && (
-                            <span className="px-1.5 py-0.5 rounded bg-amber-400/15 border border-amber-400/25 text-amber-300">
-                              #{ag.current_task}
                             </span>
                           )}
                           <span className="text-slate-500">{ag.status}</span>
                         </div>
 
                         {ag.cwd && (
-                          <div className="text-[10px] font-mono text-slate-500 truncate" title={ag.cwd}>
+                          <div className="text-[10px] font-mono text-slate-500 truncate pl-4" title={ag.cwd}>
                             {ag.cwd}
                           </div>
                         )}
@@ -774,7 +850,7 @@ export function Board() {
                     type="submit"
                     className="w-full py-1.5 rounded-lg bg-sky-400 text-slate-950 font-bold text-xs hover:bg-sky-300 transition-colors"
                   >
-                    Claim Task as @{operatorHandle || 'operator'}
+                    Claim Task in {writeProject || 'project'} as @{operatorHandle || 'operator'}
                   </button>
                 </form>
               )}
@@ -787,14 +863,17 @@ export function Board() {
                 <div className="space-y-2.5">
                   {filteredTasks.map((task) => (
                     <div
-                      key={task.id}
+                      key={`${task.project}:${task.task_id}`}
                       className="p-3.5 rounded-xl bg-[#0B0E14]/90 border border-white/[0.07] space-y-2"
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="space-y-1 min-w-0">
                           <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="px-1.5 py-0.5 rounded bg-violet-500/15 border border-violet-500/25 text-[10px] font-mono font-semibold text-violet-300">
+                              {task.project}
+                            </span>
                             <span className="px-1.5 py-0.5 rounded bg-white/[0.07] font-mono text-[11px] font-bold text-slate-200">
-                              {task.id}
+                              {task.task_id}
                             </span>
                             <span
                               className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-bold uppercase ${
@@ -963,7 +1042,7 @@ export function Board() {
                     type="submit"
                     className="px-3 py-1.5 rounded-lg bg-amber-400 text-slate-950 font-bold text-xs hover:bg-amber-300 transition-colors"
                   >
-                    Post
+                    Post to {writeProject || 'project'}
                   </button>
                 </div>
               </form>
@@ -981,7 +1060,10 @@ export function Board() {
                       className="p-3 rounded-xl bg-[#0B0E14]/90 border border-white/[0.07] space-y-1.5"
                     >
                       <div className="flex items-center justify-between gap-2 text-[10px] font-mono">
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                          <span className="px-1.5 py-0.5 rounded bg-violet-500/15 border border-violet-500/25 text-[10px] font-mono font-semibold text-violet-300">
+                            {m.project}
+                          </span>
                           <span className="text-slate-500">#{m.id}</span>
                           <span
                             className={`px-1.5 py-0.5 rounded font-bold ${
@@ -995,6 +1077,14 @@ export function Board() {
                             #{m.channel}
                           </span>
                           <span className="font-bold text-amber-300">@{m.agent}</span>
+                          {(() => {
+                            const msgAgentTitle = agentMetaMap.get(`${m.project}:${m.agent}`)?.current_task
+                            return msgAgentTitle ? (
+                              <span className="text-[11px] font-sans font-semibold text-slate-300 truncate">
+                                · {formatCurrentTask(m.project, msgAgentTitle)}
+                              </span>
+                            ) : null
+                          })()}
                         </div>
                         <span className="text-slate-500">
                           {formatRelativeSeconds(m.created_epoch)}

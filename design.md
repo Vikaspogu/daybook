@@ -80,6 +80,6 @@ Daybook uses a dark, tactile, high-contrast operational interface (**"Quiet Prec
 - **Multi-Worktree Agent Coordination Board (`/board`, `web/src/pages/Board.tsx`)**:
   1. **KPI & Live Sync Header**: Project selector, operator/agent handle, `5s` visibility-aware live polling, and 4 KPI cards (`Worktrees & Agents`, `Active File Locks`, `In-Flight Tasks`, `Channel Feed`).
   2. **3-Column Operational Grid (`lg:grid-cols-12`)**:
-     - **Left (`lg:col-span-4`)**: Active File & Glob Locks (with TTL countdown, `manual`/`auto` badge, conflict warnings, inline `+ Claim` form, and `Release` actions) + Worktrees & Agent Roster (`@agent`, runtime badge, `⎇ branch`, `#task`, and worktree path).
+     - **Left (`lg:col-span-4`)**: Worktrees & Agent Roster (`@agent`, project badge, runtime badge, worktree badge, `⎇ branch`, session title / `#task`, worktree path, and `2h` active worktree window: `<7200s` fresh emerald dot, `<14400s` recent amber dot) + Active File & Glob Locks (with TTL countdown, `manual`/`auto` badge, conflict warnings, inline `+ Claim` form, and `Release` actions).
      - **Center (`lg:col-span-4`)**: Worktree Task Board with status filters (`all`, `active`, `open`, `done`), priority badges, inline task claim form, and quick status transitions (`Mark Done`, `Review`, `Blocked`).
      - **Right (`lg:col-span-4`)**: Cross-Worktree Channels (`#general`, `#handoff`, `#blocker`) with `@agent` mention filter, inline message composer, and highlighted `@mention` chips.
