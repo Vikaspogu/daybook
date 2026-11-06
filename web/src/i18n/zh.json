@@ -161,6 +161,8 @@
   "template.commandDesc": "用于从会话摘要中提取斜杠命令的模板",
   "insights.title": "洞察",
   "insights.subtitle": "跨会话的工作模式分析",
+  "insights.aiTitle": "AI 叙述",
+  "insights.aiSessions": "已分析会话",
   "insights.failed": "加载洞察数据失败。",
   "insights.tabCharts": "图表",
   "insights.tabSessions": "问题会话",

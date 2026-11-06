@@ -128,6 +128,14 @@ admin_token = "dbk_..."
 url = "https://daybook.example.com"
 token = "dbk_..."
 machine = "workstation-01"
+
+# Optional: AI card on the Insights page (any OpenAI-compatible endpoint).
+# Without it, the card shows rule-based recommendations from the ledger.
+[insights]
+base_url = "https://llm.example.com/v1"
+api_key = "sk-..."
+model = "gpt-4o-mini"
+# Env vars DAYBOOK_INSIGHTS_BASE_URL / _API_KEY / _MODEL override these (e.g. from a Kubernetes Secret).
 ```
 
 - **Local + Push Reliability**: When `push.url` and `push.token` are configured, `daybook scan` pushes summarized sessions to `POST /api/ingest`. If the server is unreachable, records are parked in `~/.daybook/pending/` and replayed automatically on the next scan.

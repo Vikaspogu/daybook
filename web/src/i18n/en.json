@@ -161,6 +161,8 @@
   "template.commandDesc": "Template for extracting slash commands from session summaries",
   "insights.title": "Insights",
   "insights.subtitle": "Work pattern analysis across your sessions",
+  "insights.aiTitle": "AI NARRATIVE",
+  "insights.aiSessions": "SESSIONS ANALYZED",
   "insights.failed": "Failed to load insights data.",
   "insights.tabCharts": "Charts",
   "insights.tabSessions": "Problem sessions",

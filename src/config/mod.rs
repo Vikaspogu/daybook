@@ -5,3 +5,4 @@ pub use settings::load_config;
 pub use settings::save_config;
 pub use settings::set_config_path;
 pub use settings::Config;
+pub use settings::InsightsConfig;
