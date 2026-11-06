@@ -755,6 +755,33 @@ impl Ledger {
         Ok(rows)
     }
 
+    /// Summaries for the recent window used to build rule recurrence history.
+    /// Returns (journal_date, project, summary_md) for days `since_date` up to
+    /// `date`, newest first.
+    pub fn recent_rule_summaries(
+        &self,
+        date: &str,
+        since_date: &str,
+    ) -> Result<Vec<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT journal_date, project, COALESCE(summary_md, '')
+             FROM sessions
+             WHERE journal_date >= ?1 AND journal_date <= ?2
+             ORDER BY journal_date DESC, machine, session_id",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![since_date, date], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Point lookup for the session-detail endpoint: one row by
     /// (journal_date, machine, session_id). `Ok(None)` = no such row;
     /// `Err` = the query itself failed (caller must not fold it into a miss).
