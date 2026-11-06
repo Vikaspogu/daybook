@@ -132,7 +132,26 @@ pub struct ConsolidatedRuleDto {
     pub verification: Option<String>,
     pub evidence: Option<String>,
     pub draft_markdown: String,
+    /// Days (YYYY-MM-DD, newest first) in the recall window where this rule was detected.
+    pub recent_detections: Vec<String>,
 }
+
+/// One line of one day's monetizable directive for agents (`daybook query`).
+#[derive(Serialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct ActionDto {
+    /// `"apply-rule"` | `"write-skill"` | `"fix-pitfall"` | `"resume-work"`
+    pub kind: String,
+    pub title: String,
+    /// One line stating the concrete destination and pasteable content.
+    pub instruction: String,
+    /// Direct edit command when one exists (e.g. `code <path>`), else empty.
+    pub command: String,
+    /// What makes this action done.
+    pub verify: String,
+    /// How often this item was observed in the recall window (≥2 means recurring).
+    pub recurring_count: usize,
+}
+
 /// Single learning or pitfall extracted from a session summary
 #[derive(Serialize, Default, Clone, Debug, PartialEq, Eq)]
 pub struct LearningItemDto {
@@ -173,6 +192,8 @@ pub struct DailySummaryDto {
     pub commands: Vec<SummaryCardDto>,
     pub reflections: Option<String>,
     pub tomorrow_focus: Vec<SummaryCardDto>,
+    /// Monetizable directives for agents consuming `daybook query`.
+    pub actions: Vec<ActionDto>,
     pub raw_content: String,
     pub file_path: String,
 }

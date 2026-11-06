@@ -64,6 +64,16 @@ export interface ConsolidatedRule {
   verification?: string | null
   evidence?: string | null
   draft_markdown?: string
+  recent_detections?: string[]
+}
+
+export interface DailyAction {
+  kind: string
+  title: string
+  instruction: string
+  command: string
+  verify: string
+  recurring_count?: number
 }
 
 export interface LearningItem {
@@ -95,6 +105,7 @@ export interface DailySummary {
   skills: SummaryCard[]
   commands: SummaryCard[]
   tomorrow_focus: SummaryCard[]
+  actions?: DailyAction[]
   file_path?: string
   raw_content?: string
 }

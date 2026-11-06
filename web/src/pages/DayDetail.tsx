@@ -4,6 +4,7 @@ import { motion } from 'framer-motion'
 import { useApi } from '../hooks/useApi'
 import type {
   ConsolidatedRule,
+  DailyAction,
   DailySummary,
   DateInsights,
   NextStepItem,
@@ -304,6 +305,88 @@ function BoldColonItem({ text, dotColor }: { text: string; dotColor: string }) {
   )
 }
 
+
+const ACTION_KIND_STYLE: Record<string, { label: string; className: string }> = {
+  'write-skill': {
+    label: 'SKILL',
+    className: 'bg-emerald-500/20 text-[#34D399] border-emerald-400/30',
+  },
+  'apply-rule': {
+    label: 'RULE',
+    className: 'bg-amber-500/20 text-[#FBBF24] border-amber-400/30',
+  },
+  'fix-pitfall': {
+    label: 'FIX',
+    className: 'bg-rose-500/20 text-[#FB7185] border-rose-400/30',
+  },
+  'resume-work': {
+    label: 'RESUME',
+    className: 'bg-sky-500/20 text-[#38BDF8] border-sky-400/30',
+  },
+  action: {
+    label: 'ACTION',
+    className: 'bg-slate-500/20 text-[#94A3B8] border-slate-400/30',
+  },
+}
+
+function DoTodayCard({ actions }: { actions: DailyAction[] }) {
+  return (
+    <div className="qp-card p-4 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-white/[0.06]">
+        <div className="flex items-center gap-2">
+          <span className="qp-dot text-[#34D399]" />
+          <h3 className="qp-card-title">Do Today</h3>
+        </div>
+        <span className="font-mono text-[11px] font-semibold text-[#34D399]/80 tabular-nums">
+          {actions.length} {actions.length === 1 ? 'ACTION' : 'ACTIONS'}
+        </span>
+      </div>
+      <ul className="space-y-2.5">
+        {actions.map((a, i) => {
+          const style = ACTION_KIND_STYLE[a.kind] ?? ACTION_KIND_STYLE['action']
+          const recurring = (a.recurring_count ?? 0) >= 2
+          return (
+            <li
+              key={`${a.kind}-${a.title}-${i}`}
+              className="rounded-xl p-3 bg-[#0B0E14]/65 border border-white/[0.06] space-y-1.5"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className={cn(
+                    'px-1.5 py-0.5 rounded border font-mono text-[10px] font-bold uppercase flex-shrink-0',
+                    style.className,
+                  )}
+                >
+                  {style.label}
+                </span>
+                <span className="font-mono text-xs font-bold text-[#F8FAFC]">
+                  {a.title}
+                </span>
+                {recurring && (
+                  <span
+                    className="px-1.5 py-0.5 rounded bg-violet-500/15 text-[#A78BFA] border border-violet-400/30 font-mono text-[10px] font-semibold"
+                    title="Detected on multiple days this week — fix once, stops reappearing"
+                  >
+                    ↻ {a.recurring_count}d recurring
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-[#94A3B8] leading-relaxed">{a.instruction}</p>
+              {a.command && (
+                <p className="font-mono text-[11px] text-[#64748B] break-all">
+                  <strong className="text-[#94A3B8]">Run:</strong> {a.command}
+                </p>
+              )}
+              <p className="text-[11px] text-[#64748B] leading-relaxed">
+                <strong className="text-[#94A3B8]">Verify:</strong> {a.verify}
+              </p>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
 function WorkflowCoachingCard({
   signals,
   nextSteps,
@@ -490,6 +573,19 @@ function ConsolidatedRulesCard({
   const formatRuleDraft = (r: ConsolidatedRule) =>
     r.draft_markdown?.trim() || `- **${r.name}**: ${r.summary}`
 
+
+  const recurrenceBadge = (r: ConsolidatedRule) => {
+    const n = r.recent_detections?.length ?? 0
+    if (n < 2) return null
+    return (
+      <span
+        className="px-1.5 py-0.5 rounded bg-violet-500/15 text-[#A78BFA] border border-violet-400/30 font-mono text-[10px] font-semibold"
+        title={`Detected on ${n} days this week — recurring, fix once`}
+      >
+        ↻ {n}d
+      </span>
+    )
+  }
   const copyText = async (key: string, text: string) => {
     try {
       await navigator.clipboard.writeText(text)
@@ -563,6 +659,7 @@ function ConsolidatedRulesCard({
                       <span className="font-mono text-xs font-bold text-[#F8FAFC]">
                         {r.name}
                       </span>
+                      {recurrenceBadge(r)}
                       <span className="text-[10px] font-mono text-[#64748B]">
                         from {normalizeProjectLabel(r.project)}
                       </span>
@@ -657,6 +754,7 @@ function ConsolidatedRulesCard({
                         <span className="font-mono text-xs font-bold text-[#F8FAFC]">
                           {r.name}
                         </span>
+                        {recurrenceBadge(r)}
                       </div>
                       <p className="text-xs text-[#94A3B8] leading-relaxed">
                         {r.summary}
@@ -948,6 +1046,12 @@ export function DayDetail() {
   const learningsByProject = summary?.learnings_by_project ?? []
   const nextSteps = summary?.next_steps ?? []
   const consolidatedRules = summary?.consolidated_rules ?? []
+  const dailyActions = summary?.actions ?? []
+  const showDoToday = dailyActions.length > 0
+  const showCoaching = efficiencySignals.length > 0 || nextSteps.length > 0
+  // Secondary-column section numbers follow the visible sections, not fixed slots.
+  const secCoaching = showDoToday ? 4 : 3
+  const secRules = secCoaching + (showCoaching ? 1 : 0)
   const hasExtracted = (summary?.skills?.length ?? 0) + (summary?.commands?.length ?? 0) > 0
 
   const totalTokens = dayMetrics?.total_tokens || daySummary?.total_tokens || 0
@@ -1117,10 +1221,20 @@ export function DayDetail() {
 
         {/* Secondary Operational Column: Coaching + Workflow Rules + Live Session Feed */}
         <div className="space-y-6 min-w-0">
+          {dailyActions.length > 0 && (
+            <Section
+              id="do-today"
+              title="3 · Do Today"
+              meta={`${dailyActions.length} ACTIONS`}
+            >
+              <DoTodayCard actions={dailyActions} />
+            </Section>
+          )}
+
           {(efficiencySignals.length > 0 || nextSteps.length > 0) && (
             <Section
               id="coaching"
-              title="3 · Coaching & Next Steps"
+              title={`${secCoaching} · Coaching & Next Steps`}
               meta={`${nextSteps.length} NEXT`}
             >
               <WorkflowCoachingCard
@@ -1133,7 +1247,7 @@ export function DayDetail() {
           {consolidatedRules.length > 0 ? (
             <Section
               id="extracted"
-              title="4 · Reusable Skills & Repo AGENTS.md Rules"
+              title={`${secRules} · Reusable Skills & Repo AGENTS.md Rules`}
               meta={`${consolidatedRules.length} CANDIDATES`}
             >
               <ConsolidatedRulesCard rules={consolidatedRules} />
