@@ -101,6 +101,7 @@ export interface DailySummary {
   consolidated_rules?: ConsolidatedRule[]
   project_gains?: ProjectGain[]
   waste_alerts?: WasteAlert[]
+
   insights: SummaryCard[]
   skills: SummaryCard[]
   commands: SummaryCard[]
@@ -273,6 +274,21 @@ export interface TrendData {
   previous_satisfaction_score: number
   satisfaction_change_pct: number
   weekly_stats: WeeklyStat[]
+}
+
+export interface LlmInsights {
+  days: number
+  total_sessions: number
+  sessions_with_facets: number
+  top_goals: string[]
+  top_frictions: string[]
+  sessions_with_friction: number
+  overall_satisfaction: string | null
+  llm_summary: string | null
+  recommendations: string[]
+  source: string
+  error: string | null
+  cached_seconds: number
 }
 
 export interface InsightsData {
@@ -526,6 +542,11 @@ export function useApi() {
     [request]
   )
 
+  const fetchLlmInsights = useCallback(
+    (days: number = 30) => request<LlmInsights>(`/insights/llm?days=${days}`),
+    [request]
+  )
+
   const fetchConversation = useCallback(
     (date: string, name: string, page: number = 0, pageSize: number = 50) =>
       request<ConversationData>(
@@ -641,6 +662,7 @@ export function useApi() {
     updateConfig,
     fetchDefaultTemplates,
     fetchInsights,
+    fetchLlmInsights,
     fetchConversation,
     fetchDateInsights,
     installCard,

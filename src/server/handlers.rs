@@ -1168,6 +1168,25 @@ pub async fn get_insights(
     }
 }
 
+/// GET /api/insights/llm?days=N — ledger-backed LLM insights.
+///
+/// Unlike `/api/insights` (which reads local archives and is empty on the
+/// server), this aggregates `sessions.facets_json` from the SQLite ledger and
+/// asks an OpenAI-compatible endpoint for a narrative. Falls back to
+/// deterministic recommendations when no LLM is configured.
+pub async fn get_insights_llm(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let days: usize = params
+        .get("days")
+        .and_then(|d| d.parse().ok())
+        .unwrap_or(30)
+        .clamp(1, 365);
+    let data = crate::insights::llm::collect(&state, days).await;
+    Json(ApiResponse::success(data))
+}
+
 /// Get per-day insights combining session facet data
 pub async fn get_date_insights(
     State(state): State<Arc<AppState>>,

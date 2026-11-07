@@ -23,6 +23,9 @@ pub struct Config {
     /// Push client settings (scan -> server)
     #[serde(default)]
     pub push: PushConfig,
+    /// LLM-backed insights settings (server-side)
+    #[serde(default)]
+    pub insights: InsightsConfig,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
@@ -54,6 +57,54 @@ pub struct PushConfig {
     pub token: Option<String>,
     /// Machine label reported to the server (default: hostname)
     pub machine: Option<String>,
+}
+
+/// Server-side LLM insights settings. `base_url` is the OpenAI-compatible
+/// endpoint root (e.g. `http://llm.internal/v1`); leave unset to disable the
+/// LLM path and use deterministic recommendations only.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct InsightsConfig {
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub model: Option<String>,
+    #[serde(default = "default_insights_max_tokens")]
+    pub max_tokens: u32,
+}
+
+impl Default for InsightsConfig {
+    fn default() -> Self {
+        Self {
+            base_url: None,
+            api_key: None,
+            model: None,
+            max_tokens: default_insights_max_tokens(),
+        }
+    }
+}
+
+impl InsightsConfig {
+    /// Apply `DAYBOOK_INSIGHTS_{BASE_URL,API_KEY,MODEL}` env overrides (e.g. from a
+    /// Kubernetes Secret). Applied at use time so secrets never get saved to config.toml.
+    pub fn with_env(mut self) -> Self {
+        for (slot, key) in [
+            (&mut self.base_url, "DAYBOOK_INSIGHTS_BASE_URL"),
+            (&mut self.api_key, "DAYBOOK_INSIGHTS_API_KEY"),
+            (&mut self.model, "DAYBOOK_INSIGHTS_MODEL"),
+        ] {
+            if let Ok(v) = std::env::var(key) {
+                // Secrets often carry a trailing newline; blank values never override.
+                let v = v.trim();
+                if !v.is_empty() {
+                    *slot = Some(v.to_string());
+                }
+            }
+        }
+        self
+    }
+}
+
+fn default_insights_max_tokens() -> u32 {
+    800
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -210,6 +261,7 @@ impl Default for Config {
             prompt_templates: PromptTemplatesConfig::default(),
             server: ServerConfig::default(),
             push: PushConfig::default(),
+            insights: InsightsConfig::default(),
         }
     }
 }

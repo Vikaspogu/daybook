@@ -12,7 +12,7 @@ import {
   CartesianGrid,
 } from 'recharts'
 import { useApi } from '../hooks/useApi'
-import type { InsightsData } from '../hooks/useApi'
+import type { InsightsData, LlmInsights } from '../hooks/useApi'
 import { InsightsProblemView } from '../components/InsightsProblemView'
 import { InsightsTrends } from '../components/InsightsTrends'
 import { UsageTimeline, CostTimeline, ModelPieChart, formatTokenCount, formatCost } from '../components/UsageCharts'
@@ -91,25 +91,37 @@ function CustomTooltip({ active, payload, label }: any) {
 export function Insights() {
   const [data, setData] = useState<InsightsData | null>(null)
   const [loading, setLoading] = useState(true)
+  const [llm, setLlm] = useState<LlmInsights | null>(null)
   const [days, setDays] = useState(30)
   const [activeTab, setActiveTab] = useState<InsightTab>('charts')
-  const { fetchInsights } = useApi()
+  const { fetchInsights, fetchLlmInsights } = useApi()
   const { t } = useLanguage()
 
   useEffect(() => {
+    let cancelled = false
+    setLlm(null)
+    // The ledger-backed AI card is independent of the file-based insights fetch.
+    fetchLlmInsights(days)
+      .then((llmData) => {
+        if (!cancelled) setLlm(llmData)
+      })
+      .catch((err) => console.error('Failed to load AI insights:', err))
     const load = async () => {
       setLoading(true)
       try {
         const insights = await fetchInsights(days)
-        setData(insights)
+        if (!cancelled) setData(insights)
       } catch (err) {
         console.error('Failed to load insights:', err)
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
     }
     load()
-  }, [fetchInsights, days])
+    return () => {
+      cancelled = true
+    }
+  }, [fetchInsights, fetchLlmInsights, days])
 
   const problemSessions = useMemo(() => {
     const list = data?.session_details ?? []
@@ -123,6 +135,34 @@ export function Insights() {
   }, [data])
   const problemCount = problemSessions.length
 
+  // LLM Narrative Card (ledger-backed, works on the server even when file insights are empty).
+  const aiCard = llm && (llm.llm_summary || llm.recommendations.length > 0) && (
+    <div className="qp-card space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="qp-kicker">{t('insights.aiTitle')}</h2>
+        <span className="qp-meta">
+          {llm.source === 'llm' ? 'LLM' : 'BASIC'} · {llm.sessions_with_facets}/{llm.total_sessions}{' '}
+          {t('insights.aiSessions')}
+        </span>
+      </div>
+      {llm.llm_summary && (
+        <p className="text-sm text-[#CBD5E1] leading-relaxed">{llm.llm_summary}</p>
+      )}
+      {llm.recommendations.length > 0 && (
+        <ul className="space-y-1.5">
+          {llm.recommendations.map((r, i) => (
+            <li key={i} className="text-sm text-[#94A3B8] flex gap-2">
+              <span className="text-[#FBBF24]">→</span>
+              <span>{r}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {llm.error && (
+        <p className="text-[10px] font-mono text-[#64748B]">{llm.error}</p>
+      )}
+    </div>
+  )
   if (loading) {
     return (
       <div className="max-w-[1280px] mx-auto px-4 sm:px-6 py-6 space-y-5">
@@ -144,6 +184,7 @@ export function Insights() {
           <h1 className="qp-hero-title text-[#FBBF24]">{t('insights.title')}</h1>
           <p className="text-xs font-mono text-[#94A3B8] mt-1">{t('insights.failed')}</p>
         </div>
+        <div className="mt-6">{aiCard}</div>
       </div>
     )
   }
@@ -221,6 +262,9 @@ export function Insights() {
           />
         </div>
       </div>
+
+      {/* LLM Narrative Card (ledger-backed, works on the server) */}
+      {aiCard}
 
       {/* 2-Up Quick-Action Tab Bar */}
       <div className="grid grid-cols-2 gap-2 max-w-md">

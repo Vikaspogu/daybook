@@ -932,6 +932,48 @@ impl Ledger {
             [label],
         )? > 0)
     }
+    /// Sessions with parsed facet data inside [from, to] (YYYY-MM-DD), newest first.
+    /// Powers the server-side LLM insights endpoint (the file-based collectors
+    /// read ~/.daybook, which does not exist in the server image).
+    pub fn facets_window(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<(String, String, crate::insights::facets::SessionFacet)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT journal_date, session_id, facets_json FROM sessions
+             WHERE journal_date BETWEEN ?1 AND ?2 AND facets_json IS NOT NULL
+             ORDER BY journal_date DESC, session_id",
+        )?;
+        let rows = stmt.query_map([from, to], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (date, session_id, json) = row?;
+            if let Ok(facet) = serde_json::from_str::<crate::insights::facets::SessionFacet>(&json)
+            {
+                out.push((date, session_id, facet));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Total sessions inside [from, to] (YYYY-MM-DD), facet-bearing or not.
+    pub fn count_sessions_range(&self, from: &str, to: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE journal_date BETWEEN ?1 AND ?2",
+            [from, to],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -967,6 +1009,53 @@ mod tests {
             usage: UsageRecord::default(),
             aggregates: AggregatesRecord::default(),
         }
+    }
+
+    #[test]
+    fn test_facets_window_filters_and_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&dir.path().join("t.db3")).unwrap();
+        let mut r1 = record("s1", 100, "h1");
+        r1.facets_json = Some(
+            r#"{"goal_categories":{"debugging":1},"friction_counts":{"wrong_approach":2}}"#.into(),
+        );
+        let mut r2 = record("s2", 100, "h2");
+        r2.journal_date = "2026-10-30".into();
+        r2.facets_json = Some("not json".into());
+        let r3 = record("s3", 100, "h3"); // no facets
+        for r in [r1, r2, r3] {
+            ledger.upsert_session(&r).unwrap();
+        }
+        let rows = ledger.facets_window("2026-10-01", "2026-10-31").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, "s1");
+        assert_eq!(rows[0].2.goal_categories["debugging"], 1);
+        assert!(ledger
+            .facets_window("2026-11-01", "2026-11-30")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_count_sessions_range_matches_facets_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&dir.path().join("t.db3")).unwrap();
+        let mut old = record("s2", 100, "h2");
+        old.journal_date = "2026-09-15".into();
+        ledger.upsert_session(&record("s1", 100, "h1")).unwrap(); // 2026-10-29
+        ledger.upsert_session(&old).unwrap();
+        assert_eq!(
+            ledger
+                .count_sessions_range("2026-10-01", "2026-10-31")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            ledger
+                .count_sessions_range("2026-09-01", "2026-10-31")
+                .unwrap(),
+            2
+        );
     }
 
     #[test]

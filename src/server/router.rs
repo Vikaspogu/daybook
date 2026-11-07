@@ -26,6 +26,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             get(handlers::get_default_templates),
         )
         .route("/insights", get(handlers::get_insights))
+        .route("/insights/llm", get(handlers::get_insights_llm))
         .route("/stats", get(handlers::get_stats))
         // Token management: admin bearer only (machine tokens get 403).
         .route(

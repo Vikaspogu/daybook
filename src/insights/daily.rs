@@ -266,7 +266,7 @@ fn extract_session_id(content: &str) -> Option<String> {
 }
 
 /// Find the most common key in a HashMap<String, usize>
-fn most_common_key(counts: &HashMap<String, usize>) -> Option<String> {
+pub(crate) fn most_common_key(counts: &HashMap<String, usize>) -> Option<String> {
     counts
         .iter()
         .max_by_key(|(_, v)| *v)
@@ -274,7 +274,7 @@ fn most_common_key(counts: &HashMap<String, usize>) -> Option<String> {
 }
 
 /// Return the top N keys sorted by count descending
-fn top_n_keys(counts: &HashMap<String, usize>, n: usize) -> Vec<String> {
+pub(crate) fn top_n_keys(counts: &HashMap<String, usize>, n: usize) -> Vec<String> {
     let mut entries: Vec<(&String, &usize)> = counts.iter().collect();
     entries.sort_by(|a, b| b.1.cmp(a.1));
     entries
@@ -285,7 +285,7 @@ fn top_n_keys(counts: &HashMap<String, usize>, n: usize) -> Vec<String> {
 }
 
 /// Generate actionable recommendations based on day-level patterns
-fn generate_recommendations(
+pub(crate) fn generate_recommendations(
     friction_counts: &HashMap<String, usize>,
     outcome_counts: &HashMap<String, usize>,
     satisfaction_counts: &HashMap<String, usize>,
