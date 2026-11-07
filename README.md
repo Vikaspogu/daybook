@@ -130,6 +130,7 @@ token = "dbk_..."
 machine = "workstation-01"
 
 # Optional: AI card on the Insights page (any OpenAI-compatible endpoint).
+# Input: each session's summary and tool counts (any runtime), plus Claude Code facets if present.
 # Without it, the card shows rule-based recommendations from the ledger.
 [insights]
 base_url = "https://llm.example.com/v1"
