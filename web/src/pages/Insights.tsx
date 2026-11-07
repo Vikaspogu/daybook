@@ -141,7 +141,7 @@ export function Insights() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="qp-kicker">{t('insights.aiTitle')}</h2>
         <span className="qp-meta">
-          {llm.source === 'llm' ? 'LLM' : 'BASIC'} · {llm.sessions_with_facets}/{llm.total_sessions}{' '}
+          {llm.source === 'llm' ? 'LLM' : 'BASIC'} · {llm.total_sessions}{' '}
           {t('insights.aiSessions')}
         </span>
       </div>

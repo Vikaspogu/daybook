@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 /// Represents facet data for a single Claude Code session.
 /// Loaded from JSON files in ~/.claude/usage-data/facets/
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionFacet {
     /// Brief summary of the session
     #[serde(default)]
