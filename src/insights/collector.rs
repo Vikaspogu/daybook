@@ -266,6 +266,23 @@ impl InsightsData {
                 if insight.brief_summary.is_none() && !r.summary_md.is_empty() {
                     insight.brief_summary = Some(super::llm::summary_excerpt(&r.summary_md, 300));
                 }
+                // Sessions without a facet (Pi, Codex) still flag as problems
+                // from the scan aggregates.
+                if r.facet.is_none() {
+                    let a = &r.aggregates;
+                    let mut detail = Vec::new();
+                    if a.failed_tool_calls > 0 {
+                        insight.friction_types.push("tool_error".to_string());
+                        detail.push(format!("{} failed tool calls", a.failed_tool_calls));
+                    }
+                    if a.interrupted > 0 {
+                        insight.friction_types.push("interrupted".to_string());
+                        detail.push(format!("{} interrupted turns", a.interrupted));
+                    }
+                    if !detail.is_empty() {
+                        insight.friction_detail = Some(detail.join(", "));
+                    }
+                }
                 insight
             })
             .collect();
@@ -425,7 +442,7 @@ mod tests {
             friction_counts: HashMap::from([("tool_error".to_string(), 1)]),
             ..Default::default()
         };
-        let rows = vec![
+        let mut rows = vec![
             row(
                 "2026-11-07",
                 "a",
@@ -435,6 +452,7 @@ mod tests {
             row("2026-11-07", "b", "", Some(facet)),
             row("2026-11-08", "c", "", None),
         ];
+        rows[2].aggregates.failed_tool_calls = 2;
         let data = InsightsData::from_ledger(&rows, 7);
 
         assert_eq!(data.total_days, 2);
@@ -465,5 +483,20 @@ mod tests {
         // One day of history is not enough for trends.
         let one_day = InsightsData::from_ledger(&rows[..2], 7);
         assert!(one_day.trends.is_none());
+
+        // Pi/Codex rows (no facet) flag as problems from scan aggregates.
+        let c = data
+            .session_details
+            .iter()
+            .find(|s| s.session_id == "c")
+            .unwrap();
+        assert_eq!(c.friction_types, vec!["tool_error".to_string()]);
+        assert_eq!(c.friction_detail.as_deref(), Some("2 failed tool calls"));
+        let a = data
+            .session_details
+            .iter()
+            .find(|s| s.session_id == "a")
+            .unwrap();
+        assert!(a.friction_types.is_empty());
     }
 }

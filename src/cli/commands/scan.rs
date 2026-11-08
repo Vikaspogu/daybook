@@ -492,7 +492,13 @@ fn compute_aggregates(parsed: &adapters::ParsedSession) -> crate::ledger::Aggreg
                 }
             }
         }
-        if tc.response.is_none() {
+        let is_error = tc
+            .response
+            .as_ref()
+            .and_then(|r| r.get("is_error"))
+            .and_then(|v| v.as_bool())
+            == Some(true);
+        if tc.response.is_none() || is_error {
             agg.failed_tool_calls += 1;
         }
     }
@@ -516,6 +522,33 @@ fn compute_aggregates(parsed: &adapters::ParsedSession) -> crate::ledger::Aggreg
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_compute_aggregates_counts_tool_errors() {
+        use crate::transcript::{ToolCall, TranscriptData};
+        let mut data = TranscriptData::default();
+        for response in [
+            None,
+            Some(serde_json::json!({ "is_error": true, "text": "boom" })),
+            Some(serde_json::Value::String("ok".into())),
+        ] {
+            data.tool_calls.push(ToolCall {
+                name: "bash".into(),
+                input: serde_json::Value::Null,
+                response,
+            });
+        }
+        let parsed = adapters::ParsedSession {
+            data,
+            title: None,
+            start: None,
+            end: None,
+            model: None,
+            usage: None,
+            internal: false,
+        };
+        assert_eq!(compute_aggregates(&parsed).failed_tool_calls, 2);
+    }
 
     #[test]
     fn test_resolve_day_accepts_known_forms() {
