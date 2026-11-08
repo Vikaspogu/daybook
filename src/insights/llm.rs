@@ -3,18 +3,19 @@
 //! The file-based collectors ([`super::collector`], [`super::daily`]) read
 //! local archives, facets and transcripts, which do not exist inside the
 //! distroless server image. This module answers the same questions from the
-//! SQLite ledger: it aggregates session facet data stored by ingest
-//! (`sessions.facets_json`) and asks an OpenAI-compatible chat endpoint for a
-//! narrative summary. When no LLM is configured (or the call fails) it falls
-//! back to the deterministic recommendations in [`super::daily`].
+//! SQLite ledger: every session's summary markdown and tool aggregates (all
+//! runtimes), plus facets when Claude Code's `/insights` wrote them. It asks
+//! an OpenAI-compatible chat endpoint for a narrative summary. When no LLM is
+//! configured (or the call fails) it falls back to the deterministic
+//! recommendations in [`super::daily`].
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::daily::{most_common_key, top_n_keys, DayInsightSummary, SessionInsight};
-use super::facets::SessionFacet;
 use crate::config::InsightsConfig;
+use crate::ledger::WindowSession;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LlmInsights {
@@ -60,18 +61,51 @@ fn window_dates(today: chrono::NaiveDate, days: usize) -> (String, String) {
     )
 }
 
-fn build_summary(
-    window: &[(String, String, SessionFacet)],
-    total_sessions: usize,
-) -> (Vec<(String, SessionInsight)>, DayInsightSummary) {
+/// Plain-text excerpt of a session summary: headings and HTML comments
+/// dropped, whitespace collapsed, capped at `max` chars.
+fn summary_excerpt(md: &str, max: usize) -> String {
+    // YAML frontmatter holds cwd and transcript paths: never send it to the LLM.
+    // Unclosed frontmatter (e.g. cut by the SQL 4000-char cap) yields nothing.
+    let body = match md.strip_prefix("---") {
+        Some(rest) => rest.split_once("\n---").map_or("", |(_, body)| body),
+        None => md,
+    };
+    body.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("<!--"))
+        .flat_map(str::split_whitespace)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max)
+        .collect()
+}
+
+fn build_summary(window: &[WindowSession]) -> (Vec<(String, SessionInsight)>, DayInsightSummary) {
     let mut sessions = Vec::new();
-    for (date, session_id, facet) in window {
+    let mut all_goals: HashMap<String, usize> = HashMap::new();
+    let mut all_frictions: HashMap<String, usize> = HashMap::new();
+    let mut all_satisfaction: HashMap<String, usize> = HashMap::new();
+    for w in window {
+        let facet = w.facet.clone().unwrap_or_default();
+        for (k, v) in &facet.goal_categories {
+            *all_goals.entry(k.clone()).or_insert(0) += v;
+        }
+        for (k, v) in &facet.friction_counts {
+            *all_frictions.entry(k.clone()).or_insert(0) += v;
+        }
+        for (k, v) in &facet.user_satisfaction_counts {
+            *all_satisfaction.entry(k.clone()).or_insert(0) += v;
+        }
         sessions.push((
-            date.clone(),
+            w.journal_date.clone(),
             SessionInsight {
-                name: session_id.clone(),
-                session_id: session_id.clone(),
-                brief_summary: facet.brief_summary.clone(),
+                name: w.session_id.clone(),
+                session_id: w.session_id.clone(),
+                brief_summary: facet
+                    .brief_summary
+                    .clone()
+                    .or_else(|| Some(summary_excerpt(&w.summary_md, 300))),
                 outcome: facet.outcome.clone(),
                 goal_categories: facet.goal_categories.keys().cloned().collect(),
                 friction_types: facet.friction_counts.keys().cloned().collect(),
@@ -87,23 +121,8 @@ fn build_summary(
         ));
     }
 
-    let mut all_goals: HashMap<String, usize> = HashMap::new();
-    let mut all_frictions: HashMap<String, usize> = HashMap::new();
-    let mut all_satisfaction: HashMap<String, usize> = HashMap::new();
-    for (_, _, facet) in window {
-        for (k, v) in &facet.goal_categories {
-            *all_goals.entry(k.clone()).or_insert(0) += v;
-        }
-        for (k, v) in &facet.friction_counts {
-            *all_frictions.entry(k.clone()).or_insert(0) += v;
-        }
-        for (k, v) in &facet.user_satisfaction_counts {
-            *all_satisfaction.entry(k.clone()).or_insert(0) += v;
-        }
-    }
-
     let summary = DayInsightSummary {
-        total_sessions,
+        total_sessions: window.len(),
         sessions_with_friction: sessions
             .iter()
             .filter(|s| !s.1.friction_types.is_empty())
@@ -120,33 +139,49 @@ fn build_summary(
 }
 
 fn build_prompt(
+    window: &[WindowSession],
     sessions: &[(String, SessionInsight)],
     summary: &DayInsightSummary,
     days: usize,
 ) -> String {
+    let failed: u64 = window.iter().map(|w| w.aggregates.failed_tool_calls).sum();
+    let interrupted: u64 = window.iter().map(|w| w.aggregates.interrupted).sum();
+    let tests: u64 = window.iter().map(|w| w.aggregates.test_runs).sum();
     let mut out = format!(
         "You are analyzing a developer's AI coding-agent sessions over the last {days} days.\n\
-         Sessions: {total}, with friction: {fr}, top goals: {goals:?}, top friction: {fri:?}.\n\
-         Sessions (one per line):\n",
+         Sessions: {total}. Totals: failed tool calls {failed}, interrupted turns {interrupted}, test runs {tests}.\n\
+         Facet data (may be empty): with friction {fr}, top goals {goals:?}, top friction {fri:?}.\n\
+         Sessions, newest first (one per line):\n",
         total = summary.total_sessions,
         fr = summary.sessions_with_friction,
         goals = summary.top_goals,
         fri = summary.top_frictions,
     );
-    for (date, s) in sessions.iter().take(MAX_SESSIONS_IN_PROMPT) {
+    for (w, (date, s)) in window.iter().zip(sessions).take(MAX_SESSIONS_IN_PROMPT) {
+        let project = w.project.rsplit('/').next().unwrap_or(&w.project);
         out.push_str(&format!(
-            "- {} goals={:?} outcome={} friction={:?} satisfaction={} summary={}\n",
-            date,
-            s.goal_categories,
-            s.outcome.as_deref().unwrap_or("unknown"),
-            s.friction_types,
-            s.satisfaction.as_deref().unwrap_or("unknown"),
+            "- {date} [{runtime}] {project} failed_tools={f} interrupted={i} tests={t}",
+            runtime = w.runtime,
+            f = w.aggregates.failed_tool_calls,
+            i = w.aggregates.interrupted,
+            t = w.aggregates.test_runs,
+        ));
+        if w.facet.is_some() {
+            out.push_str(&format!(
+                " goals={:?} outcome={} friction={:?}",
+                s.goal_categories,
+                s.outcome.as_deref().unwrap_or("unknown"),
+                s.friction_types,
+            ));
+        }
+        out.push_str(&format!(
+            " summary: {}\n",
             s.brief_summary
                 .as_deref()
                 .unwrap_or("")
                 .chars()
-                .take(120)
-                .collect::<String>(),
+                .take(300)
+                .collect::<String>()
         ));
     }
     out.push_str(
@@ -207,12 +242,13 @@ async fn call_llm(cfg: &InsightsConfig, prompt: &str) -> Result<LlmResponse> {
 
 /// Deterministic recommendations from the ledger window (used when no LLM is
 /// configured or the call fails). Delegates to the same rules the local CLI
-/// uses, fed with counts aggregated from the ledger facets.
-fn fallback_recommendations(window: &[(String, String, SessionFacet)]) -> Vec<String> {
+/// uses, fed with counts from the sessions that carry facets.
+fn fallback_recommendations(window: &[WindowSession]) -> Vec<String> {
     let mut friction: HashMap<String, usize> = HashMap::new();
     let mut outcomes: HashMap<String, usize> = HashMap::new();
     let mut satisfaction: HashMap<String, usize> = HashMap::new();
-    for (_, _, facet) in window {
+    let facets: Vec<_> = window.iter().filter_map(|w| w.facet.as_ref()).collect();
+    for facet in &facets {
         for (k, v) in &facet.friction_counts {
             *friction.entry(k.clone()).or_insert(0) += v;
         }
@@ -223,17 +259,23 @@ fn fallback_recommendations(window: &[(String, String, SessionFacet)]) -> Vec<St
             *satisfaction.entry(k.clone()).or_insert(0) += v;
         }
     }
-    let with_friction = window
+    let with_friction = facets
         .iter()
-        .filter(|(_, _, f)| !f.friction_counts.is_empty())
+        .filter(|f| !f.friction_counts.is_empty())
         .count();
-    super::daily::generate_recommendations(
+    let mut recs = super::daily::generate_recommendations(
         &friction,
         &outcomes,
         &satisfaction,
         with_friction,
-        window.len(),
-    )
+        facets.len(),
+    );
+    if recs.is_empty() && !window.is_empty() {
+        recs.push(
+            "No strong patterns from session facets. Configure the insights LLM for recommendations from session summaries.".to_string(),
+        );
+    }
+    recs
 }
 
 /// Server-side insights: aggregate the ledger window, ask the LLM when
@@ -253,7 +295,10 @@ pub async fn collect(state: &crate::server::handlers::AppState, days: usize) -> 
     let mut config = state.config.read().unwrap().clone();
     config.insights = config.insights.with_env();
     let (from, to) = window_dates(chrono::Utc::now().date_naive(), days);
-    let window = match state.ledger.facets_window(&from, &to) {
+    let window = match state
+        .ledger
+        .insights_window(&from, &to, MAX_SESSIONS_IN_PROMPT)
+    {
         Ok(w) => w,
         Err(e) => {
             eprintln!("[daybook] insights ledger query failed: {e:#}");
@@ -274,26 +319,20 @@ pub async fn collect(state: &crate::server::handlers::AppState, days: usize) -> 
         }
     };
 
-    let mut count_error = None;
-    let total_sessions = match state.ledger.count_sessions_range(&from, &to) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("[daybook] insights session count failed: {e:#}");
-            count_error = Some("session count unavailable".to_string());
-            window.len()
-        }
-    };
-    let (sessions, summary) = build_summary(&window, total_sessions);
+    let (sessions, summary) = build_summary(&window);
 
     let (llm_summary, recommendations, source, error) = if window.is_empty() {
         (
             None,
-            vec!["No sessions with facet data in this window yet. Run a scan so sessions are pushed to the ledger.".to_string()],
+            vec![
+                "No sessions in this window yet. Run a scan so sessions are pushed to the ledger."
+                    .to_string(),
+            ],
             "fallback".to_string(),
             None,
         )
     } else {
-        let prompt = build_prompt(&sessions, &summary, days);
+        let prompt = build_prompt(&window, &sessions, &summary, days);
         match call_llm(&config.insights, &prompt).await {
             Ok(resp) => (
                 Some(resp.summary),
@@ -321,8 +360,8 @@ pub async fn collect(state: &crate::server::handlers::AppState, days: usize) -> 
 
     let data = LlmInsights {
         days,
-        total_sessions,
-        sessions_with_facets: window.len(),
+        total_sessions: window.len(),
+        sessions_with_facets: window.iter().filter(|w| w.facet.is_some()).count(),
         top_goals: summary.top_goals.clone(),
         top_frictions: summary.top_frictions.clone(),
         sessions_with_friction: summary.sessions_with_friction,
@@ -330,7 +369,7 @@ pub async fn collect(state: &crate::server::handlers::AppState, days: usize) -> 
         llm_summary,
         recommendations,
         source,
-        error: error.or(count_error),
+        error,
         cached_seconds: 0,
     };
     // Only cache real LLM answers so config fixes and transient failures retry at once.
@@ -349,6 +388,7 @@ pub async fn collect(state: &crate::server::handlers::AppState, days: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ledger::AggregatesRecord;
 
     #[test]
     fn test_extract_json_object_handles_prose_and_fences() {
@@ -380,5 +420,62 @@ mod tests {
     fn test_llm_response_recommendations_default_empty() {
         let parsed: LlmResponse = serde_json::from_str(r#"{"summary": "s"}"#).unwrap();
         assert!(parsed.recommendations.is_empty());
+    }
+
+    #[test]
+    fn test_prompt_uses_summaries_without_facets() {
+        let session = |id: &str, summary_md: &str, facet| WindowSession {
+            journal_date: "2026-11-01".into(),
+            session_id: id.into(),
+            runtime: "pi".into(),
+            project: "/home/agent/git-repos/daybook".into(),
+            summary_md: summary_md.into(),
+            facet,
+            aggregates: AggregatesRecord {
+                failed_tool_calls: 3,
+                ..Default::default()
+            },
+        };
+        let facet = crate::insights::facets::SessionFacet {
+            brief_summary: Some("Facet wins".into()),
+            ..Default::default()
+        };
+        let window = vec![
+            session(
+                "s1",
+                "---\ncwd: /secret/path\n---\n# Session\n<!-- meta -->\n## Summary\nFixed the   insights\nfallback.",
+                None,
+            ),
+            session("s2", "## Summary\nIgnored.", Some(facet)),
+        ];
+        let (sessions, summary) = build_summary(&window);
+        assert_eq!(summary.total_sessions, 2);
+        assert_eq!(
+            sessions[0].1.brief_summary.as_deref(),
+            Some("Fixed the insights fallback.")
+        );
+        assert_eq!(sessions[1].1.brief_summary.as_deref(), Some("Facet wins"));
+        let prompt = build_prompt(&window, &sessions, &summary, 7);
+        assert!(prompt.contains("[pi] daybook failed_tools=3"));
+        assert!(prompt.contains("summary: Fixed the insights fallback."));
+        assert!(
+            !prompt.contains("/secret/path"),
+            "frontmatter never reaches the LLM"
+        );
+        assert_eq!(summary_excerpt("---\ncwd: /secret/path", 300), "");
+        assert_eq!(
+            fallback_recommendations(&window[..1]).len(),
+            1,
+            "no facets still yields a hint"
+        );
+        // Ratio rules count only facet-bearing sessions, so facet-less rows do not dilute them.
+        let rough = crate::insights::facets::SessionFacet {
+            friction_counts: HashMap::from([("tool_error".to_string(), 1)]),
+            ..Default::default()
+        };
+        let mixed = vec![session("a", "", None), session("b", "", Some(rough))];
+        assert!(fallback_recommendations(&mixed)
+            .iter()
+            .any(|r| r.starts_with("More than half")));
     }
 }
