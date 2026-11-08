@@ -225,7 +225,15 @@ impl TranscriptParser {
             // Bounded tool outcomes, so decisions made in tool results reach the summary
             for call in data.tool_calls.iter().take(15) {
                 if let Some(response) = &call.response {
-                    let resp = response.to_string();
+                    // Pi error results are {"is_error": true, "text": ...}.
+                    let resp = match response.get("text").and_then(|t| t.as_str()) {
+                        Some(text)
+                            if response.get("is_error").and_then(|v| v.as_bool()) == Some(true) =>
+                        {
+                            format!("ERROR: {text}")
+                        }
+                        _ => response.to_string(),
+                    };
                     let resp = resp.trim().trim_matches('"');
                     if !resp.is_empty() {
                         text.push_str(&format!(

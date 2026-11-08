@@ -594,7 +594,14 @@ fn parse_pi(path: &Path) -> Result<ParsedSession> {
                                 .and_then(|c| c.as_array())
                                 .and_then(|c| join_text_blocks(c, "text")),
                         ) {
-                            tool_responses.insert(id.to_string(), Value::String(text));
+                            // Keep the error text for the summarizer; scan counts it as failed.
+                            let resp =
+                                if message.get("isError").and_then(|v| v.as_bool()) == Some(true) {
+                                    serde_json::json!({ "is_error": true, "text": text })
+                                } else {
+                                    Value::String(text)
+                                };
+                            tool_responses.insert(id.to_string(), resp);
                         }
                     }
                     _ => {}
@@ -1009,6 +1016,25 @@ mod tests {
                 prompt.lines().next().unwrap_or("")
             );
         }
+    }
+
+    #[test]
+    fn test_pi_tool_error_keeps_text_and_flag() {
+        let src = std::fs::read_to_string(fixture("pi-session.jsonl")).unwrap();
+        let src = src.replace(
+            r#""toolName":"write","content""#,
+            r#""toolName":"write","isError":true,"content""#,
+        );
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("pi-session.jsonl");
+        std::fs::write(&path, src).unwrap();
+        let parsed = parse_session(&pi_meta(&path).unwrap()).unwrap();
+        assert_eq!(
+            parsed.data.tool_calls[0].response,
+            Some(serde_json::json!({ "is_error": true, "text": "ok" }))
+        );
+        let text = crate::transcript::TranscriptParser::to_condensed_text(&parsed.data);
+        assert!(text.contains("- write -> ERROR: ok"), "{text}");
     }
 
     #[test]

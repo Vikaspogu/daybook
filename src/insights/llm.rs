@@ -148,9 +148,10 @@ fn build_prompt(
     let interrupted: u64 = window.iter().map(|w| w.aggregates.interrupted).sum();
     let tests: u64 = window.iter().map(|w| w.aggregates.test_runs).sum();
     let mut out = format!(
-        "You are analyzing a developer's AI coding-agent sessions over the last {days} days.\n\
-         Sessions: {total}. Totals: failed tool calls {failed}, interrupted turns {interrupted}, test runs {tests}.\n\
-         Facet data (may be empty): with friction {fr}, top goals {goals:?}, top friction {fri:?}.\n\
+        "You are summarizing a developer's AI coding-agent sessions over the last {days} days.\n\
+         Sessions: {total}. Failed tool calls: {failed}. Interrupted turns: {interrupted}. Test runs: {tests}.\n\
+         Sessions with Claude friction tags: {fr}. Top goals: {goals:?}. Top friction: {fri:?}.\n\
+         Friction tags exist only for Claude sessions; use the failed and interrupted counts for all sessions.\n\
          Sessions, newest first (one per line):\n",
         total = summary.total_sessions,
         fr = summary.sessions_with_friction,
@@ -185,8 +186,11 @@ fn build_prompt(
         ));
     }
     out.push_str(
-        "\nReturn JSON: {\"summary\": \"<3-4 sentence paragraph on work patterns, friction, and momentum>\", \
-         \"recommendations\": [\"<concrete change>\", ...]}. 3-6 recommendations, each actionable in this repo's context.",
+        "\nWrite for a busy developer. Use plain words, short sentences, and \"you\". \
+         No jargon, no praise, no filler like \"demonstrated\" or \"momentum\". \
+         Name real projects and real problems from the data. Do not invent metrics or tags.\n\
+         Return JSON: {\"summary\": \"<2-3 short sentences: what you worked on and what went wrong>\", \
+         \"recommendations\": [\"<one short sentence, max 15 words>\", ...]}. 3 recommendations, each a concrete next step.",
     );
     out
 }
