@@ -85,6 +85,40 @@ impl TrendData {
             }
         }
 
+        Self::from_dated(dates, &date_session_counts, &date_facets, days)
+    }
+
+    /// Trends from ledger rows (all runtimes); facets come from each row.
+    pub fn from_window(
+        rows: &[crate::ledger::WindowSession],
+        dates: &[String],
+        days: usize,
+    ) -> Option<Self> {
+        if dates.len() < 2 {
+            return None;
+        }
+        let mut date_session_counts: HashMap<String, usize> = HashMap::new();
+        let mut date_facets = Vec::new();
+        for r in rows {
+            *date_session_counts
+                .entry(r.journal_date.clone())
+                .or_default() += 1;
+            if let Some(facet) = &r.facet {
+                date_facets.push(DatedFacet {
+                    date: r.journal_date.clone(),
+                    facet: facet.clone(),
+                });
+            }
+        }
+        Self::from_dated(dates, &date_session_counts, &date_facets, days)
+    }
+
+    fn from_dated(
+        dates: &[String],
+        date_session_counts: &HashMap<String, usize>,
+        date_facets: &[DatedFacet],
+        days: usize,
+    ) -> Option<Self> {
         // Split dates into two halves: first half = previous, second half = current
         let mid = dates.len() / 2;
         let previous_dates = &dates[..mid];
@@ -134,7 +168,7 @@ impl TrendData {
             pct_change(previous_satisfaction_score, current_satisfaction_score);
 
         // Calculate weekly breakdown
-        let weekly_stats = calc_weekly_stats(dates, &date_session_counts, &date_facets);
+        let weekly_stats = calc_weekly_stats(dates, date_session_counts, date_facets);
 
         // Build period labels
         let half_days = days / 2;

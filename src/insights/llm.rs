@@ -53,7 +53,7 @@ fn cache() -> &'static std::sync::Mutex<HashMap<usize, CacheEntry>> {
 /// Inclusive UTC `[from, to]` covering exactly `days` calendar days ending `today`.
 /// Journal dates are bucketed in UTC, and both ledger queries share these bounds
 /// so the counts stay comparable.
-fn window_dates(today: chrono::NaiveDate, days: usize) -> (String, String) {
+pub(crate) fn window_dates(today: chrono::NaiveDate, days: usize) -> (String, String) {
     let from = today - chrono::Duration::days(days.saturating_sub(1) as i64);
     (
         from.format("%Y-%m-%d").to_string(),
@@ -63,7 +63,7 @@ fn window_dates(today: chrono::NaiveDate, days: usize) -> (String, String) {
 
 /// Plain-text excerpt of a session summary: headings and HTML comments
 /// dropped, whitespace collapsed, capped at `max` chars.
-fn summary_excerpt(md: &str, max: usize) -> String {
+pub(crate) fn summary_excerpt(md: &str, max: usize) -> String {
     // YAML frontmatter holds cwd and transcript paths: never send it to the LLM.
     // Unclosed frontmatter (e.g. cut by the SQL 4000-char cap) yields nothing.
     let body = match md.strip_prefix("---") {
@@ -435,6 +435,7 @@ mod tests {
                 failed_tool_calls: 3,
                 ..Default::default()
             },
+            usage: Default::default(),
         };
         let facet = crate::insights::facets::SessionFacet {
             brief_summary: Some("Facet wins".into()),
