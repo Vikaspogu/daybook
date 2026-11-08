@@ -1030,9 +1030,25 @@ pub async fn get_insights(
     let days: usize = params
         .get("days")
         .and_then(|d| d.parse().ok())
-        .unwrap_or(30);
+        .unwrap_or(30)
+        // Bounds the ledger scan and keeps window_dates inside chrono's range.
+        .clamp(1, 365);
 
-    match InsightsData::collect(&config, Some(days), &state.pricing) {
+    // The archive lives on the machine that scanned. A server without one
+    // (the deployed pod holds only the ledger) builds insights from the ledger.
+    let data = match InsightsData::collect(&config, Some(days), &state.pricing) {
+        Ok(d) if d.total_days > 0 => Ok(d),
+        _ => {
+            let (from, to) =
+                crate::insights::llm::window_dates(chrono::Utc::now().date_naive(), days);
+            // ponytail: only the newest 500 rows carry summary text for the timeline.
+            state
+                .ledger
+                .insights_window(&from, &to, 500)
+                .map(|rows| InsightsData::from_ledger(&rows, days))
+        }
+    };
+    match data {
         Ok(data) => {
             let dto = InsightsDto {
                 total_days: data.total_days,

@@ -949,13 +949,14 @@ impl Ledger {
             "SELECT journal_date, session_id, runtime, project,
                     CASE WHEN ROW_NUMBER() OVER (ORDER BY journal_date DESC, session_id) <= ?3
                          THEN substr(summary_md, 1, 4000) ELSE '' END,
-                    facets_json, aggregates_json
+                    facets_json, aggregates_json, usage_json
              FROM sessions WHERE journal_date BETWEEN ?1 AND ?2
              ORDER BY journal_date DESC, session_id",
         )?;
         let rows = stmt.query_map(rusqlite::params![from, to, summaries as i64], |row| {
             let facets: Option<String> = row.get(5)?;
             let aggregates: Option<String> = row.get(6)?;
+            let usage: Option<String> = row.get(7)?;
             Ok(WindowSession {
                 journal_date: row.get(0)?,
                 session_id: row.get(1)?,
@@ -964,6 +965,9 @@ impl Ledger {
                 summary_md: row.get(4)?,
                 facet: facets.and_then(|j| serde_json::from_str(&j).ok()),
                 aggregates: aggregates
+                    .and_then(|j| serde_json::from_str(&j).ok())
+                    .unwrap_or_default(),
+                usage: usage
                     .and_then(|j| serde_json::from_str(&j).ok())
                     .unwrap_or_default(),
             })
@@ -982,6 +986,7 @@ pub struct WindowSession {
     pub summary_md: String,
     pub facet: Option<crate::insights::facets::SessionFacet>,
     pub aggregates: AggregatesRecord,
+    pub usage: UsageRecord,
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {

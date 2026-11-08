@@ -158,46 +158,13 @@ impl InsightsData {
                     if let Some(session_id) = extract_session_id_from_frontmatter(&content) {
                         let token_usage = all_session_usages.get(&session_id).cloned();
 
-                        let insight = if let Some(facet) = facet_map.get(&session_id) {
-                            // Determine the most common satisfaction level
-                            let satisfaction = facet
-                                .user_satisfaction_counts
-                                .iter()
-                                .max_by_key(|(_, count)| *count)
-                                .map(|(name, _)| name.clone());
-
-                            SessionInsight {
-                                session_id: session_id.clone(),
-                                date: date.clone(),
-                                session_name: session_name.clone(),
-                                brief_summary: facet.brief_summary.clone(),
-                                outcome: facet.outcome.clone(),
-                                goal_categories: facet.goal_categories.keys().cloned().collect(),
-                                friction_types: facet.friction_counts.keys().cloned().collect(),
-                                friction_detail: facet.friction_detail.clone(),
-                                satisfaction,
-                                claude_helpfulness: facet.claude_helpfulness.clone(),
-                                session_type: facet.session_type.clone(),
-                                token_usage,
-                            }
-                        } else {
-                            // No facet data available for this session
-                            SessionInsight {
-                                session_id: session_id.clone(),
-                                date: date.clone(),
-                                session_name: session_name.clone(),
-                                brief_summary: None,
-                                outcome: None,
-                                goal_categories: Vec::new(),
-                                friction_types: Vec::new(),
-                                friction_detail: None,
-                                satisfaction: None,
-                                claude_helpfulness: None,
-                                session_type: None,
-                                token_usage,
-                            }
-                        };
-                        session_details.push(insight);
+                        session_details.push(session_insight(
+                            &session_id,
+                            date,
+                            session_name,
+                            facet_map.get(&session_id).copied(),
+                            token_usage,
+                        ));
                     }
                 }
             }
@@ -221,6 +188,150 @@ impl InsightsData {
             trends,
             usage_summary: Some(usage_summary),
         })
+    }
+
+    /// Build insights from ledger rows (all runtimes). Used when the server
+    /// has no local archive, e.g. the deployed pod that only holds the ledger.
+    pub fn from_ledger(rows: &[crate::ledger::WindowSession], days: usize) -> Self {
+        // Distinct session dates, newest first (rows arrive in any order).
+        let mut dates: Vec<String> = rows.iter().map(|r| r.journal_date.clone()).collect();
+        dates.sort_unstable_by(|a, b| b.cmp(a));
+        dates.dedup();
+
+        let mut daily_usage: Vec<crate::usage::types::DailyUsage> = dates
+            .iter()
+            .rev()
+            .map(|d| crate::usage::types::DailyUsage {
+                date: d.clone(),
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                total_cost_usd: 0.0,
+                session_count: 0,
+            })
+            .collect();
+        for r in rows {
+            if let Some(du) = daily_usage.iter_mut().find(|d| d.date == r.journal_date) {
+                du.input_tokens += r.usage.input;
+                du.output_tokens += r.usage.output;
+                du.cache_creation_tokens += r.usage.cache_creation;
+                du.cache_read_tokens += r.usage.cache_read;
+                du.total_cost_usd += r.usage.cost_usd.unwrap_or(0.0);
+                du.session_count += 1;
+            }
+        }
+
+        // Oldest first, for charts.
+        let daily_stats: Vec<DailyStat> = daily_usage
+            .iter()
+            .map(|du| DailyStat {
+                date: du.date.clone(),
+                session_count: du.session_count,
+                has_digest: false,
+                total_tokens: Some(
+                    du.input_tokens
+                        + du.output_tokens
+                        + du.cache_creation_tokens
+                        + du.cache_read_tokens,
+                ),
+                total_cost: Some(du.total_cost_usd),
+            })
+            .collect();
+
+        let facets: Vec<(String, SessionFacet)> = rows
+            .iter()
+            .filter_map(|r| r.facet.clone().map(|f| (r.session_id.clone(), f)))
+            .collect();
+
+        let session_details = rows
+            .iter()
+            .map(|r| {
+                let mut insight = session_insight(
+                    &r.session_id,
+                    &r.journal_date,
+                    &r.project,
+                    r.facet.as_ref(),
+                    Some(SessionUsage {
+                        session_id: r.session_id.clone(),
+                        input_tokens: r.usage.input,
+                        output_tokens: r.usage.output,
+                        cache_creation_tokens: r.usage.cache_creation,
+                        cache_read_tokens: r.usage.cache_read,
+                        total_cost_usd: r.usage.cost_usd.unwrap_or(0.0),
+                        model_calls: HashMap::new(),
+                        first_timestamp: None,
+                    }),
+                );
+                if insight.brief_summary.is_none() && !r.summary_md.is_empty() {
+                    insight.brief_summary = Some(super::llm::summary_excerpt(&r.summary_md, 300));
+                }
+                insight
+            })
+            .collect();
+
+        let chronological_dates: Vec<String> = daily_stats.iter().map(|s| s.date.clone()).collect();
+        let usage_summary = UsageSummary {
+            total_input_tokens: daily_usage.iter().map(|d| d.input_tokens).sum(),
+            total_output_tokens: daily_usage.iter().map(|d| d.output_tokens).sum(),
+            total_cache_creation_tokens: daily_usage.iter().map(|d| d.cache_creation_tokens).sum(),
+            total_cache_read_tokens: daily_usage.iter().map(|d| d.cache_read_tokens).sum(),
+            total_cost_usd: daily_usage.iter().map(|d| d.total_cost_usd).sum(),
+            total_sessions: rows.len(),
+            // ponytail: the ledger stores no per-model call counts.
+            model_distribution: Vec::new(),
+            daily_usage,
+        };
+
+        InsightsData {
+            total_days: dates.len(),
+            total_sessions: rows.len(),
+            daily_stats,
+            goal_distribution: aggregate_hashmap_field(&facets, |f| &f.goal_categories),
+            friction_distribution: aggregate_hashmap_field(&facets, |f| &f.friction_counts),
+            satisfaction_distribution: aggregate_hashmap_field(&facets, |f| {
+                &f.user_satisfaction_counts
+            }),
+            language_distribution: Vec::new(),
+            session_type_distribution: count_option_field(&facets, |f| f.session_type.as_deref()),
+            session_details,
+            trends: TrendData::from_window(rows, &chronological_dates, days),
+            usage_summary: Some(usage_summary),
+        }
+    }
+}
+
+/// One session row for the timeline; facet fields stay empty without a facet.
+fn session_insight(
+    session_id: &str,
+    date: &str,
+    session_name: &str,
+    facet: Option<&SessionFacet>,
+    token_usage: Option<SessionUsage>,
+) -> SessionInsight {
+    SessionInsight {
+        session_id: session_id.to_string(),
+        date: date.to_string(),
+        session_name: session_name.to_string(),
+        brief_summary: facet.and_then(|f| f.brief_summary.clone()),
+        outcome: facet.and_then(|f| f.outcome.clone()),
+        goal_categories: facet
+            .map(|f| f.goal_categories.keys().cloned().collect())
+            .unwrap_or_default(),
+        friction_types: facet
+            .map(|f| f.friction_counts.keys().cloned().collect())
+            .unwrap_or_default(),
+        friction_detail: facet.and_then(|f| f.friction_detail.clone()),
+        // Most common satisfaction level.
+        satisfaction: facet.and_then(|f| {
+            f.user_satisfaction_counts
+                .iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(name, _)| name.clone())
+        }),
+        claude_helpfulness: facet.and_then(|f| f.claude_helpfulness.clone()),
+        session_type: facet.and_then(|f| f.session_type.clone()),
+        token_usage,
     }
 }
 
@@ -282,4 +393,77 @@ fn extract_session_id_from_frontmatter(content: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ledger::{UsageRecord, WindowSession};
+
+    fn row(date: &str, id: &str, summary: &str, facet: Option<SessionFacet>) -> WindowSession {
+        WindowSession {
+            journal_date: date.into(),
+            session_id: id.into(),
+            runtime: "pi".into(),
+            project: "daybook".into(),
+            summary_md: summary.into(),
+            facet,
+            aggregates: Default::default(),
+            usage: UsageRecord {
+                input: 10,
+                output: 5,
+                cost_usd: Some(0.5),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn from_ledger_fills_panels_without_archive() {
+        let facet = SessionFacet {
+            brief_summary: Some("facet brief".into()),
+            friction_counts: HashMap::from([("tool_error".to_string(), 1)]),
+            ..Default::default()
+        };
+        let rows = vec![
+            row(
+                "2026-11-07",
+                "a",
+                "---\ncwd: /secret\n---\nShipped the fix.",
+                None,
+            ),
+            row("2026-11-07", "b", "", Some(facet)),
+            row("2026-11-08", "c", "", None),
+        ];
+        let data = InsightsData::from_ledger(&rows, 7);
+
+        assert_eq!(data.total_days, 2);
+        assert_eq!(data.total_sessions, 3);
+        // Oldest first, counts and tokens per day.
+        assert_eq!(data.daily_stats[0].date, "2026-11-07");
+        assert_eq!(data.daily_stats[0].session_count, 2);
+        assert_eq!(data.daily_stats[0].total_tokens, Some(30));
+        assert_eq!(data.daily_stats[1].session_count, 1);
+        assert!(data.trends.is_some());
+        assert_eq!(data.friction_distribution[0].name, "tool_error");
+        assert_eq!(data.usage_summary.as_ref().unwrap().total_cost_usd, 1.5);
+
+        // Timeline excerpt comes from the summary, never the frontmatter.
+        let a = data
+            .session_details
+            .iter()
+            .find(|s| s.session_id == "a")
+            .unwrap();
+        assert_eq!(a.brief_summary.as_deref(), Some("Shipped the fix."));
+        let b = data
+            .session_details
+            .iter()
+            .find(|s| s.session_id == "b")
+            .unwrap();
+        assert_eq!(b.brief_summary.as_deref(), Some("facet brief"));
+
+        // One day of history is not enough for trends.
+        let one_day = InsightsData::from_ledger(&rows[..2], 7);
+        assert!(one_day.trends.is_none());
+    }
 }
