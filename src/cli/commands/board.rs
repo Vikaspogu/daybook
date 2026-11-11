@@ -458,7 +458,7 @@ pub async fn run(args: BoardArgs) -> Result<()> {
             }
         }
         BoardAction::Mcp => {
-            crate::board::mcp::run_mcp_stdio(&client, &cwd).await?;
+            crate::board::mcp::run_mcp_stdio(std::sync::Arc::new(client), &cwd).await?;
         }
     }
 

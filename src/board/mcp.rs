@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::board::client::BoardClient;
 use crate::board::globs::{normalize_repo_path, validate_glob_pattern};
@@ -18,21 +19,36 @@ pub enum McpFraming {
 }
 
 /// Detect framing from the first non-whitespace byte in `reader`, then process requests until EOF.
-pub async fn run_mcp_stdio(client: &BoardClient, cwd: &Path) -> Result<()> {
+pub async fn run_mcp_stdio(client: Arc<BoardClient>, cwd: &Path) -> Result<()> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut reader = BufReader::new(stdin.lock());
     let mut writer = stdout.lock();
-    run_mcp_loop(&mut reader, &mut writer, client, cwd).await
+    run_mcp_loop(&mut reader, &mut writer, &client, cwd).await
 }
 
 pub async fn run_mcp_loop<R: BufRead, W: Write>(
     reader: &mut R,
     writer: &mut W,
-    client: &BoardClient,
+    client: &Arc<BoardClient>,
     cwd: &Path,
 ) -> Result<()> {
     let identity = resolve_board_identity(cwd, None, None);
+    // Self-register on session start (first tick fires immediately) and keep presence
+    // fresh every 60s, so pi agents appear on the board without the model volunteering a
+    // write tool call. Runs off the request path: a down board only delays registration
+    // to the next tick, and never blocks the MCP handshake. Invalid workspaces are
+    // skipped by ensure_registered itself. Agents go stale (~2h) after the session ends
+    // because nothing releases on exit.
+    let hb_client = Arc::clone(client);
+    let hb_identity = identity.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            hb_client.ensure_registered(&hb_identity).await;
+        }
+    });
     let mut framing: Option<McpFraming> = None;
 
     while let Some((msg_str, detected)) = read_next_message(reader, framing)? {
@@ -538,13 +554,47 @@ mod tests {
     use std::io::Cursor;
 
     #[tokio::test]
+    async fn mcp_registers_agent_on_session_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let ledger = Ledger::open(&dir.path().join("board.db")).unwrap();
+        let client = Arc::new(BoardClient::Local {
+            ledger,
+            caller: BoardCaller::local(),
+        });
+        let mut reader = Cursor::new(Vec::new()); // EOF immediately
+        let mut out = Vec::new();
+        run_mcp_loop(&mut reader, &mut out, &client, &repo)
+            .await
+            .unwrap();
+        // Registration happens in a spawned task; poll until it lands.
+        let mut registered = false;
+        for _ in 0..50 {
+            let snap = client.status(Some("all"), None, None).await.unwrap();
+            if snap.agents.iter().any(|a| a.project == "repo") {
+                registered = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(registered);
+    }
+
+    #[tokio::test]
     async fn mcp_handles_newline_and_content_length_framing() {
         let dir = tempfile::tempdir().unwrap();
         let ledger = Ledger::open(&dir.path().join("board.db")).unwrap();
-        let client = BoardClient::Local {
+        let client = Arc::new(BoardClient::Local {
             ledger,
             caller: BoardCaller::local(),
-        };
+        });
 
         // 1. Newline framing: initialize + tools/list + tools/call(claim)
         let input_nl = concat!(
