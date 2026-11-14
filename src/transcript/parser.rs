@@ -112,6 +112,9 @@ impl TranscriptParser {
         let mut tool_calls = Vec::new();
         let mut files_modified = Vec::new();
         let mut summary = None;
+        let mut claude_call_ids: Vec<(usize, String)> = Vec::new();
+        let mut claude_responses: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
 
         for line in reader.lines() {
             let line = line.context("Failed to read line")?;
@@ -141,6 +144,74 @@ impl TranscriptParser {
                         }
                     }
 
+                    // Claude stores calls and results in message.content blocks.
+                    if let Some(blocks) = entry
+                        .extra
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(serde_json::Value::as_array)
+                    {
+                        for block in blocks {
+                            match block.get("type").and_then(|v| v.as_str()) {
+                                Some("tool_use") => {
+                                    let name = block
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown")
+                                        .to_string();
+                                    let input = block
+                                        .get("input")
+                                        .cloned()
+                                        .unwrap_or(serde_json::Value::Null);
+                                    if let Some(id) = block.get("id").and_then(|v| v.as_str()) {
+                                        claude_call_ids.push((tool_calls.len(), id.to_string()));
+                                    }
+                                    if matches!(name.as_str(), "Write" | "Edit") {
+                                        if let Some(path) =
+                                            input.get("file_path").and_then(|v| v.as_str())
+                                        {
+                                            if !files_modified.iter().any(|p| p == path) {
+                                                files_modified.push(path.to_string());
+                                            }
+                                        }
+                                    }
+                                    tool_calls.push(ToolCall {
+                                        name,
+                                        input,
+                                        response: None,
+                                    });
+                                }
+                                Some("tool_result") => {
+                                    if let Some(id) =
+                                        block.get("tool_use_id").and_then(|v| v.as_str())
+                                    {
+                                        let text = match block.get("content") {
+                                            Some(serde_json::Value::String(text)) => text.clone(),
+                                            Some(serde_json::Value::Array(parts)) => parts
+                                                .iter()
+                                                .filter_map(|part| {
+                                                    part.get("text").and_then(|v| v.as_str())
+                                                })
+                                                .collect::<Vec<_>>()
+                                                .join("\n"),
+                                            Some(value) => value.to_string(),
+                                            None => String::new(),
+                                        };
+                                        let response =
+                                            if block.get("is_error").and_then(|v| v.as_bool())
+                                                == Some(true)
+                                            {
+                                                serde_json::json!({"is_error": true, "text": text})
+                                            } else {
+                                                serde_json::Value::String(text)
+                                            };
+                                        claude_responses.insert(id.to_string(), response);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     // Extract tool calls
                     if let Some(tool_name) = &entry.tool_name {
                         let tool_call = ToolCall {
@@ -178,6 +249,11 @@ impl TranscriptParser {
                 }
             }
         }
+        for (index, id) in claude_call_ids {
+            if let Some(response) = claude_responses.get(&id) {
+                tool_calls[index].response = Some(response.clone());
+            }
+        }
 
         Ok(TranscriptData {
             entries,
@@ -201,11 +277,25 @@ impl TranscriptParser {
             }
         }
 
-        // Add assistant messages (bounded so a long session stays cheap to summarize)
+        // Keep ordered head-and-tail evidence so final outcomes survive condensation.
         if !data.assistant_messages.is_empty() {
             text.push_str("## Assistant Messages\n\n");
-            for msg in data.assistant_messages.iter().take(20) {
-                text.push_str(&format!("- {}\n", truncate_text(msg, 300)));
+            let mut previous = None;
+            for index in bounded_indices(data.assistant_messages.len(), 20) {
+                if let Some(previous) = previous {
+                    if index > previous + 1 {
+                        text.push_str(&format!(
+                            "- ... {} assistant messages omitted ...\n",
+                            index - previous - 1
+                        ));
+                    }
+                }
+                text.push_str(&format!(
+                    "- [{}] {}\n",
+                    index + 1,
+                    truncate_text(&data.assistant_messages[index], 300)
+                ));
+                previous = Some(index);
             }
             text.push('\n');
         }
@@ -222,27 +312,38 @@ impl TranscriptParser {
                 text.push_str(&format!("- {}: {} calls\n", tool, count));
             }
 
-            // Bounded tool outcomes, so decisions made in tool results reach the summary
-            for call in data.tool_calls.iter().take(15) {
-                if let Some(response) = &call.response {
-                    // Pi error results are {"is_error": true, "text": ...}.
-                    let resp = match response.get("text").and_then(|t| t.as_str()) {
-                        Some(text)
-                            if response.get("is_error").and_then(|v| v.as_bool()) == Some(true) =>
-                        {
-                            format!("ERROR: {text}")
-                        }
-                        _ => response.to_string(),
-                    };
-                    let resp = resp.trim().trim_matches('"');
-                    if !resp.is_empty() {
+            // Include early failures and late verification without dropping chronology.
+            let outcomes: Vec<_> = data
+                .tool_calls
+                .iter()
+                .enumerate()
+                .filter(|(_, call)| {
+                    call.response
+                        .as_ref()
+                        .is_some_and(tool_response_has_content)
+                })
+                .collect();
+            let mut previous = None;
+            for outcome_index in bounded_indices(outcomes.len(), 15) {
+                if let Some(previous) = previous {
+                    if outcome_index > previous + 1 {
                         text.push_str(&format!(
-                            "- {} -> {}\n",
-                            call.name,
-                            truncate_text(resp, 200)
+                            "- ... {} tool outcomes omitted ...\n",
+                            outcome_index - previous - 1
                         ));
                     }
                 }
+                let (index, call) = outcomes[outcome_index];
+                if let Some(response) = &call.response {
+                    let resp = tool_response_text(response);
+                    text.push_str(&format!(
+                        "- [{}] {} -> {}\n",
+                        index + 1,
+                        call.name,
+                        truncate_text(&resp, 200)
+                    ));
+                }
+                previous = Some(outcome_index);
             }
             text.push('\n');
         }
@@ -265,6 +366,38 @@ impl TranscriptParser {
 
         text
     }
+}
+
+fn tool_response_has_content(response: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match response {
+        Value::Null => false,
+        Value::String(text) => !text.trim().trim_matches('"').trim().is_empty(),
+        Value::Object(map) if map.get("is_error").and_then(Value::as_bool) == Some(true) => map
+            .get("text")
+            .and_then(Value::as_str)
+            .is_none_or(|text| !text.trim().is_empty()),
+        _ => true,
+    }
+}
+
+fn tool_response_text(response: &serde_json::Value) -> String {
+    // Pi error results are {"is_error": true, "text": ...}.
+    let text = match response.get("text").and_then(|t| t.as_str()) {
+        Some(text) if response.get("is_error").and_then(|v| v.as_bool()) == Some(true) => {
+            format!("ERROR: {text}")
+        }
+        _ => response.to_string(),
+    };
+    text.trim().trim_matches('"').to_string()
+}
+
+fn bounded_indices(len: usize, limit: usize) -> Vec<usize> {
+    if len <= limit {
+        return (0..len).collect();
+    }
+    let head = limit / 2;
+    (0..head).chain(len - (limit - head)..len).collect()
 }
 
 /// Truncate text to a maximum length, adding ellipsis if needed
@@ -324,5 +457,95 @@ mod tests {
         let mut data = create_empty_transcript_data();
         data.user_messages = vec!["   ".to_string(), "actual content".to_string()];
         assert!(!data.is_empty());
+    }
+    #[test]
+    fn condensed_text_keeps_later_completion_and_verification() {
+        let mut data = create_empty_transcript_data();
+        data.user_messages = vec![
+            "Fix the duplicate chat".into(),
+            "Fix the duplicate chat".into(),
+        ];
+        data.assistant_messages = (0..30).map(|i| format!("Investigation step {i}")).collect();
+        data.assistant_messages.push(
+            "Completed the duplicate chat fix. Verification: cargo test --quiet: 42 passed.".into(),
+        );
+        data.tool_calls = (0..20)
+            .map(|i| ToolCall {
+                name: "bash".into(),
+                input: serde_json::Value::Null,
+                response: Some(serde_json::json!(format!("check {i}"))),
+            })
+            .collect();
+        data.tool_calls.push(ToolCall {
+            name: "bash".into(),
+            input: serde_json::Value::Null,
+            response: Some(serde_json::json!("final verification: 42 passed")),
+        });
+        data.tool_calls.extend((0..2).map(|_| ToolCall {
+            name: "read".into(),
+            input: serde_json::Value::Null,
+            response: None,
+        }));
+        data.tool_calls.extend((0..20).map(|i| ToolCall {
+            name: "read".into(),
+            input: serde_json::Value::Null,
+            response: Some(match i % 3 {
+                0 => serde_json::Value::Null,
+                1 => serde_json::json!(""),
+                _ => serde_json::json!({"is_error": true, "text": ""}),
+            }),
+        }));
+
+        let text = TranscriptParser::to_condensed_text(&data);
+        let completion =
+            "Completed the duplicate chat fix. Verification: cargo test --quiet: 42 passed.";
+        assert!(text.contains(completion));
+        assert!(text.contains("final verification: 42 passed"));
+        assert!(text.contains("- [21] bash -> final verification: 42 passed"));
+        assert!(text.contains("11 assistant messages omitted"));
+        assert!(text.contains("6 tool outcomes omitted"));
+        assert!(text.find("Investigation step 0").unwrap() < text.find(completion).unwrap());
+        assert!(!text.contains("Investigation step 15"));
+    }
+
+    #[test]
+    fn parses_claude_nested_tool_calls_and_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+                "\n",
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","is_error":true,"content":[{"type":"text","text":"exit 1"}]}]}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let data = TranscriptParser::parse(path).unwrap();
+        assert_eq!(data.tool_calls.len(), 1);
+        assert_eq!(data.tool_calls[0].input["command"], "cargo test");
+        assert_eq!(
+            data.tool_calls[0].response,
+            Some(serde_json::json!({"is_error": true, "text": "exit 1"}))
+        );
+    }
+
+    #[test]
+    fn claude_file_activity_requires_a_write_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"read-1","name":"Read","input":{"file_path":"src/read.rs"}}]}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"edit-1","name":"Edit","input":{"file_path":"src/edit.rs"}}]}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let data = TranscriptParser::parse(path).unwrap();
+        assert_eq!(data.files_modified, vec!["src/edit.rs"]);
     }
 }

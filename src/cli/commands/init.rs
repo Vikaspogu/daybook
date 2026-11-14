@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect, Input, Select};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::archive::ArchiveManager;
 use crate::config::{get_config_path, load_config, save_config, Config};
@@ -66,8 +68,12 @@ pub async fn run(
     let today_dir = manager.ensure_today_dir()?;
     println!("[daybook] Today's archive: {}", today_dir.display());
 
+    let home = dirs::home_dir().context("Could not determine home directory")?;
+    install_recall_skills(&home)?;
+
     if configure_board {
-        configure_board_mcp_and_hooks()?;
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        configure_board_mcp_and_hooks(&cwd, &home)?;
     }
 
     println!();
@@ -76,42 +82,183 @@ pub async fn run(
     Ok(())
 }
 
-fn configure_board_mcp_and_hooks() -> Result<()> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+const RECALL_SKILL: &str = include_str!("../../../skills/daybook-recall/SKILL.md");
+const PI_EXTENSION: &str = include_str!("../../../hooks/daybook-pi.ts");
+pub(crate) const CLAUDE_EDIT_MATCHER: &str =
+    "Edit|Write|MultiEdit|NotebookEdit|replace|replace_match|insert";
+
+pub(crate) fn stage_write(path: &Path, content: &str) -> Result<PathBuf> {
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        anyhow::bail!("Refusing to write through symlink {}", path.display());
+    }
+    let parent = path.parent().context("Destination has no parent")?;
+    fs::create_dir_all(parent)?;
+    if fs::symlink_metadata(parent).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        anyhow::bail!("Refusing to write inside symlink {}", parent.display());
+    }
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let temp = parent.join(format!(".daybook-{}-{nonce}.tmp", std::process::id()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut file = options.open(&temp)?;
+    if let Ok(meta) = fs::metadata(path) {
+        fs::set_permissions(&temp, meta.permissions())?;
+    }
+    file.write_all(content.as_bytes())?;
+    Ok(temp)
+}
+
+pub(crate) fn finish_write(temp: &Path, path: &Path) -> Result<()> {
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        let _ = fs::remove_file(temp);
+        anyhow::bail!("Refusing to write through symlink {}", path.display());
+    }
+    fs::rename(temp, path)?;
+    Ok(())
+}
+
+pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<()> {
+    let temp = stage_write(path, content)?;
+    if let Err(error) = finish_write(&temp, path) {
+        let _ = fs::remove_file(temp);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn install_recall_skills(home: &Path) -> Result<()> {
+    for root in [home.join(".agents/skills"), home.join(".claude/skills")] {
+        install_runtime_file(
+            &root.join("daybook-recall/SKILL.md"),
+            RECALL_SKILL,
+            "recall skill",
+        )?;
+    }
+    Ok(())
+}
+
+fn install_runtime_file(path: &Path, expected: &str, label: &str) -> Result<()> {
+    match fs::read_to_string(path) {
+        Ok(actual) if actual == expected => {
+            println!("[daybook] Current {label}: {}", path.display());
+            return Ok(());
+        }
+        Ok(_) => {
+            println!(
+                "[daybook] Leaving edited or outdated {label} unchanged: {}",
+                path.display()
+            );
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    atomic_write(path, expected)?;
+    println!("[daybook] Installed {label}: {}", path.display());
+    Ok(())
+}
+
+fn configure_board_mcp_and_hooks(cwd: &Path, home: &Path) -> Result<()> {
     let mcp_path = cwd.join(".mcp.json");
     let mut root: serde_json::Value = if mcp_path.exists() {
-        let raw = fs::read_to_string(&mcp_path).unwrap_or_default();
-        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+        let raw = fs::read_to_string(&mcp_path)?;
+        serde_json::from_str(&raw).context("Cannot update invalid .mcp.json")?
     } else {
         serde_json::json!({})
     };
-
-    if !root.is_object() {
-        root = serde_json::json!({});
-    }
-    let servers = root
+    let root_object = root
         .as_object_mut()
-        .unwrap()
+        .context(".mcp.json root must be an object")?;
+    let servers = root_object
         .entry("mcpServers")
         .or_insert_with(|| serde_json::json!({}));
-    if let Some(map) = servers.as_object_mut() {
-        map.insert(
-            "daybook-board".to_string(),
-            serde_json::json!({
-                "command": "daybook",
-                "args": ["board", "mcp"]
-            }),
-        );
-    }
-    fs::write(&mcp_path, serde_json::to_string_pretty(&root)? + "\n")?;
+    let map = servers
+        .as_object_mut()
+        .context(".mcp.json mcpServers must be an object")?;
+    map.insert(
+        "daybook-board".to_string(),
+        serde_json::json!({"command": "daybook", "args": ["board", "mcp"]}),
+    );
+    atomic_write(&mcp_path, &(serde_json::to_string_pretty(&root)? + "\n"))?;
     println!(
-        "[daybook] Registered 'daybook-board' MCP server in {}",
+        "[daybook] Registered daybook-board MCP server in {}",
         mcp_path.display()
     );
-    println!("[daybook] Codex / Pi / T3 Code MCP command: daybook board mcp");
+
+    let settings_path = home.join(".claude/settings.json");
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        serde_json::from_str(&fs::read_to_string(&settings_path)?)
+            .context("Cannot update invalid Claude settings.json")?
+    } else {
+        serde_json::json!({})
+    };
+    let settings_object = settings
+        .as_object_mut()
+        .context("Claude settings.json root must be an object")?;
+    let hooks = settings_object
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    let hooks_object = hooks
+        .as_object_mut()
+        .context("Claude settings hooks must be an object")?;
+    for (event, hook_name, matcher) in [
+        ("SessionStart", "session-start", None),
+        ("PreToolUse", "pre-tool-use", Some(CLAUDE_EDIT_MATCHER)),
+        ("PostToolUse", "post-tool-use", Some(CLAUDE_EDIT_MATCHER)),
+        ("SessionEnd", "session-end", None),
+    ] {
+        let command = format!("daybook hook {hook_name}");
+        let groups = hooks_object
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]));
+        let groups = groups
+            .as_array_mut()
+            .with_context(|| format!("Claude {event} hooks must be an array"))?;
+        let exists = groups.iter_mut().any(|group| {
+            let matches = group
+                .get("hooks")
+                .and_then(|v| v.as_array())
+                .is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry.get("command").and_then(|v| v.as_str()) == Some(&command)
+                    })
+                });
+            if matches {
+                if let Some(matcher) = matcher {
+                    group["matcher"] = serde_json::Value::String(matcher.into());
+                } else if let Some(object) = group.as_object_mut() {
+                    object.remove("matcher");
+                }
+            }
+            matches
+        });
+        if !exists {
+            let mut group = serde_json::json!({
+                "hooks": [{"type": "command", "command": command}]
+            });
+            if let Some(matcher) = matcher {
+                group["matcher"] = serde_json::Value::String(matcher.into());
+            }
+            groups.push(group);
+        }
+    }
+    if let Some(parent) = settings_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    atomic_write(
+        &settings_path,
+        &(serde_json::to_string_pretty(&settings)? + "\n"),
+    )?;
     println!(
-        "[daybook] Claude Code hooks available in hooks/hooks.json (daybook hook session-start | pre-tool-use | post-tool-use | session-end)"
+        "[daybook] Installed Claude hooks: {}",
+        settings_path.display()
     );
+
+    let extension_path = home.join(".pi/agent/extensions/daybook-pi.ts");
+    install_runtime_file(&extension_path, PI_EXTENSION, "Pi extension")?;
     Ok(())
 }
 
@@ -351,4 +498,60 @@ fn configure_digest_interactive(config: &mut Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_file_install_preserves_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skill/SKILL.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "local edits").unwrap();
+        install_runtime_file(&path, "shipped version", "skill").unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), "local edits");
+    }
+
+    #[test]
+    fn installs_recall_and_board_integrations_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(
+            home.join(".claude/settings.json"),
+            r#"{"model":"keep","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"daybook hook session-start"}]}]}}"#,
+        )
+        .unwrap();
+
+        install_recall_skills(&home).unwrap();
+        configure_board_mcp_and_hooks(&project, &home).unwrap();
+        configure_board_mcp_and_hooks(&project, &home).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(home.join(".agents/skills/daybook-recall/SKILL.md")).unwrap(),
+            RECALL_SKILL
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(".pi/agent/extensions/daybook-pi.ts")).unwrap(),
+            PI_EXTENSION
+        );
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["model"], "keep");
+        assert_eq!(
+            settings["hooks"]["SessionStart"].as_array().unwrap().len(),
+            1
+        );
+        for event in ["PreToolUse", "PostToolUse", "SessionEnd"] {
+            assert_eq!(settings["hooks"][event].as_array().unwrap().len(), 1);
+        }
+        let mcp: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
+        assert_eq!(mcp["mcpServers"]["daybook-board"]["command"], "daybook");
+    }
 }

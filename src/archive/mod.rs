@@ -1,5 +1,5 @@
 mod daily;
-mod manager;
+pub(crate) mod manager;
 pub mod session;
 mod templates;
 

@@ -522,6 +522,7 @@ dependencies = [
  "mime_guess",
  "open",
  "predicates",
+ "regex",
  "reqwest",
  "rusqlite",
  "rust-embed",

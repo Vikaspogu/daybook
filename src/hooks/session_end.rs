@@ -7,7 +7,7 @@ use std::os::unix::process::CommandExt;
 use crate::config::load_config;
 use crate::hooks::read_hook_input;
 use crate::jobs::{JobManager, JobType};
-use crate::transcript::TranscriptParser;
+use crate::transcript::{adapters, TranscriptParser};
 
 /// Handle SessionEnd hook from Claude Code
 /// Spawns background process for summarization
@@ -28,41 +28,6 @@ pub async fn handle() -> Result<()> {
         }
     };
     // Release auto-claimed board locks and mark agent idle on SessionEnd
-    if let Ok(client) = crate::board::client::BoardClient::from_config(&config, false) {
-        let cwd = if input.cwd.as_os_str().is_empty() {
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-        } else {
-            input.cwd.clone()
-        };
-        let identity = crate::board::identity::resolve_board_identity(&cwd, None, None);
-        if !identity.project.eq_ignore_ascii_case("agent")
-            && !identity.project.eq_ignore_ascii_case("all")
-        {
-            let _ = client
-                .release_locks(&crate::ledger::BoardReleaseLocksReq {
-                    project: identity.project.clone(),
-                    agent: identity.agent.clone(),
-                    lock_id: None,
-                    all: true,
-                    auto_only: true,
-                    force: false,
-                })
-                .await;
-            if crate::board::identity::is_valid_board_workspace(&cwd) {
-                let _ = client
-                    .heartbeat(&crate::ledger::BoardHeartbeatReq {
-                        project: identity.project,
-                        agent: identity.agent,
-                        runtime: identity.runtime,
-                        branch: identity.branch,
-                        cwd: identity.worktree_root.to_string_lossy().to_string(),
-                        status: Some("idle".to_string()),
-                        current_task: None,
-                    })
-                    .await;
-            }
-        }
-    }
 
     // Archive on all session end reasons to collect complete history
     // Reasons: "prompt_input_exit" (Ctrl+D), "logout", "clear", "other"
@@ -75,6 +40,7 @@ pub async fn handle() -> Result<()> {
     // This avoids creating useless 0s jobs for sessions with no user input
     if is_transcript_empty(&input.transcript_path) {
         eprintln!("[daybook] Empty session (no user input), skipping archive");
+        release_board_session(&config, &input).await;
         return Ok(());
     }
 
@@ -156,10 +122,50 @@ pub async fn handle() -> Result<()> {
             eprintln!("[daybook] Failed to spawn summarization process: {}", e);
         }
     }
+    // Archive first: remote board cleanup must not consume the hook deadline.
+    release_board_session(&config, &input).await;
 
     Ok(())
 }
 
+async fn release_board_session(config: &crate::config::Config, input: &super::input::HookInput) {
+    if let Ok(client) = crate::board::client::BoardClient::from_config(config, false) {
+        let cwd = if input.cwd.as_os_str().is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        } else {
+            input.cwd.clone()
+        };
+        let identity =
+            crate::board::identity::resolve_board_identity_for_hook(&cwd, &input.session_id);
+        if !identity.project.eq_ignore_ascii_case("agent")
+            && !identity.project.eq_ignore_ascii_case("all")
+        {
+            let _ = client
+                .release_locks(&crate::ledger::BoardReleaseLocksReq {
+                    project: identity.project.clone(),
+                    agent: identity.agent.clone(),
+                    lock_id: None,
+                    all: true,
+                    auto_only: true,
+                    force: false,
+                })
+                .await;
+            if crate::board::identity::is_valid_board_workspace(&cwd) {
+                let _ = client
+                    .heartbeat(&crate::ledger::BoardHeartbeatReq {
+                        project: identity.project,
+                        agent: identity.agent,
+                        runtime: identity.runtime,
+                        branch: identity.branch,
+                        cwd: identity.worktree_root.to_string_lossy().to_string(),
+                        status: Some("idle".to_string()),
+                        current_task: None,
+                    })
+                    .await;
+            }
+        }
+    }
+}
 /// Check if the transcript file is empty or contains no user messages
 fn is_transcript_empty(transcript_path: &std::path::Path) -> bool {
     // If file doesn't exist, consider it empty
@@ -168,7 +174,10 @@ fn is_transcript_empty(transcript_path: &std::path::Path) -> bool {
     }
 
     // Parse transcript and check if it has meaningful content
-    match TranscriptParser::parse(transcript_path) {
+    let parsed = adapters::meta_for_path(transcript_path)
+        .map(|meta| adapters::parse_session(&meta).map(|session| session.data))
+        .unwrap_or_else(|| TranscriptParser::parse(transcript_path));
+    match parsed {
         Ok(data) => data.is_empty(),
         Err(_) => {
             // If parsing fails, don't skip - let summarization handle the error
@@ -208,5 +217,14 @@ mod tests {
         let name = generate_task_name(&cwd);
         // Root directory has no file_name, should use default
         assert!(name.contains("-"));
+    }
+
+    #[test]
+    fn pi_transcript_with_nested_user_message_is_not_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".pi/agent/sessions/pi-session.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, include_str!("../../tests/fixtures/pi-session.jsonl")).unwrap();
+        assert!(!is_transcript_empty(&path));
     }
 }

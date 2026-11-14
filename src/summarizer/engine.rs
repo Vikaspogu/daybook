@@ -56,6 +56,7 @@ impl SummarizerEngine {
     /// `codex exec` when claude is not installed (D4: verified noninteractive
     /// in the workspace VMs).
     fn invoke_llm(&self, prompt: &str) -> Result<String> {
+        let prompt = crate::redaction::redact_for_config(prompt, &self.config);
         // Explicit config takes priority over the environment; invalid pins fail.
         let env_engine = if self.config.summarization.engine.is_some() {
             None
@@ -70,8 +71,8 @@ impl SummarizerEngine {
             self.config.summarization.engine.as_deref(),
             env_engine.as_deref(),
         )? {
-            Some("codex") => return self.invoke_codex(prompt),
-            Some("claude") => return self.invoke_claude(prompt),
+            Some("codex") => return self.invoke_codex(&prompt),
+            Some("claude") => return self.invoke_claude(&prompt),
             _ => {}
         }
         let claude_available = Command::new("claude")
@@ -82,9 +83,9 @@ impl SummarizerEngine {
             .map(|o| o.status.success())
             .unwrap_or(false);
         if claude_available {
-            self.invoke_claude(prompt)
+            self.invoke_claude(&prompt)
         } else {
-            self.invoke_codex(prompt)
+            self.invoke_codex(&prompt)
         }
     }
 
@@ -210,7 +211,7 @@ impl SummarizerEngine {
     pub async fn summarize_session(
         &self,
         transcript_path: &std::path::Path,
-        _task_name: &str,
+        transcript_revision: &str,
         cwd: &str,
         data: &crate::transcript::TranscriptData,
         session_id: &str,
@@ -298,6 +299,7 @@ impl SummarizerEngine {
         // Set git branch
         let mut archive = archive;
         archive.git_branch = git_branch;
+        archive.transcript_revision = transcript_revision.to_string();
 
         Ok(archive)
     }

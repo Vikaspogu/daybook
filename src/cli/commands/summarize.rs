@@ -95,7 +95,7 @@ pub async fn run(
     let job_manager = JobManager::new(&config).ok();
 
     // Run summarization with job status tracking
-    let result = run_summarization(&config, &transcript, &task_name, &cwd).await;
+    let result = run_summarization(&config, &transcript, &cwd, None, None).await;
 
     // Update job status based on result
     if let (Some(ref manager), Some(ref id)) = (&job_manager, &job_id) {
@@ -126,8 +126,12 @@ pub async fn run(
 pub(crate) async fn run_summarization(
     config: &crate::config::Config,
     transcript: &PathBuf,
-    task_name: &str,
     cwd: &str,
+    transcript_fingerprint: Option<(String, u128)>,
+    preparsed: Option<(
+        &crate::transcript::adapters::SessionMeta,
+        &crate::transcript::adapters::ParsedSession,
+    )>,
 ) -> Result<()> {
     // Check if transcript file exists before attempting to parse
     if !transcript.exists() {
@@ -138,10 +142,27 @@ pub(crate) async fn run_summarization(
         return Ok(());
     }
 
+    // Hash before parsing. If the transcript grows during or after parsing, the
+    // recorded revision stays older and the next scan refreshes the summary.
+    let (transcript_revision, transcript_modified_ns) = match transcript_fingerprint {
+        Some(fingerprint) => fingerprint,
+        None => {
+            let modified_ns = crate::transcript::adapters::transcript_modified_ns(transcript)?;
+            let revision = crate::transcript::adapters::transcript_revision(transcript)?;
+            (revision, modified_ns)
+        }
+    };
     // Runtime-aware parse: known session trees go through the runtime
     // adapters (Claude Code, Pi, Codex); any other explicit path falls
     // back to the legacy Claude-format parser (upstream CLI contract).
-    let (data, session_id, agent, start) =
+    let (data, session_id, agent, start) = if let Some((meta, parsed)) = preparsed {
+        (
+            parsed.data.clone(),
+            meta.session_id.clone(),
+            Some(meta.agent.as_str().to_string()),
+            parsed.start.clone(),
+        )
+    } else {
         match crate::transcript::adapters::meta_for_path(transcript) {
             Some(meta) => {
                 let parsed = crate::transcript::adapters::parse_session(&meta)
@@ -163,7 +184,8 @@ pub(crate) async fn run_summarization(
                     .unwrap_or_else(|| "unknown".to_string());
                 (parsed, session_id, None, None)
             }
-        };
+        }
+    };
 
     if data.is_empty() {
         eprintln!("[daybook] Session is empty, skipping summarization");
@@ -176,7 +198,7 @@ pub(crate) async fn run_summarization(
     let mut archive = engine
         .summarize_session(
             transcript,
-            task_name,
+            &transcript_revision,
             cwd,
             &data,
             &session_id,
@@ -185,6 +207,7 @@ pub(crate) async fn run_summarization(
         .await
         .context("Failed to summarize session")?;
     archive.agent = agent;
+    archive.transcript_modified_ns = transcript_modified_ns;
 
     // Save the archive
     let archive_path = archive.save(config)?;

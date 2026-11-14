@@ -15,6 +15,9 @@ impl Templates {
         cwd: &str,
         git_branch: Option<&str>,
         transcript_path: Option<&str>,
+        transcript_revision: &str,
+        transcript_modified_ns: u128,
+        summarizer_version: u32,
         summary: &str,
         decisions: &str,
         code_changes: &str,
@@ -35,6 +38,9 @@ session_id: {session_id}
 cwd: "{cwd}"
 git_branch: "{git_branch_str}"
 transcript_path: "{transcript_path_str}"
+transcript_revision: {transcript_revision}
+transcript_modified_ns: {transcript_modified_ns}
+summarizer_version: {summarizer_version}
 tags: [{agent_str}, session-archive]
 created: {created}
 ---
@@ -258,6 +264,9 @@ mod tests {
             "/x",
             None,
             None,
+            "hash",
+            0,
+            1,
             "s",
             "d",
             "c",
@@ -277,6 +286,9 @@ mod tests {
             "/home/user/project",
             Some("main"),
             Some("/path/to/transcript.jsonl"),
+            "hash",
+            0,
+            1,
             "Test summary",
             "Test decisions",
             "Test changes",

@@ -1,6 +1,7 @@
 pub mod board;
 pub mod config;
 pub mod digest;
+pub mod doctor;
 pub mod extract;
 pub mod init;
 pub mod insights;

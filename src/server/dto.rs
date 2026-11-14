@@ -83,6 +83,17 @@ pub struct ProjectGainDto {
     pub accomplishments: Vec<String>,
     pub key_decisions: Vec<String>,
     pub files_touched: Vec<String>,
+    /// Session-level evidence preserving reported, attempted, and edited states.
+    pub activity: Vec<SessionActivityDto>,
+}
+
+/// One session's recorded work, kept separate from verified accomplishments.
+#[derive(Serialize, Default, Clone)]
+pub struct SessionActivityDto {
+    pub category: String,
+    pub title: String,
+    pub statement: String,
+    pub files_touched: Vec<String>,
 }
 
 /// Aggregated alert for repeated blocked/wasted background sessions
@@ -105,8 +116,11 @@ pub struct DayMetricsDto {
     pub cache_creation_tokens: u64,
     pub cache_hit_rate: Option<f64>,
     pub total_cost_usd: f64,
+    pub cost_known: bool,
+    pub unpriced_sessions: u64,
     pub test_runs: u64,
     pub failed_tool_calls: u64,
+    pub unfinished_tool_calls: u64,
     pub interrupted: u64,
 }
 

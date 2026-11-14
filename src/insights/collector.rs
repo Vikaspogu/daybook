@@ -62,21 +62,26 @@ pub struct CategoryCount {
 
 impl InsightsData {
     /// Collect insights data from archives and facets.
-    /// `days` limits the number of most recent days to analyze.
+    /// `days` limits the journal-date calendar window ending at `today`.
     pub fn collect(
         config: &Config,
         days: Option<usize>,
+        today: chrono::NaiveDate,
         pricing: &PricingData,
     ) -> anyhow::Result<Self> {
         let manager = ArchiveManager::new(config.clone());
         let all_dates = manager.list_dates()?;
 
         let days_limit = days.unwrap_or(30);
-        let dates: Vec<String> = all_dates.into_iter().take(days_limit).collect();
+        let (from, to) = super::llm::window_dates(today, days_limit);
+        let dates: Vec<String> = all_dates
+            .into_iter()
+            .filter(|date| date.as_str() >= from.as_str() && date.as_str() <= to.as_str())
+            .collect();
 
         // Scan all usage data upfront
         let all_session_usages = scanner::scan_all_sessions(None, pricing);
-        let usage_summary = scanner::aggregate_usage(&all_session_usages, None);
+        let usage_summary = scanner::aggregate_usage(&all_session_usages, Some(&dates));
 
         // Build a lookup: date -> DailyUsage for merging into daily_stats
         let daily_usage_map: HashMap<String, &crate::usage::types::DailyUsage> = usage_summary
@@ -133,22 +138,6 @@ impl InsightsData {
             .map(|(id, facet)| (id.clone(), facet))
             .collect();
 
-        // Aggregate goal_categories (HashMap<String, usize> per facet)
-        let goal_distribution = aggregate_hashmap_field(&facets, |f| &f.goal_categories);
-
-        // Aggregate friction_counts (HashMap<String, usize> per facet)
-        let friction_distribution = aggregate_hashmap_field(&facets, |f| &f.friction_counts);
-
-        // Aggregate user_satisfaction_counts (HashMap<String, usize> per facet)
-        let satisfaction_distribution =
-            aggregate_hashmap_field(&facets, |f| &f.user_satisfaction_counts);
-
-        // Aggregate session_type (single string per facet)
-        let session_type_distribution = count_option_field(&facets, |f| f.session_type.as_deref());
-
-        // language_distribution is currently empty since facets don't carry language data
-        let language_distribution = Vec::new();
-
         // Build per-session details by scanning archive files and matching with facets
         let mut session_details = Vec::new();
         for date in &dates {
@@ -169,6 +158,31 @@ impl InsightsData {
                 }
             }
         }
+        let selected_facets: Vec<(String, SessionFacet)> = session_details
+            .iter()
+            .filter_map(|session| {
+                facet_map
+                    .get(&session.session_id)
+                    .map(|facet| (session.session_id.clone(), (**facet).clone()))
+            })
+            .collect();
+        // Aggregate goal_categories (HashMap<String, usize> per facet)
+        let goal_distribution = aggregate_hashmap_field(&selected_facets, |f| &f.goal_categories);
+
+        // Aggregate friction_counts (HashMap<String, usize> per facet)
+        let friction_distribution =
+            aggregate_hashmap_field(&selected_facets, |f| &f.friction_counts);
+
+        // Aggregate user_satisfaction_counts (HashMap<String, usize> per facet)
+        let satisfaction_distribution =
+            aggregate_hashmap_field(&selected_facets, |f| &f.user_satisfaction_counts);
+
+        // Aggregate session_type (single string per facet)
+        let session_type_distribution =
+            count_option_field(&selected_facets, |f| f.session_type.as_deref());
+
+        // language_distribution is currently empty since facets don't carry language data
+        let language_distribution = Vec::new();
 
         // Calculate trend data using dates in chronological order (oldest first)
         // daily_stats is already reversed to oldest-first at this point

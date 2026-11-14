@@ -8,6 +8,7 @@ mod insights;
 mod jobs;
 mod ledger;
 mod push;
+mod redaction;
 mod server;
 mod summarizer;
 mod transcript;
@@ -55,7 +56,12 @@ async fn main() -> Result<()> {
         } => cli::commands::summarize::run(transcript, task_name, cwd, foreground, job_id).await,
         Commands::Scan { no_llm, local, day } => cli::commands::scan::run(day, no_llm, local).await,
         Commands::Stats { week, days, month } => cli::commands::stats::run(week, days, month).await,
-        Commands::Query { date } => cli::commands::query::run(date).await,
+        Commands::Query {
+            date,
+            project,
+            search,
+            limit,
+        } => cli::commands::query::run(date, project, search, limit).await,
         Commands::Digest {
             relative_date,
             date,
@@ -75,6 +81,7 @@ async fn main() -> Result<()> {
         Commands::ReviewSkills { install, delete } => {
             cli::commands::skills::run_review(install, delete).await
         }
+        Commands::Doctor => cli::commands::doctor::run().await,
         Commands::Config {
             set_storage,
             show,

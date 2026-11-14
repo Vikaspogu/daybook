@@ -35,13 +35,26 @@ pub fn print_report(r: &StatsReport, days: usize) {
         return;
     }
 
+    let total_cost = if r.totals.cost_known {
+        format!(
+            "${:.2}{}",
+            r.totals.cost_usd,
+            if r.totals.unpriced_sessions > 0 {
+                format!(" known ({} unpriced)", r.totals.unpriced_sessions)
+            } else {
+                String::new()
+            }
+        )
+    } else {
+        "unknown cost".to_string()
+    };
     println!(
-        "\n  {} {} sessions, {} in / {} out tokens, ${:.2}",
+        "\n  {} {} sessions, {} in / {} out tokens, {}",
         "Window:".bold(),
         r.totals.sessions.to_string().bright_yellow(),
         format_tokens(r.totals.input).bright_yellow(),
         format_tokens(r.totals.output).bright_yellow(),
-        r.totals.cost_usd
+        total_cost
     );
     if let Some(rate) = r.totals.cache_hit_rate {
         println!("  Cache hit rate: {:.0}%", rate * 100.0);
@@ -53,13 +66,22 @@ pub fn print_report(r: &StatsReport, days: usize) {
         "date         sessions    input     output    cost    tests   friction".dimmed()
     );
     for d in &r.days {
+        let cost = if d.cost_known {
+            if d.unpriced_sessions > 0 {
+                format!("{:.2} known", d.cost_usd)
+            } else {
+                format!("{:.2}", d.cost_usd)
+            }
+        } else {
+            "unknown".to_string()
+        };
         println!(
-            "  {} {:>8} {:>9} {:>9} {:>7.2} {:>8} {:>10}",
+            "  {} {:>8} {:>9} {:>9} {:>7} {:>8} {:>10}",
             d.date,
             d.sessions,
             format_tokens(d.input),
             format_tokens(d.output),
-            d.cost_usd,
+            cost,
             d.test_runs,
             d.failed_tool_calls + d.interrupted,
         );
@@ -145,6 +167,8 @@ mod tests {
                 cache_read: 90_000,
                 cache_creation: 0,
                 cost_usd: 0.42,
+                cost_known: true,
+                unpriced_sessions: 0,
                 test_runs: 4,
                 failed_tool_calls: 1,
                 interrupted: 2,

@@ -51,15 +51,20 @@ daybook show
 
 # 4. Query a day's brief or 7-day stats from the terminal (queries a running `daybook show` / `daybook serve` instance or configured `push.url`)
 daybook query
+daybook query --project daybook --search "cache tokens" --limit 3
 daybook stats --week
 ```
+
+## Agent Recall
+
+`daybook query --project <name> [--search <words>] [--limit N]` returns matching summaries newest first with `ledger://<date>/<machine>/<session-id>` source references. Every search word must appear in the summary. With the session-start hook enabled, a fresh agent receives the latest two summaries for its current project and their sources automatically. The `skills/daybook-recall/SKILL.md` skill documents explicit recall for other agent runtimes.
 
 ## Knowledge Classification (`v2` Taxonomy)
 
 When summarizing a session, Daybook classifies every lesson into one of three destinations so global skills, repository rules, and one-off debugging notes are never mixed together:
 
 1. **Global Reusable Skill (`Scope: global-skill`)**
-   - **Destination**: `~/.agents/skills/<name>/SKILL.md` (dashboard copy draft) or `~/.claude/skills/<name>/SKILL.md` (via `daybook review-skills --install`)
+   - **Destination**: `~/.agents/skills/<name>/SKILL.md` and `~/.claude/skills/<name>/SKILL.md` (both written by `daybook review-skills --install`)
    - **Criteria**: Portable multi-step workflow, diagnostic sequence, or verification playbook that applies across repositories without depending on one repo's private layout or services.
    - **Dashboard Action**: Rendered under **Global Reusable Skills** with one-click `Copy SKILL.md` and `Copy All SKILL.md` (complete YAML frontmatter + `When to use`, `Procedure`, and `Verification` sections).
 2. **Repository Instruction Rule (`Scope: repo-rule`)**
@@ -78,12 +83,14 @@ When `daybook summarize` detects a `Scope: global-skill` candidate that passes t
 # List pending skills waiting for review
 daybook review-skills
 
-# Install a pending skill to ~/.claude/skills/<name>/SKILL.md
+# Install for Pi/Codex in ~/.agents and Claude in ~/.claude
 daybook review-skills --install 2026-11-01/validate-investigation-evidence
 
 # Delete a pending skill
 daybook review-skills --delete 2026-11-01/validate-investigation-evidence
 ```
+
+Install and delete decisions are appended to `~/.daybook/skill-decisions.jsonl`. The review command shows the latest decisions, and `daybook doctor` reports pending and decided counts.
 
 ## Commands
 
@@ -93,19 +100,21 @@ daybook review-skills --delete 2026-11-01/validate-investigation-evidence
 | `daybook scan [--day today\|yesterday\|all\|YYYY-MM-DD]` | Discover sessions across Claude Code, Codex, and Pi (default: today + yesterday), summarize, and push to server |
 | `daybook show [--port 31456] [--no-open]` | Start the web dashboard + ledger API server |
 | `daybook serve [--host 0.0.0.0] [--port 31457]` | Run the headless SQLite ledger ingest & query server |
-| `daybook query [YYYY-MM-DD]` | Print one day's work overview and session summaries from the ledger server |
+| `daybook query [YYYY-MM-DD] [--project <name>] [--search <words>] [--limit N]` | Print one day's brief, or recall project summaries with source references |
 | `daybook stats [--week \| --month \| --days N]` | Show session, token, cost, cache-hit, and friction metrics |
 | `daybook token [--list \| --label <name> \| --revoke <label>]` | Mint, list, or revoke machine ingest bearer tokens (`dbk_...`) |
 | `daybook view [--date YYYY-MM-DD] [--list]` | View local markdown archives interactively or by date |
 | `daybook today` / `daybook yest` | Quick aliases for today's or yesterday's local archive |
 | `daybook digest [yest] [--date YYYY-MM-DD] [--force]` | Consolidate a day's local session markdown files into `daily.md` |
 | `daybook extract-skill` / `daybook extract-command` | Manually extract a reusable skill or command from an archived session |
-| `daybook review-skills [--install <id> \| --delete <id>]` | Review, install (to `~/.claude/skills/<name>/SKILL.md`), or delete locally extracted pending skills |
+| `daybook review-skills [--install <id> \| --delete <id>]` | Review, install (to shared and Claude skill directories), or delete locally extracted pending skills |
+| `daybook doctor` | Read-only archive, ledger, queue, server, skill, hook, and Pi extension diagnostics |
 | `daybook config [--show \| -i]` | Show or interactively update configuration |
 | `daybook insights [--days 30]` | Generate trend analysis from local archives |
 | `daybook jobs <list\|log\|kill\|cleanup>` | Inspect or manage background summarization jobs |
 | `daybook board <status\|claim\|touch\|check\|release\|post\|messages\|task\|heartbeat\|mcp>` | Multi-agent worktree coordination board (shared file/glob locks, presence, tasks, `@mention` channels, and MCP stdio server) |
-| `daybook init --board` | Register `PreToolUse` / `PostToolUse` lock hooks in `~/.claude/settings.json` and append Agent Coordination Board protocol rules to `AGENTS.md` |
+| `daybook init --board` | Register the board MCP server, install Claude session/lock hooks, and install the Pi lifecycle extension |
+| Pi extension | Installed by `daybook init --board`; enables session capture, board presence, lock notices, strict edit blocking, and automatic lock release on shutdown |
 
 ## Central Server & Multi-Host Configuration
 
@@ -140,6 +149,9 @@ model = "gpt-4o-mini"
 ```
 
 - **Local + Push Reliability**: When `push.url` and `push.token` are configured, `daybook scan` pushes summarized sessions to `POST /api/ingest`. If the server is unreachable, records are parked in `~/.daybook/pending/` and replayed automatically on the next scan.
+- **Summary Freshness**: Session archives record the SHA-256 transcript revision and summarizer version. Default scans also include recently modified sessions with older start dates; when a session resumes, Daybook replaces its provisional archive with a summary of the changed transcript.
+- **Evidence Retention**: Condensed summarization input keeps chronological head-and-tail assistant and tool evidence, with omission counts, so later completion reports and verification results remain available to the model.
+- **Outbound Redaction**: Before summarizer or insights prompts are sent and before ingest content fields are serialized, Daybook replaces common credential formats, email addresses, and configured secrets with `[REDACTED]`. Ingest identity and routing metadata stay unchanged. This pattern-based check reduces accidental disclosure but cannot guarantee that every secret is recognized.
 
 ## Archive & Ledger Structure
 
@@ -151,6 +163,7 @@ model = "gpt-4o-mini"
 │   ├── daily.md             # Consolidated daily summary
 │   └── <session-task>.md    # Individual session archive
 ├── pending-skills/          # Auto-extracted global skills (<YYYY-MM-DD>/<name>.md)
+├── skill-decisions.jsonl     # Install/delete review history
 └── jobs/                    # Background summarization job metadata & logs
 ```
 

@@ -77,7 +77,7 @@ Daybook is a multi-agent context archive and operational ledger that discovers, 
 - `src/server/` - Axum router (`router.rs`), API & synthesis handlers (`handlers.rs`), DTOs (`dto.rs`), and embedded static asset serving (`static_files.rs`)
 - `src/archive/` - Local markdown archive management (`manager.rs`, `session.rs`, `daily.rs`, `templates.rs`)
 - `src/usage/` - Token and model pricing calculation (`pricing.rs`, `scanner.rs`)
-- `src/hooks/` - Claude Code hook handlers (`session_start.rs`, `session_end.rs`, `pre_tool_use.rs`, `post_tool_use.rs`) and JSON stdin parser (`input.rs`)
+- `src/hooks/` - Agent hook handlers (`session_start.rs`, `session_end.rs`, `pre_tool_use.rs`, `post_tool_use.rs`) and JSON stdin parser (`input.rs`); `hooks/daybook-pi.ts` connects them to Pi lifecycle events
 - `src/jobs/` - Background summarization job manager (`manager.rs`)
 - `src/config/` - Configuration loading via `confy` (`settings.rs`, `~/.config/daybook/config.toml`)
 

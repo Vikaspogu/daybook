@@ -1,7 +1,7 @@
 //! SQLite ledger: the server-side store for pushed session records.
 //!
 //! Upsert rule (D5): identical (session_id, machine) + identical
-//! content_hash -> no-op; changed hash with a HIGHER transcript version
+//! content_hash -> no-op; changed hash with a higher version
 //! -> update; changed hash with a lower-or-equal version -> rejected
 //! (an older queued revision must never overwrite a newer one).
 
@@ -36,13 +36,15 @@ pub struct AggregatesRecord {
     #[serde(default)]
     pub failed_tool_calls: u64,
     #[serde(default)]
+    pub unfinished_tool_calls: u64,
+    #[serde(default)]
     pub interrupted: u64,
     #[serde(default)]
     pub cache_hit_rate: Option<f64>,
 }
 
-/// Record pushed by a client machine. `version` is the transcript's last
-/// mtime in epoch seconds: strictly increasing as a session grows.
+/// Record pushed by a client machine. `version` is an archive revision in
+/// epoch seconds; archive writes keep it strictly increasing.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SessionRecord {
     pub session_id: String,
@@ -58,7 +60,7 @@ pub struct SessionRecord {
     pub title: Option<String>,
     #[serde(default)]
     pub git_branch: Option<String>,
-    /// Unix seconds of the transcript's last write; drives stale rejection.
+    /// Unix seconds of the summary archive's last write; drives stale rejection.
     pub version: i64,
     pub content_hash: String,
     /// Full markdown archive (frontmatter + summary sections).
@@ -132,6 +134,9 @@ pub struct DailyStats {
     pub cache_read: u64,
     pub cache_creation: u64,
     pub cost_usd: f64,
+    /// False when every session in this rollup has unknown pricing.
+    pub cost_known: bool,
+    pub unpriced_sessions: u64,
     pub test_runs: u64,
     pub failed_tool_calls: u64,
     pub interrupted: u64,
@@ -172,6 +177,8 @@ pub fn aggregate_stats(rows: &[StatRow]) -> StatsReport {
         day.cache_read += row.usage.cache_read;
         day.cache_creation += row.usage.cache_creation;
         day.cost_usd += row.usage.cost_usd.unwrap_or(0.0);
+        day.cost_known |= row.usage.cost_usd.is_some();
+        day.unpriced_sessions += u64::from(row.usage.cost_usd.is_none());
         day.test_runs += row.aggregates.test_runs;
         day.failed_tool_calls += row.aggregates.failed_tool_calls;
         day.interrupted += row.aggregates.interrupted;
@@ -182,6 +189,8 @@ pub fn aggregate_stats(rows: &[StatRow]) -> StatsReport {
         totals.cache_read += row.usage.cache_read;
         totals.cache_creation += row.usage.cache_creation;
         totals.cost_usd += row.usage.cost_usd.unwrap_or(0.0);
+        totals.cost_known |= row.usage.cost_usd.is_some();
+        totals.unpriced_sessions += u64::from(row.usage.cost_usd.is_none());
         totals.test_runs += row.aggregates.test_runs;
         totals.failed_tool_calls += row.aggregates.failed_tool_calls;
         totals.interrupted += row.aggregates.interrupted;
@@ -288,6 +297,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     UNIQUE(session_id, machine)
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_date ON sessions(journal_date);
+CREATE INDEX IF NOT EXISTS idx_sessions_recall ON sessions(journal_date DESC, started_utc DESC, session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
 CREATE TABLE IF NOT EXISTS tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -417,6 +427,17 @@ pub fn normalize_journal_date(fallback_date: &str, started_utc: Option<&str>) ->
     }
     let offset = chrono::FixedOffset::east_opt(us_eastern_offset_secs(utc)).unwrap();
     utc.with_timezone(&offset).format("%Y-%m-%d").to_string()
+}
+
+/// Current instant in the same calendar used for stored journal dates.
+pub fn journal_date_at(utc: chrono::DateTime<chrono::Utc>) -> chrono::NaiveDate {
+    let fallback = utc.format("%Y-%m-%d").to_string();
+    let timestamp = utc.to_rfc3339();
+    chrono::NaiveDate::parse_from_str(
+        &normalize_journal_date(&fallback, Some(&timestamp)),
+        "%Y-%m-%d",
+    )
+    .expect("normalized journal date is valid")
 }
 
 /// Fixed prompt prefixes for automated Hindsight background repository surveys.
@@ -822,20 +843,17 @@ impl Ledger {
         Ok(rows.next().transpose()?)
     }
 
-    /// Rows for the stats report (S4): the `days` most recent journal
-    /// dates, newest first. Malformed JSON columns degrade to defaults
-    /// rather than failing the whole report.
-    pub fn stat_rows(&self, days: usize) -> Result<Vec<StatRow>> {
+    /// Rows for an inclusive journal-date calendar window. Malformed JSON columns
+    /// degrade to defaults rather than failing the whole report.
+    pub fn stat_rows(&self, from: &str, to: &str) -> Result<Vec<StatRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT journal_date, usage_json, aggregates_json, facets_json
-             FROM sessions WHERE journal_date IN
-               (SELECT DISTINCT journal_date FROM sessions
-                ORDER BY journal_date DESC LIMIT ?1)
+             FROM sessions WHERE journal_date >= ?1 AND journal_date <= ?2
              ORDER BY journal_date DESC",
         )?;
         let rows = stmt
-            .query_map([days as i64], |row| {
+            .query_map([from, to], |row| {
                 let usage_s: Option<String> = row.get(1)?;
                 let aggs_s: Option<String> = row.get(2)?;
                 Ok(StatRow {
@@ -974,8 +992,84 @@ impl Ledger {
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+    pub const MAX_RECALL_SEARCH_TERMS: usize = 8;
+
+    /// Newest project summaries matching every search word, with stable source ids.
+    pub fn recall(
+        &self,
+        project: Option<&str>,
+        search: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RecallRow>> {
+        let word_count = search
+            .map(|search| search.split_whitespace().count())
+            .unwrap_or(0);
+        anyhow::ensure!(
+            word_count <= Self::MAX_RECALL_SEARCH_TERMS,
+            "at most {} search words",
+            Self::MAX_RECALL_SEARCH_TERMS
+        );
+        let mut sql = String::from(
+            "SELECT journal_date, session_id, machine, runtime, project, summary_md FROM sessions",
+        );
+        let mut conditions = Vec::new();
+        let mut params: Vec<String> = Vec::new();
+        if let Some(project) = project.filter(|project| !project.trim().is_empty()) {
+            conditions.push("project = ?");
+            params.push(normalize_project(project));
+        }
+        if let Some(search) = search {
+            for word in search.split_whitespace() {
+                conditions.push("lower(summary_md) LIKE ? ESCAPE '\\'");
+                let word = word
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_");
+                params.push(format!("%{}%", word.to_lowercase()));
+            }
+        }
+        if !conditions.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conditions.join(" AND "));
+        }
+        sql.push_str(" ORDER BY journal_date DESC, started_utc DESC, session_id LIMIT ?");
+        params.push(limit.clamp(1, 20).to_string());
+
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            Ok(RecallRow {
+                journal_date: row.get(0)?,
+                session_id: row.get(1)?,
+                machine: row.get(2)?,
+                runtime: row.get(3)?,
+                project: row.get(4)?,
+                summary_md: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
 }
 
+/// A project-scoped recall result. `source()` identifies the exact ledger row.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RecallRow {
+    pub journal_date: String,
+    pub session_id: String,
+    pub machine: String,
+    pub runtime: String,
+    pub project: String,
+    pub summary_md: String,
+}
+
+impl RecallRow {
+    pub fn source(&self) -> String {
+        format!(
+            "ledger://{}/{}/{}",
+            self.journal_date, self.machine, self.session_id
+        )
+    }
+}
 /// One ledger session as LLM insights input.
 #[derive(Debug, Clone)]
 pub struct WindowSession {
@@ -1141,6 +1235,7 @@ mod tests {
             failed_tool_calls: 1,
             interrupted: 0,
             cache_hit_rate: None,
+            unfinished_tool_calls: 0,
         };
         a1.facets_json = Some(r#"{"friction_counts": {"misunderstood_request": 2}}"#.into());
         ledger.upsert_session(&a1).unwrap();
@@ -1159,6 +1254,7 @@ mod tests {
             failed_tool_calls: 0,
             interrupted: 1,
             cache_hit_rate: None,
+            unfinished_tool_calls: 0,
         };
         // malformed facets JSON must degrade, not break the report
         a2.facets_json = Some("{{not json".into());
@@ -1178,6 +1274,7 @@ mod tests {
             failed_tool_calls: 2,
             interrupted: 0,
             cache_hit_rate: None,
+            unfinished_tool_calls: 0,
         };
         ledger.upsert_session(&b1).unwrap();
 
@@ -1185,7 +1282,7 @@ mod tests {
         let mut c1 = record_md("sC1", 100, "h4", "# c1");
         c1.journal_date = "2026-10-15".into();
         ledger.upsert_session(&c1).unwrap();
-        let rows = ledger.stat_rows(2).unwrap();
+        let rows = ledger.stat_rows("2026-10-28", "2026-10-31").unwrap();
         let r = aggregate_stats(&rows);
 
         // Totals
@@ -1235,10 +1332,14 @@ mod tests {
         );
 
         // Window cutoff: a 3-day window also pulls in the older date
-        let older = ledger.stat_rows(3).unwrap();
+        let older = ledger.stat_rows("2026-10-15", "2026-10-31").unwrap();
         let older_report = aggregate_stats(&older);
         assert_eq!(older_report.days.len(), 3);
         assert_eq!(older_report.days[2].date, "2026-10-15");
+        let unknown = ledger.stat_rows("2026-10-15", "2026-10-15").unwrap();
+        let unknown_report = aggregate_stats(&unknown);
+        assert!(!unknown_report.totals.cost_known);
+        assert_eq!(unknown_report.totals.unpriced_sessions, 1);
     }
 
     #[test]

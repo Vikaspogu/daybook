@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react'
 
 const API_BASE = '/api'
 
+
 export interface DateItem {
   date: string
   session_count: number
@@ -22,6 +23,7 @@ export interface ProjectGain {
   blocked_count: number
   total_cost_usd: number
   accomplishments: string[]
+  activity?: { statement: string }[]
   key_decisions: string[]
   files_touched: string[]
 }
@@ -42,8 +44,11 @@ export interface DayMetrics {
   cache_creation_tokens: number
   cache_hit_rate?: number | null
   total_cost_usd: number
+  cost_known: boolean
+  unpriced_sessions: number
   test_runs: number
   failed_tool_calls: number
+  unfinished_tool_calls: number
   interrupted: number
 }
 
