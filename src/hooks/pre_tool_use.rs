@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::board::client::BoardClient;
 use crate::board::globs::resolve_hook_file_path;
-use crate::board::identity::resolve_board_identity;
+use crate::board::identity::resolve_board_identity_for_hook;
 use crate::config::load_config;
 use crate::hooks::read_hook_input;
 
@@ -38,7 +38,7 @@ pub async fn handle() -> Result<()> {
     } else {
         input.cwd.clone()
     };
-    let identity = resolve_board_identity(&cwd, None, None);
+    let identity = resolve_board_identity_for_hook(&cwd, &input.session_id);
     let norm_path = match resolve_hook_file_path(&cwd, &identity.worktree_root, &raw_path) {
         Ok(Some(p)) => p,
         Ok(None) => return Ok(()),
@@ -89,10 +89,27 @@ pub async fn handle() -> Result<()> {
         }
     };
 
-    match client
-        .check_path(&identity.project, &norm_path, Some(&identity.agent))
-        .await
-    {
+    let status = async {
+        if strict {
+            None
+        } else {
+            Some(
+                client
+                    .status(Some(&identity.project), Some(&identity.agent), None)
+                    .await,
+            )
+        }
+    };
+    let (snapshot, check) = tokio::join!(
+        status,
+        client.check_path(&identity.project, &norm_path, Some(&identity.agent))
+    );
+    if let Some(Ok(snapshot)) = snapshot {
+        if !edit_is_claimed(&snapshot.locks, &identity.agent, &norm_path) {
+            eprintln!("[daybook board] WARNING: edit is not covered by a board claim: {norm_path}");
+        }
+    }
+    match check {
         Ok(check) => {
             if check.blocked {
                 for lock in &check.blocking_locks {
@@ -131,4 +148,51 @@ pub async fn handle() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn edit_is_claimed(locks: &[crate::ledger::BoardLockRow], agent: &str, path: &str) -> bool {
+    locks.iter().any(|lock| {
+        lock.agent == agent
+            && lock
+                .paths
+                .iter()
+                .any(|glob| crate::board::globs::glob_matches_path(glob, path))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advisory_claim_requires_own_matching_lock() {
+        let lock = crate::ledger::BoardLockRow {
+            id: "l1".into(),
+            project: "daybook".into(),
+            agent: "pi-one".into(),
+            machine: "local".into(),
+            paths: vec!["src/**".into()],
+            note: String::new(),
+            auto: false,
+            claimed_utc: String::new(),
+            expires_utc: String::new(),
+            expires_epoch: i64::MAX,
+        };
+        assert!(edit_is_claimed(
+            std::slice::from_ref(&lock),
+            "pi-one",
+            "src/main.rs"
+        ));
+        assert!(!edit_is_claimed(
+            std::slice::from_ref(&lock),
+            "pi-two",
+            "src/main.rs"
+        ));
+        assert!(!edit_is_claimed(
+            std::slice::from_ref(&lock),
+            "pi-one",
+            "README.md"
+        ));
+        assert!(!edit_is_claimed(&[], "pi-one", "src/main.rs"));
+    }
 }

@@ -18,7 +18,12 @@ pub async fn run(days: usize) -> Result<()> {
     println!("{}", "  ─────────────────────────────".dimmed());
 
     let pricing = PricingData::load().await;
-    let data = InsightsData::collect(&config, Some(days), &pricing)?;
+    let data = InsightsData::collect(
+        &config,
+        Some(days),
+        crate::ledger::journal_date_at(chrono::Utc::now()),
+        &pricing,
+    )?;
 
     // Overview stats
     println!(

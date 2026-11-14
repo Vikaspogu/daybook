@@ -41,17 +41,18 @@ struct CacheEntry {
     data: LlmInsights,
 }
 
-static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<usize, CacheEntry>>> =
-    std::sync::OnceLock::new();
+static CACHE: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<(usize, chrono::NaiveDate), CacheEntry>>,
+> = std::sync::OnceLock::new();
 const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 const MAX_SESSIONS_IN_PROMPT: usize = 20;
 
-fn cache() -> &'static std::sync::Mutex<HashMap<usize, CacheEntry>> {
+fn cache() -> &'static std::sync::Mutex<HashMap<(usize, chrono::NaiveDate), CacheEntry>> {
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-/// Inclusive UTC `[from, to]` covering exactly `days` calendar days ending `today`.
-/// Journal dates are bucketed in UTC, and both ledger queries share these bounds
+/// Inclusive `[from, to]` covering exactly `days` calendar days ending `today`.
+/// Journal dates use the configured local journal calendar; both ledger queries share these bounds
 /// so the counts stay comparable.
 pub(crate) fn window_dates(today: chrono::NaiveDate, days: usize) -> (String, String) {
     let from = today - chrono::Duration::days(days.saturating_sub(1) as i64);
@@ -284,11 +285,15 @@ fn fallback_recommendations(window: &[WindowSession]) -> Vec<String> {
 
 /// Server-side insights: aggregate the ledger window, ask the LLM when
 /// configured, otherwise return deterministic recommendations.
-pub async fn collect(state: &crate::server::handlers::AppState, days: usize) -> LlmInsights {
+pub async fn collect(
+    state: &crate::server::handlers::AppState,
+    days: usize,
+    today: chrono::NaiveDate,
+) -> LlmInsights {
     if let Some(hit) = cache()
         .lock()
         .unwrap()
-        .get(&days)
+        .get(&(days, today))
         .filter(|e| e.computed_at.elapsed() < CACHE_TTL)
     {
         let mut data = hit.data.clone();
@@ -298,7 +303,7 @@ pub async fn collect(state: &crate::server::handlers::AppState, days: usize) -> 
 
     let mut config = state.config.read().unwrap().clone();
     config.insights = config.insights.with_env();
-    let (from, to) = window_dates(chrono::Utc::now().date_naive(), days);
+    let (from, to) = window_dates(today, days);
     let window = match state
         .ledger
         .insights_window(&from, &to, MAX_SESSIONS_IN_PROMPT)
@@ -337,6 +342,7 @@ pub async fn collect(state: &crate::server::handlers::AppState, days: usize) -> 
         )
     } else {
         let prompt = build_prompt(&window, &sessions, &summary, days);
+        let prompt = crate::redaction::redact_for_config(&prompt, &config);
         match call_llm(&config.insights, &prompt).await {
             Ok(resp) => (
                 Some(resp.summary),
@@ -378,8 +384,15 @@ pub async fn collect(state: &crate::server::handlers::AppState, days: usize) -> 
     };
     // Only cache real LLM answers so config fixes and transient failures retry at once.
     if data.source == "llm" && data.error.is_none() {
-        cache().lock().unwrap().insert(
-            days,
+        let mut cache = cache().lock().unwrap();
+        // ponytail: bounded to eight windows; arbitrary caller dates cannot grow this map.
+        if cache.len() >= 8 {
+            if let Some(key) = cache.keys().next().copied() {
+                cache.remove(&key);
+            }
+        }
+        cache.insert(
+            (days, today),
             CacheEntry {
                 computed_at: std::time::Instant::now(),
                 data: data.clone(),

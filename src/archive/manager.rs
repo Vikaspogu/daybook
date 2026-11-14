@@ -141,18 +141,108 @@ impl ArchiveManager {
             .context(format!("Failed to read daily summary: {}", path.display()))
     }
 
+    /// Read one consistent archive snapshot while excluding concurrent writers.
+    pub(crate) fn read_session_snapshot(
+        &self,
+        date: &str,
+        session_id: &str,
+    ) -> Result<Option<(PathBuf, String, i64)>> {
+        let _lock = archive_lock(&self.config)?;
+        let Some(path) = self.find_session_path(date, session_id)? else {
+            return Ok(None);
+        };
+        let content = fs::read_to_string(&path)?;
+        let version = super::session::frontmatter_value(&content, "version")
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or_else(|| {
+                fs::metadata(&path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+                    .unwrap_or(0)
+            })
+            .max(1);
+        Ok(Some((path, content, version)))
+    }
+
+    /// Select the same newest archive for refreshes and ledger pushes, including
+    /// legacy duplicate files that predate session-id collision handling.
+    fn find_session_path(&self, date: &str, session_id: &str) -> Result<Option<PathBuf>> {
+        let dir = self.config.date_dir(date);
+        if !dir.exists() {
+            return Ok(None);
+        }
+        Ok(fs::read_dir(dir)?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file()
+                    && path.file_name().and_then(|name| name.to_str()) != Some("daily.md")
+            })
+            .filter_map(|path| {
+                let content = fs::read_to_string(&path).ok()?;
+                if frontmatter_id(&content) != Some(session_id) {
+                    return None;
+                }
+                let version = super::session::frontmatter_value(&content, "version")
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(0);
+                let modified = fs::metadata(&path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or(0);
+                Some((version, modified, path))
+            })
+            .max()
+            .map(|(_, _, path)| path))
+    }
+
     /// Write a session archive file
     pub fn write_session(&self, date: &str, task_name: &str, content: &str) -> Result<PathBuf> {
         self.ensure_date_dir(date)?;
-        let mut path = self.session_archive_path(date, task_name);
-        // Two sessions that start in the same minute can share an
-        // HH_MM-topic title; never clobber a different session's archive —
-        // disambiguate with a short session-id suffix instead.
+        let _lock = archive_lock(&self.config)?;
         let same_session = |p: &Path, id: &str| {
             fs::read_to_string(p)
-                .map(|c| c.lines().any(|l| l.trim() == format!("session_id: {}", id)))
+                .map(|c| frontmatter_id(&c) == Some(id))
                 .unwrap_or(false)
         };
+        // A refreshed summary may have a new topic. Keep the original path so
+        // the provisional archive is replaced instead of duplicated.
+        if let Some(id) = frontmatter_id(content) {
+            if let Some(existing) = self.find_session_path(date, id)? {
+                let incoming_modified =
+                    super::session::frontmatter_value(content, "transcript_modified_ns")
+                        .and_then(|value| value.parse::<u128>().ok())
+                        .unwrap_or(0);
+                if incoming_modified == 0 {
+                    anyhow::bail!(
+                        "Cannot replace a session archive without transcript_modified_ns"
+                    );
+                }
+                let existing_modified = fs::read_to_string(&existing)
+                    .ok()
+                    .and_then(|saved| {
+                        super::session::frontmatter_value(&saved, "transcript_modified_ns")
+                            .and_then(|value| value.parse::<u128>().ok())
+                    })
+                    .unwrap_or(0);
+                if incoming_modified > 0 && existing_modified > incoming_modified {
+                    return Ok(existing);
+                }
+                let content = with_archive_version(content, Some(&existing));
+                fs::write(&existing, content).context(format!(
+                    "Failed to write session archive: {}",
+                    existing.display()
+                ))?;
+                return Ok(existing);
+            }
+        }
+        let mut path = self.session_archive_path(date, task_name);
+        // Two sessions that start in the same minute can share an HH_MM-topic
+        // title; never clobber a different session's archive.
         if path.exists() {
             match frontmatter_id(content) {
                 Some(id) => {
@@ -178,6 +268,7 @@ impl ArchiveManager {
                 }
             }
         }
+        let content = with_archive_version(content, None);
         fs::write(&path, content).context(format!(
             "Failed to write session archive: {}",
             path.display()
@@ -203,12 +294,37 @@ impl ArchiveManager {
     }
 }
 
+/// Serialize archive writers and snapshot readers across processes.
+pub(crate) fn archive_lock(config: &Config) -> Result<fs::File> {
+    // ponytail: one global lock; archive writes are infrequent.
+    fs::create_dir_all(&config.storage.path)?;
+    let lock = fs::File::create(config.storage.path.join(".session-write.lock"))
+        .context("Failed to open archive writer lock")?;
+    lock.lock().context("Failed to lock archive writer")?;
+    Ok(lock)
+}
+
+/// Stamp a strictly increasing epoch-second version, including same-second refreshes.
+fn with_archive_version(content: &str, previous: Option<&Path>) -> String {
+    let now = chrono::Local::now().timestamp();
+    let version = previous
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|content| {
+            super::session::frontmatter_value(&content, "version")
+                .and_then(|value| value.parse::<i64>().ok())
+        })
+        .map(|previous| now.max(previous.saturating_add(1)))
+        .unwrap_or(now);
+    if content.starts_with("---\n") {
+        content.replacen("\n---", &format!("\nversion: {version}\n---"), 1)
+    } else {
+        content.to_string()
+    }
+}
+
 /// Pull `session_id: <id>` out of archive frontmatter.
 fn frontmatter_id(content: &str) -> Option<&str> {
-    content
-        .lines()
-        .find_map(|l| l.strip_prefix("session_id: "))
-        .map(str::trim)
+    super::session::frontmatter_value(content, "session_id")
 }
 
 #[cfg(test)]
@@ -229,7 +345,7 @@ mod tests {
         let manager = ArchiveManager::new(config);
 
         let first = "---\nsession_id: aaaa1111\n---\nfirst";
-        let second = "---\nsession_id: bbbb2222\n---\nsecond";
+        let second = "---\nsession_id: bbbb2222\ntranscript_modified_ns: 1\n---\nsecond";
         manager
             .write_session("2026-10-29", "01_22-topic", first)
             .unwrap();
@@ -300,5 +416,83 @@ mod tests {
 
         let sessions = manager.list_sessions("2026-01-16").unwrap();
         assert!(sessions.is_empty());
+    }
+    #[test]
+    fn test_version_stamped_without_tags() {
+        let stamped = with_archive_version("---\nsession_id: same\n---\ntags: body-text", None);
+        assert!(crate::archive::session::frontmatter_value(&stamped, "version").is_some());
+    }
+
+    #[test]
+    fn test_older_transcript_does_not_replace_newer_summary() {
+        let temp = TempDir::new().unwrap();
+        let manager = ArchiveManager::new(test_config(&temp));
+        let content = |modified: u128, revision: &str, summary: &str| {
+            format!(
+                "---\nsession_id: same\ntranscript_revision: {revision}\ntranscript_modified_ns: {modified}\n---\n{summary}"
+            )
+        };
+        let path = manager
+            .write_session("2026-11-11", "new", &content(2, "new", "new summary"))
+            .unwrap();
+        manager
+            .write_session("2026-11-11", "old", &content(1, "old", "old summary"))
+            .unwrap();
+        let saved = fs::read_to_string(path).unwrap();
+        assert!(saved.contains("new summary"));
+        assert!(!saved.contains("old summary"));
+        assert!(manager
+            .write_session("2026-11-11", "unknown", &content(0, "unknown", "unknown"))
+            .is_err());
+    }
+
+    #[test]
+    fn test_concurrent_writes_get_distinct_versions() {
+        let temp = TempDir::new().unwrap();
+        let config = test_config(&temp);
+        let content = |summary: &str| {
+            format!("---\nsession_id: same\ntranscript_modified_ns: 1\ntags: [session-archive]\n---\n{summary}")
+        };
+        let manager = ArchiveManager::new(config.clone());
+        let path = manager
+            .write_session("2026-11-11", "first", &content("first"))
+            .unwrap();
+        let first = fs::read_to_string(&path).unwrap();
+        let first_version = crate::archive::session::frontmatter_value(&first, "version")
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap();
+
+        let lock = archive_lock(&config).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let workers: Vec<_> = ["second", "third"]
+            .into_iter()
+            .map(|summary| {
+                let config = config.clone();
+                let barrier = barrier.clone();
+                let done_tx = done_tx.clone();
+                std::thread::spawn(move || {
+                    let manager = ArchiveManager::new(config);
+                    barrier.wait();
+                    manager
+                        .write_session("2026-11-11", summary, &content(summary))
+                        .unwrap();
+                    done_tx.send(()).unwrap();
+                })
+            })
+            .collect();
+        barrier.wait();
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+        drop(lock);
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let saved = fs::read_to_string(path).unwrap();
+        let final_version = crate::archive::session::frontmatter_value(&saved, "version")
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap();
+        assert!(final_version >= first_version + 2);
     }
 }

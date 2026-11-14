@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 
+use crate::archive::session::frontmatter_value;
 use crate::transcript::adapters;
 
 /// `daybook scan --no-llm --local --day <d>`: discovery + parse only.
@@ -46,12 +47,21 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
     let mut skipped = 0;
     for meta in &sessions {
         if let Some(window) = &window {
-            if let Some(fd) = adapters::filename_date(&meta.path) {
-                if !window.contains(&fd) {
-                    continue;
-                }
+            if !path_matches_scan_window(&meta.path, window, meta.agent) {
+                continue;
             }
         }
+        let transcript_modified_ns = match adapters::transcript_modified_ns(&meta.path) {
+            Ok(modified_ns) => modified_ns,
+            Err(error) => {
+                eprintln!(
+                    "[daybook] Cannot timestamp {}, retrying next scan: {}",
+                    clean(&meta.session_id),
+                    clean(&error.to_string())
+                );
+                continue;
+            }
+        };
         let parsed = match adapters::parse_session(meta) {
             Ok(p) => p,
             Err(e) => {
@@ -69,26 +79,27 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
             continue;
         }
 
-        // D6: the session's journal date is its transcript start date,
-        // never the scan time.
+        // The journal date is the transcript start date. Explicit --day uses
+        // only that date; default scans also include recently resumed sessions.
         if let Some(targets) = &targets {
-            if !parsed
-                .start_date()
-                .as_deref()
-                .is_some_and(|d| targets.iter().any(|t| t == d))
-            {
+            if !session_matches_dates(
+                &meta.path,
+                parsed.start_date().as_deref(),
+                targets,
+                day.is_none(),
+            ) {
                 continue;
             }
         }
 
-        rows.push((meta, parsed));
+        rows.push((meta, parsed, transcript_modified_ns));
     }
 
     println!(
         "{:<12} {:<18} {:<8} {:<13} {:<16} {:>7} {:>7}  session",
         "runtime", "project", "start", "duration", "model", "in", "out"
     );
-    for (meta, parsed) in &rows {
+    for (meta, parsed, _) in &rows {
         println!(
             "{:<12} {:<18} {:<8} {:<13} {:<16} {:>7} {:>7}  {}",
             meta.agent.as_str(),
@@ -135,7 +146,7 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
             }
         }
         let total = rows.len();
-        for (i, (meta, parsed)) in rows.iter().enumerate() {
+        for (i, (meta, parsed, transcript_modified_ns)) in rows.iter().enumerate() {
             if parsed.data.is_empty() {
                 continue;
             }
@@ -156,7 +167,45 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
             let journal_date = parsed
                 .start_date()
                 .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
-            if already_archived(&config, &journal_date, &meta.session_id) {
+            let transcript_revision = match adapters::transcript_revision(&meta.path) {
+                Ok(revision) => revision,
+                Err(e) => {
+                    eprintln!(
+                        "[daybook] Cannot hash {}: {}",
+                        clean(&meta.session_id),
+                        clean(&e.to_string())
+                    );
+                    if !local {
+                        push_after_archive(
+                            &config,
+                            meta,
+                            parsed,
+                            &journal_date,
+                            None,
+                            pricing.as_ref(),
+                        )
+                        .await;
+                    }
+                    continue;
+                }
+            };
+            let unchanged = adapters::transcript_modified_ns(&meta.path)
+                .map(|modified_ns| modified_ns == *transcript_modified_ns)
+                .unwrap_or(false);
+            if !unchanged {
+                eprintln!(
+                    "[daybook] Transcript changed during scan, retrying next scan: {}",
+                    clean(&meta.session_id)
+                );
+                continue;
+            }
+            let parsed = &parsed;
+            if archive_is_current(
+                &config,
+                &journal_date,
+                &meta.session_id,
+                &transcript_revision,
+            ) {
                 eprintln!(
                     "[daybook] Already archived, skipping summary: {}",
                     clean(&meta.session_id)
@@ -166,10 +215,10 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
                     // it (e.g. push.url configured after the session archived).
                     push_after_archive(
                         &config,
-                        &meta.path,
                         meta,
                         parsed,
                         &journal_date,
+                        Some(&transcript_revision),
                         pricing.as_ref(),
                     )
                     .await;
@@ -182,13 +231,16 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
                 total,
                 clean(parsed.title.as_deref().unwrap_or(&meta.session_id))
             );
-            let task_name = format!("session-{}", meta.session_id);
             let cwd = meta
                 .cwd
                 .clone()
                 .unwrap_or_else(|| home.display().to_string());
             match crate::cli::commands::summarize::run_summarization(
-                &config, &meta.path, &task_name, &cwd,
+                &config,
+                &meta.path,
+                &cwd,
+                Some((transcript_revision.clone(), *transcript_modified_ns)),
+                Some((meta, parsed)),
             )
             .await
             {
@@ -197,10 +249,10 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
                     if !local {
                         push_after_archive(
                             &config,
-                            &meta.path,
                             meta,
                             parsed,
                             &journal_date,
+                            Some(&transcript_revision),
                             pricing.as_ref(),
                         )
                         .await;
@@ -226,10 +278,10 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
 /// scan retries it. No-op when push.url isn't configured.
 async fn push_after_archive(
     config: &crate::config::Config,
-    transcript: &std::path::Path,
     meta: &adapters::SessionMeta,
     parsed: &adapters::ParsedSession,
     journal_date: &str,
+    expected_revision: Option<&str>,
     pricing: Option<&crate::usage::pricing::PricingData>,
 ) {
     if config.push.url.is_none() {
@@ -237,46 +289,33 @@ async fn push_after_archive(
     }
     // Archives are written under their HH_MM-topic title, not the scan
     // task name — locate the file by its session_id frontmatter line.
-    let Some(archive_path) = find_session_archive(config, journal_date, &meta.session_id) else {
+    let Some((_, summary_md, version)) =
+        find_session_archive(config, journal_date, &meta.session_id)
+    else {
         eprintln!(
             "[daybook] Archive missing, not pushing: {}",
             clean(&meta.session_id)
         );
         return;
     };
-    let Ok(summary_md) = std::fs::read_to_string(&archive_path) else {
-        eprintln!(
-            "[daybook] Archive missing, not pushing: {}",
-            archive_path.display()
-        );
+    if expected_revision.is_some_and(|revision| {
+        frontmatter_value(&summary_md, "transcript_revision") != Some(revision)
+    }) {
         return;
-    };
-    let version = std::fs::metadata(transcript)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    }
     let cwd = meta.cwd.clone().unwrap_or_default();
     let usage = parsed
         .usage
         .as_ref()
         .map(|u| {
-            let cost_usd = pricing
-                .zip(parsed.model.as_deref())
-                .map(|(p, m)| {
-                    p.calculate_cost(m, u.input, u.output, u.cache_creation, u.cache_read)
-                })
-                .filter(|c| *c > 0.0);
-            crate::ledger::UsageRecord {
-                input: u.input,
-                output: u.output,
-                cache_read: u.cache_read,
-                cache_creation: u.cache_creation,
-                cost_usd,
-            }
+            let calculated = pricing.zip(parsed.model.as_deref()).map(|(p, m)| {
+                p.calculate_cost(m, u.input, u.output, u.cache_creation, u.cache_read)
+            });
+            usage_record(u, calculated)
         })
         .unwrap_or_default();
+    // The ledger hash describes the exact redacted content sent and stored.
+    let summary_md = crate::redaction::redact_for_config(&summary_md, config);
     let record = crate::push::build_record(
         config,
         &meta.session_id,
@@ -319,6 +358,26 @@ async fn push_after_archive(
     }
 }
 
+fn usage_record(
+    usage: &adapters::SessionUsage,
+    calculated_cost: Option<f64>,
+) -> crate::ledger::UsageRecord {
+    let cost_usd = if let Some(cost) = usage.cost_usd {
+        Some(cost)
+    } else if usage.multiple_models {
+        None
+    } else {
+        calculated_cost.filter(|cost| *cost > 0.0)
+    };
+    crate::ledger::UsageRecord {
+        input: usage.input,
+        output: usage.output,
+        cache_read: usage.cache_read,
+        cache_creation: usage.cache_creation,
+        cost_usd,
+    }
+}
+
 /// True when the transcript looks finished: last modified more than
 /// STALE_SECS ago. Freshly modified files are likely still-live sessions;
 /// summarizing them produces partial archives that dedup then protects.
@@ -341,27 +400,63 @@ fn find_session_archive(
     config: &crate::config::Config,
     date: &str,
     session_id: &str,
-) -> Option<std::path::PathBuf> {
-    let dir = config.storage.path.join(date);
-    std::fs::read_dir(&dir)
-        .ok()?
+) -> Option<(std::path::PathBuf, String, i64)> {
+    crate::archive::manager::ArchiveManager::new(config.clone())
+        .read_session_snapshot(date, session_id)
+        .ok()
         .flatten()
-        .find(|e| {
-            std::fs::read_to_string(e.path())
-                // Exact-line match: a substring match would also hit
-                // ids that merely start with session_id (prefix collision).
-                .map(|c| {
-                    c.lines()
-                        .any(|l| l.trim() == format!("session_id: {}", session_id))
-                })
-                .unwrap_or(false)
-        })
-        .map(|e| e.path())
 }
 
-/// True if an archive for this session already exists for the journal date.
-fn already_archived(config: &crate::config::Config, date: &str, session_id: &str) -> bool {
-    find_session_archive(config, date, session_id).is_some()
+/// True only when the archive matches both the transcript bytes and summarizer.
+fn archive_is_current(
+    config: &crate::config::Config,
+    date: &str,
+    session_id: &str,
+    transcript_revision: &str,
+) -> bool {
+    let Some((_, content, _)) = find_session_archive(config, date, session_id) else {
+        return false;
+    };
+    frontmatter_value(&content, "transcript_revision") == Some(transcript_revision)
+        && frontmatter_value(&content, "summarizer_version").and_then(|v| v.parse::<u32>().ok())
+            == Some(crate::archive::session::SUMMARIZER_VERSION)
+}
+
+fn modified_date(path: &std::path::Path) -> Option<String> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(
+        chrono::DateTime::<chrono::Local>::from(modified)
+            .format("%Y-%m-%d")
+            .to_string(),
+    )
+}
+
+/// Claude filenames have no date, so parse them before applying the day filter.
+fn path_matches_scan_window(
+    path: &std::path::Path,
+    dates: &[String],
+    agent: adapters::AgentKind,
+) -> bool {
+    agent == adapters::AgentKind::ClaudeCode || path_matches_dates(path, dates)
+}
+
+/// Date prefilter includes recently modified transcripts whose start date is old.
+fn path_matches_dates(path: &std::path::Path, dates: &[String]) -> bool {
+    let Some(filename_date) = adapters::filename_date(path) else {
+        // Dateless runtimes need the parsed start date before we can filter them.
+        return true;
+    };
+    dates.contains(&filename_date) || modified_date(path).is_some_and(|date| dates.contains(&date))
+}
+
+fn session_matches_dates(
+    path: &std::path::Path,
+    start_date: Option<&str>,
+    targets: &[String],
+    include_modified: bool,
+) -> bool {
+    start_date.is_some_and(|date| targets.iter().any(|target| target == date))
+        || (include_modified && modified_date(path).is_some_and(|date| targets.contains(&date)))
 }
 
 /// Resolve optional `--day`: when omitted, scan both `today` and `yesterday`
@@ -478,8 +573,18 @@ fn compute_aggregates(parsed: &adapters::ParsedSession) -> crate::ledger::Aggreg
 
     for tc in &parsed.data.tool_calls {
         // A test run = a shell tool call whose command mentions a test runner.
-        if tc.name.contains("bash") || tc.name.contains("execute") {
-            if let Some(cmd) = tc.input.get("command").and_then(|c| c.as_str()) {
+        let tool_name = tc.name.to_ascii_lowercase();
+        if ["bash", "execute", "exec", "shell"]
+            .iter()
+            .any(|part| tool_name.contains(part))
+        {
+            let cmd = tc
+                .input
+                .get("command")
+                .or_else(|| tc.input.get("cmd"))
+                .and_then(|value| value.as_str())
+                .or_else(|| tc.input.as_str());
+            if let Some(cmd) = cmd {
                 if cmd.contains("cargo test")
                     || cmd.contains("npm test")
                     || cmd.contains("pytest")
@@ -498,8 +603,10 @@ fn compute_aggregates(parsed: &adapters::ParsedSession) -> crate::ledger::Aggreg
             .and_then(|r| r.get("is_error"))
             .and_then(|v| v.as_bool())
             == Some(true);
-        if tc.response.is_none() || is_error {
+        if is_error {
             agg.failed_tool_calls += 1;
+        } else if tc.response.is_none() {
+            agg.unfinished_tool_calls += 1;
         }
     }
 
@@ -524,6 +631,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn usage_record_prefers_recorded_cost_and_never_estimates_mixed_models() {
+        let recorded = adapters::SessionUsage {
+            cost_usd: Some(0.125),
+            ..Default::default()
+        };
+        assert_eq!(usage_record(&recorded, Some(9.0)).cost_usd, Some(0.125));
+        let mixed = adapters::SessionUsage {
+            multiple_models: true,
+            ..Default::default()
+        };
+        assert_eq!(usage_record(&mixed, Some(9.0)).cost_usd, None);
+        let single = adapters::SessionUsage::default();
+        assert_eq!(usage_record(&single, Some(0.25)).cost_usd, Some(0.25));
+    }
+
+    #[test]
     fn test_compute_aggregates_counts_tool_errors() {
         use crate::transcript::{ToolCall, TranscriptData};
         let mut data = TranscriptData::default();
@@ -538,6 +661,21 @@ mod tests {
                 response,
             });
         }
+        data.tool_calls.push(ToolCall {
+            name: "exec_command".into(),
+            input: serde_json::json!({"command": "cargo test --quiet"}),
+            response: Some(serde_json::Value::String("ok".into())),
+        });
+        data.tool_calls.push(ToolCall {
+            name: "exec_command".into(),
+            input: serde_json::json!({"cmd": "npm test"}),
+            response: Some(serde_json::Value::String("ok".into())),
+        });
+        data.tool_calls.push(ToolCall {
+            name: "exec_command".into(),
+            input: serde_json::Value::String("pytest".into()),
+            response: Some(serde_json::Value::String("ok".into())),
+        });
         let parsed = adapters::ParsedSession {
             data,
             title: None,
@@ -547,7 +685,10 @@ mod tests {
             usage: None,
             internal: false,
         };
-        assert_eq!(compute_aggregates(&parsed).failed_tool_calls, 2);
+        let aggregates = compute_aggregates(&parsed);
+        assert_eq!(aggregates.failed_tool_calls, 1);
+        assert_eq!(aggregates.unfinished_tool_calls, 1);
+        assert_eq!(aggregates.test_runs, 3);
     }
 
     #[test]
@@ -605,5 +746,141 @@ mod tests {
             filename_date(Path::new("x2026-01-02y.jsonl")).as_deref(),
             Some("2026-01-02")
         );
+    }
+
+    #[test]
+    fn test_archive_snapshot_waits_for_writer() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut config = crate::config::Config::default();
+        config.storage.path = temp.path().to_path_buf();
+        let manager = crate::archive::manager::ArchiveManager::new(config.clone());
+        manager.ensure_date_dir("2026-11-11").unwrap();
+        let path = temp.path().join("2026-11-11/session.md");
+        std::fs::write(&path, "---\nsession_id: same\n---\nold summary").unwrap();
+
+        let (_, legacy, legacy_version) =
+            find_session_archive(&config, "2026-11-11", "same").unwrap();
+        assert!(legacy.ends_with("old summary"));
+        assert!(legacy_version > 0);
+        let lock = crate::archive::manager::archive_lock(&config).unwrap();
+        let reader_config = config.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            tx.send(find_session_archive(&reader_config, "2026-11-11", "same"))
+                .unwrap();
+        });
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+
+        std::fs::write(&path, "---\nsession_id: same\nversion: 2\n---\nnew summary").unwrap();
+        drop(lock);
+        let (_, snapshot, version) = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(frontmatter_value(&snapshot, "version"), Some("2"));
+        assert_eq!(version, 2);
+        assert!(snapshot.ends_with("new summary"));
+    }
+
+    #[test]
+    fn test_archive_freshness_requires_revision_and_summarizer_version() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut config = crate::config::Config::default();
+        config.storage.path = temp.path().to_path_buf();
+        let dir = temp.path().join("2026-11-11");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("20_33-duplicate-chat.md");
+        std::fs::write(&path, "---\nsession_id: session-1\n---\nold").unwrap();
+        assert!(!archive_is_current(
+            &config,
+            "2026-11-11",
+            "session-1",
+            "new-hash"
+        ));
+
+        std::fs::write(
+            &path,
+            format!(
+                "---\nsession_id: session-1\ntranscript_revision: new-hash\nsummarizer_version: {}\n---\nfinal",
+                crate::archive::session::SUMMARIZER_VERSION
+            ),
+        )
+        .unwrap();
+        assert!(archive_is_current(
+            &config,
+            "2026-11-11",
+            "session-1",
+            "new-hash"
+        ));
+        assert!(!archive_is_current(
+            &config,
+            "2026-11-11",
+            "session-1",
+            "later-hash"
+        ));
+
+        let outdated = std::fs::read_to_string(&path).unwrap().replace(
+            &format!(
+                "summarizer_version: {}",
+                crate::archive::session::SUMMARIZER_VERSION
+            ),
+            "summarizer_version: 0",
+        );
+        std::fs::write(path, outdated).unwrap();
+        assert!(!archive_is_current(
+            &config,
+            "2026-11-11",
+            "session-1",
+            "new-hash"
+        ));
+    }
+
+    #[test]
+    fn test_dateless_sessions_reach_parsed_date_filter() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("01a14c0a-b03b.jsonl");
+        std::fs::write(&path, "old").unwrap();
+        let targets = vec!["2000-01-01".to_string()];
+        assert!(path_matches_dates(&path, &targets));
+        assert!(path_matches_scan_window(
+            &path,
+            &targets,
+            adapters::AgentKind::ClaudeCode
+        ));
+        assert!(path_matches_scan_window(
+            &path,
+            &targets,
+            adapters::AgentKind::Pi
+        ));
+    }
+
+    #[test]
+    fn test_recently_modified_old_session_matches_default_scan() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("2020-01-01T00-00-00-000Z_old.jsonl");
+        std::fs::write(&path, "resumed").unwrap();
+        let today = modified_date(&path).unwrap();
+        let targets = vec![today];
+        assert!(path_matches_dates(&path, &targets));
+        assert!(session_matches_dates(
+            &path,
+            Some("2020-01-01"),
+            &targets,
+            true
+        ));
+        assert!(!session_matches_dates(
+            &path,
+            Some("2020-01-01"),
+            &targets,
+            false
+        ));
+        assert!(!session_matches_dates(
+            &path,
+            Some("2020-01-01"),
+            &["2000-01-01".to_string()],
+            true
+        ));
     }
 }

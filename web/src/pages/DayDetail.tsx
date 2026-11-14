@@ -801,6 +801,7 @@ function ConsolidatedRulesCard({
 
 function ProjectGainCard({ gain }: { gain: ProjectGain }) {
   const projectName = normalizeProjectLabel(gain.project)
+  const activityStatements = gain.activity?.map(activity => activity.statement) ?? gain.accomplishments
   return (
     <div className="qp-card p-4 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-white/[0.06]">
@@ -832,9 +833,9 @@ function ProjectGainCard({ gain }: { gain: ProjectGain }) {
         </div>
       </div>
 
-      {gain.accomplishments.length > 0 && (
+      {activityStatements.length > 0 && (
         <ul className="space-y-1.5">
-          {gain.accomplishments.map((item, idx) => {
+          {activityStatements.map((item, idx) => {
             const colonIdx = item.indexOf(': ')
             const head = colonIdx > 0 ? item.slice(0, colonIdx) : null
             const rest = colonIdx > 0 ? item.slice(colonIdx + 2) : item
@@ -1058,11 +1059,14 @@ export function DayDetail() {
   const cacheHitPct =
     dayMetrics?.cache_hit_rate != null ? Math.round(dayMetrics.cache_hit_rate * 1000) / 10 : null
   const displayCost = dayMetrics?.total_cost_usd || totalCost
-  const pricedSessionCount = sessions.filter(s => (s.cost_usd ?? 0) > 0).length
+  const costKnown = dayMetrics?.cost_known ?? sessions.some(s => s.cost_usd != null)
+  const pricedSessionCount = sessions.filter(s => s.cost_usd != null).length
   const signalDenominator = counts.work + counts.review + counts.blocked
   const signalRatioPct =
     signalDenominator > 0 ? Math.round((counts.work / signalDenominator) * 100) : 100
   const failedCalls = dayMetrics?.failed_tool_calls ?? 0
+  const unfinishedCalls = dayMetrics?.unfinished_tool_calls ?? 0
+  const unpricedCount = dayMetrics?.unpriced_sessions ?? sessions.filter(s => s.cost_usd == null).length
   const interruptedCount = dayMetrics?.interrupted ?? 0
   const testRuns = dayMetrics?.test_runs ?? 0
 
@@ -1094,7 +1098,7 @@ export function DayDetail() {
               {date} · Daily Brief
             </h1>
             <p className="text-xs font-mono text-[#94A3B8] tabular-nums">
-              {counts.work} shipped · {projectGains.length || projects.length}{' '}
+              {counts.work} work · {projectGains.length || projects.length}{' '}
               {(projectGains.length || projects.length) === 1 ? 'project' : 'projects'} ·{' '}
               {counts.review} {counts.review === 1 ? 'review' : 'reviews'} · {signalRatioPct}% signal
             </p>
@@ -1116,7 +1120,7 @@ export function DayDetail() {
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-[10px]">
           <div className={cn('qp-tile', counts.work > 0 ? 'emerald' : '')}>
             <div className="qp-tile-icon">WK</div>
-            <div className="qp-tile-name">Shipped Work</div>
+            <div className="qp-tile-name">Work Sessions</div>
             <div className="qp-tile-state font-mono">
               {counts.work} work · {signalRatioPct}% signal
             </div>
@@ -1126,7 +1130,8 @@ export function DayDetail() {
             <div className="qp-tile-icon">$</div>
             <div className="qp-tile-name">Active Spend</div>
             <div className="qp-tile-state font-mono">
-              {displayCost > 0 ? formatCost(displayCost) : '$0.00'} · {pricedSessionCount} priced
+              {costKnown ? formatCost(displayCost) : 'Unknown'} · {pricedSessionCount} priced
+              {unpricedCount > 0 ? ` · ${unpricedCount} unpriced` : ''}
             </div>
           </div>
 
@@ -1144,7 +1149,8 @@ export function DayDetail() {
             <div className="qp-tile-icon">{failedCalls > 0 || interruptedCount > 0 ? '!' : '✓'}</div>
             <div className="qp-tile-name">Command Health</div>
             <div className="qp-tile-state font-mono">
-              {failedCalls} err · {testRuns} tests
+              {failedCalls} err · {testRuns} test cmds
+              {unfinishedCalls > 0 ? ` · ${unfinishedCalls} pending` : ''}
               {interruptedCount > 0 ? ` · ${interruptedCount} int` : ''}
             </div>
           </div>
@@ -1158,7 +1164,7 @@ export function DayDetail() {
             className="qp-pill emerald font-mono tabular-nums hover:brightness-110"
           >
             <span className="qp-dot" />
-            <span>{counts.work} Shipped Work</span>
+            <span>{counts.work} Work Sessions</span>
           </a>
           <a
             href="#sessions"
@@ -1188,7 +1194,7 @@ export function DayDetail() {
           {projectGains.length > 0 && (
             <Section
               id="gains"
-              title="1 · What Shipped & Why"
+              title="1 · Work & Review"
               meta={`${projectGains.length} ${projectGains.length === 1 ? 'PROJECT' : 'PROJECTS'}`}
             >
               <div className="grid gap-3.5">
@@ -1311,7 +1317,7 @@ export function DayDetail() {
                   categoryFilter === 'work' ? 'emerald' : 'text-[#94A3B8] hover:text-[#F8FAFC]'
                 )}
               >
-                <span className="text-xs font-bold">Shipped</span>
+                <span className="text-xs font-bold">Work</span>
                 <span className="font-mono text-[11px] tabular-nums opacity-85">
                   {counts.work} runs
                 </span>

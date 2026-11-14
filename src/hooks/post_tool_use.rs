@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::board::client::BoardClient;
 use crate::board::globs::resolve_hook_file_path;
-use crate::board::identity::resolve_board_identity;
+use crate::board::identity::resolve_board_identity_for_hook;
 use crate::config::load_config;
 use crate::hooks::read_hook_input;
 use crate::ledger::BoardTouchLockReq;
@@ -31,7 +31,7 @@ pub async fn handle() -> Result<()> {
     } else {
         input.cwd.clone()
     };
-    let identity = resolve_board_identity(&cwd, None, None);
+    let identity = resolve_board_identity_for_hook(&cwd, &input.session_id);
     let Ok(Some(norm_path)) = resolve_hook_file_path(&cwd, &identity.worktree_root, &raw_path)
     else {
         return Ok(());

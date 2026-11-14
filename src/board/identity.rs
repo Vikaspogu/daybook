@@ -582,14 +582,58 @@ pub fn resolve_board_identity(
         .ok()
         .map(|s| sanitize_session_title(&s))
         .filter(|s| !s.is_empty());
-    BoardIdentity {
+    let mut identity = BoardIdentity {
         project,
         agent,
         runtime,
         branch,
         worktree_root,
         session_title,
+    };
+    if explicit_agent
+        .map(str::trim)
+        .filter(|agent| !agent.is_empty())
+        .is_none()
+    {
+        if let Ok(session_id) = std::env::var("PI_SESSION_ID") {
+            identity = apply_pi_session_id(identity, &session_id);
+        }
     }
+    identity
+}
+
+fn apply_pi_session_id(mut identity: BoardIdentity, session_id: &str) -> BoardIdentity {
+    if let Some(agent) = session_agent_handle(&identity, session_id) {
+        identity.agent = agent;
+    }
+    identity
+}
+
+/// Hook processes do not share parent env, so Pi uses its session id to distinguish
+/// concurrent agents in the same worktree. Explicit DAYBOOK_AGENT still wins.
+pub fn resolve_board_identity_for_hook(cwd: &Path, session_id: &str) -> BoardIdentity {
+    let mut identity = resolve_board_identity(cwd, None, None);
+    if std::env::var("PI_SESSION_ID").ok().as_deref() != Some(session_id) {
+        identity = apply_pi_session_id(identity, session_id);
+    }
+    identity
+}
+
+fn session_agent_handle(identity: &BoardIdentity, session_id: &str) -> Option<String> {
+    if identity.runtime != "pi"
+        || session_id.trim().is_empty()
+        || session_id == "pi"
+        || std::env::var_os("DAYBOOK_AGENT").is_some()
+    {
+        return None;
+    }
+    let suffix = &crate::ledger::sha256_hex(session_id.as_bytes())[..10];
+    let prefix: String = identity
+        .agent
+        .chars()
+        .take(MAX_IDENT_LEN.saturating_sub(suffix.len() + 1))
+        .collect();
+    Some(sanitize_agent_handle(&format!("{prefix}-{suffix}")))
 }
 
 /// Resolve board identity for an arbitrary worktree on disk without reading the caller process's env vars.
@@ -649,10 +693,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pi_session_ids_produce_distinct_handles() {
+        let identity = BoardIdentity {
+            project: "daybook".into(),
+            agent: "pi".into(),
+            runtime: "pi".into(),
+            branch: String::new(),
+            worktree_root: PathBuf::new(),
+            session_title: None,
+        };
+        let one = apply_pi_session_id(identity.clone(), "session-one");
+        let two = apply_pi_session_id(identity, "session-two");
+        assert_ne!(one.agent, two.agent);
+        assert!(one.agent.starts_with("pi-"));
+        assert!(two.agent.starts_with("pi-"));
+    }
+
+    #[test]
     fn t3_worktree_resolves_project_and_handle() {
         let p = Path::new("/home/agent/.t3/worktrees/daybook/t3-fb61e20a/src");
         assert_eq!(resolve_board_project(p, None), "daybook");
         assert_eq!(resolve_agent_handle(p, None, "pi"), "t3-fb61e20a");
+    }
+
+    #[test]
+    fn pi_hook_identity_distinguishes_sessions_in_one_worktree() {
+        let mut identity = BoardIdentity {
+            project: "daybook".into(),
+            agent: "t3-shared".into(),
+            runtime: "pi".into(),
+            branch: "main".into(),
+            worktree_root: PathBuf::from("/tmp/worktree"),
+            session_title: None,
+        };
+        let first = session_agent_handle(&identity, "session-one").unwrap();
+        let second = session_agent_handle(&identity, "session-two").unwrap();
+        assert_ne!(first, second);
+        assert!(first.len() <= MAX_IDENT_LEN);
+        assert_eq!(
+            first,
+            session_agent_handle(&identity, "session-one").unwrap()
+        );
+        identity.agent = first.clone();
+        assert_eq!(session_agent_handle(&identity, ""), None);
     }
 
     #[test]

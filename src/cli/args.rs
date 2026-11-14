@@ -128,11 +128,23 @@ pub enum Commands {
         job_id: Option<String>,
     },
 
-    /// Print one day's work overview + session summaries from the ledger server
+    /// Query a day, or recall project sessions without knowing their dates
     Query {
-        /// Date to query (format: yyyy-mm-dd, default: today UTC)
-        #[arg(value_name = "DATE", default_value_t = chrono::Utc::now().format("%Y-%m-%d").to_string())]
-        date: String,
+        /// Date to query (format: yyyy-mm-dd, default: today)
+        #[arg(value_name = "DATE")]
+        date: Option<String>,
+
+        /// Restrict recall to this project
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Words that must all appear in the session summary
+        #[arg(long)]
+        search: Option<String>,
+
+        /// Maximum recall results (1-20)
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
     },
     /// Discover sessions from all agent runtimes and list them (no archiving)
     Scan {
@@ -250,6 +262,9 @@ pub enum Commands {
 
     /// Multi-agent worktree coordination board (locks, tasks, messages, MCP)
     Board(BoardArgs),
+
+    /// Inspect archive, ledger, queue, and runtime integration health
+    Doctor,
 
     /// Show or update configuration
     Config {

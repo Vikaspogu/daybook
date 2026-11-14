@@ -99,6 +99,7 @@ pub async fn auth_middleware(
 #[derive(serde::Deserialize)]
 pub struct StatsQuery {
     pub days: Option<usize>,
+    pub today: Option<String>,
 }
 
 /// GET /api/stats?days=N — aggregate report over the ledger window.
@@ -111,7 +112,13 @@ pub async fn get_stats(
     // ponytail: hard cap at 90 days; paginated queries if the ledger grows
     // past what one response should carry.
     let days = q.days.unwrap_or(7).clamp(1, 90);
-    match state.ledger.stat_rows(days) {
+    let today = q
+        .today
+        .as_deref()
+        .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+        .unwrap_or_else(|| crate::ledger::journal_date_at(chrono::Utc::now()));
+    let (from, to) = crate::insights::llm::window_dates(today, days);
+    match state.ledger.stat_rows(&from, &to) {
         Ok(rows) => (
             StatusCode::OK,
             Json(ApiResponse::success(crate::ledger::aggregate_stats(&rows))),
@@ -119,6 +126,50 @@ pub async fn get_stats(
             .into_response(),
         Err(e) => {
             eprintln!("[daybook] stats query failed: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<()>::error("internal server error")),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct RecallQuery {
+    pub project: Option<String>,
+    pub search: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// GET /api/recall?project=daybook&search=cache — project-scoped agent recall.
+pub async fn recall(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<RecallQuery>,
+) -> Response {
+    if q.search
+        .as_deref()
+        .map(|search| search.split_whitespace().count())
+        .unwrap_or(0)
+        > crate::ledger::Ledger::MAX_RECALL_SEARCH_TERMS
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<()>::error(format!(
+                "at most {} search words",
+                crate::ledger::Ledger::MAX_RECALL_SEARCH_TERMS
+            ))),
+        )
+            .into_response();
+    }
+    match state.ledger.recall(
+        q.project.as_deref(),
+        q.search.as_deref(),
+        q.limit.unwrap_or(5),
+    ) {
+        Ok(rows) => Json(ApiResponse::success(rows)).into_response(),
+        Err(error) => {
+            eprintln!("[daybook] recall query failed: {error:#}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiResponse::<()>::error("internal server error")),
@@ -501,10 +552,11 @@ pub async fn get_daily_summary(
             let mut work_count = 0usize;
             let mut review_count = 0usize;
             let mut blocked_count = 0usize;
-            let mut day_metrics = DayMetricsDto::default();
+            let mut day_metrics = DayMetricsDto {
+                cost_known: session_count == 0,
+                ..Default::default()
+            };
             let mut by_project: std::collections::BTreeMap<String, ProjectGainDto> =
-                std::collections::BTreeMap::new();
-            let mut review_fallbacks: std::collections::BTreeMap<String, Vec<String>> =
                 std::collections::BTreeMap::new();
             let mut waste_map: std::collections::BTreeMap<(String, String), (usize, f64)> =
                 std::collections::BTreeMap::new();
@@ -520,9 +572,12 @@ pub async fn get_daily_summary(
             for r in &rows {
                 let title = session_display_title(r);
                 let preview = summary_preview(&r.summary_md);
+                let full_summary = extract_section(&r.summary_md, "Summary");
                 let files = extract_files_touched(&r.summary_md);
                 let (category, blocker_reason) = classify_session(&title, &preview, &files);
                 let cost = r.cost_usd.unwrap_or(0.0);
+                day_metrics.cost_known |= r.cost_usd.is_some();
+                day_metrics.unpriced_sessions += u64::from(r.cost_usd.is_none());
 
                 day_metrics.input_tokens = day_metrics.input_tokens.saturating_add(r.usage.input);
                 day_metrics.output_tokens =
@@ -536,6 +591,9 @@ pub async fn get_daily_summary(
                 day_metrics.total_cost_usd += cost;
                 day_metrics.test_runs =
                     day_metrics.test_runs.saturating_add(r.aggregates.test_runs);
+                day_metrics.unfinished_tool_calls = day_metrics
+                    .unfinished_tool_calls
+                    .saturating_add(r.aggregates.unfinished_tool_calls);
                 day_metrics.failed_tool_calls = day_metrics
                     .failed_tool_calls
                     .saturating_add(r.aggregates.failed_tool_calls);
@@ -563,19 +621,27 @@ pub async fn get_daily_summary(
                         project: r.project.clone(),
                         ..Default::default()
                     });
+                entry.total_cost_usd += cost;
 
                 match category {
                     "work" => {
                         work_count += 1;
                         entry.work_count += 1;
-                        entry.total_cost_usd += cost;
+                        entry.activity.push(SessionActivityDto {
+                            category: category.to_string(),
+                            title: title.clone(),
+                            statement: activity_statement(&title, &preview, &files),
+                            files_touched: files.clone(),
+                        });
                         let takeaway = first_sentence(&preview);
                         let line = if takeaway.is_empty() {
                             title.clone()
                         } else {
                             format!("{title}: {takeaway}")
                         };
-                        if entry.accomplishments.len() < 5 && !entry.accomplishments.contains(&line)
+                        if has_completed_work(&full_summary, &files)
+                            && entry.accomplishments.len() < 5
+                            && !entry.accomplishments.contains(&line)
                         {
                             entry.accomplishments.push(line);
                         }
@@ -618,17 +684,12 @@ pub async fn get_daily_summary(
                     "review" => {
                         review_count += 1;
                         entry.review_count += 1;
-                        entry.total_cost_usd += cost;
-                        let takeaway = first_sentence(&preview);
-                        let line = if takeaway.is_empty() {
-                            title.clone()
-                        } else {
-                            format!("{title}: {takeaway}")
-                        };
-                        let fb = review_fallbacks.entry(r.project.clone()).or_default();
-                        if fb.len() < 2 && !fb.contains(&line) {
-                            fb.push(line);
-                        }
+                        entry.activity.push(SessionActivityDto {
+                            category: category.to_string(),
+                            title: title.clone(),
+                            statement: activity_statement(&title, &preview, &files),
+                            files_touched: files.clone(),
+                        });
                         for l in extract_learnings(&r.summary_md).into_iter().take(2) {
                             push_project_learning(&mut learnings_map, &r.project, &title, &l);
                             let clean = strip_learning_tag_prefix(&l);
@@ -640,6 +701,12 @@ pub async fn get_daily_summary(
                     _ => {
                         blocked_count += 1;
                         entry.blocked_count += 1;
+                        entry.activity.push(SessionActivityDto {
+                            category: category.to_string(),
+                            title: title.clone(),
+                            statement: activity_statement(&title, &preview, &files),
+                            files_touched: files.clone(),
+                        });
                         let reason = blocker_reason.unwrap_or_else(|| {
                             "Blocked before execution (environment or permissions)".to_string()
                         });
@@ -747,13 +814,8 @@ pub async fn get_daily_summary(
 
             let mut project_gains: Vec<ProjectGainDto> = by_project
                 .into_values()
-                .filter_map(|mut p| {
-                    if p.accomplishments.is_empty() {
-                        if let Some(fb) = review_fallbacks.remove(&p.project) {
-                            p.accomplishments = fb;
-                        }
-                    }
-                    if p.work_count > 0 || p.review_count > 0 {
+                .filter_map(|p| {
+                    if p.work_count > 0 || p.review_count > 0 || p.blocked_count > 0 {
                         Some(p)
                     } else {
                         None
@@ -1033,14 +1095,17 @@ pub async fn get_insights(
         .unwrap_or(30)
         // Bounds the ledger scan and keeps window_dates inside chrono's range.
         .clamp(1, 365);
+    let today = params
+        .get("today")
+        .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+        .unwrap_or_else(|| crate::ledger::journal_date_at(chrono::Utc::now()));
 
     // The archive lives on the machine that scanned. A server without one
     // (the deployed pod holds only the ledger) builds insights from the ledger.
-    let data = match InsightsData::collect(&config, Some(days), &state.pricing) {
+    let data = match InsightsData::collect(&config, Some(days), today, &state.pricing) {
         Ok(d) if d.total_days > 0 => Ok(d),
         _ => {
-            let (from, to) =
-                crate::insights::llm::window_dates(chrono::Utc::now().date_naive(), days);
+            let (from, to) = crate::insights::llm::window_dates(today, days);
             // ponytail: only the newest 500 rows carry summary text for the timeline.
             state
                 .ledger
@@ -1199,7 +1264,11 @@ pub async fn get_insights_llm(
         .and_then(|d| d.parse().ok())
         .unwrap_or(30)
         .clamp(1, 365);
-    let data = crate::insights::llm::collect(&state, days).await;
+    let today = params
+        .get("today")
+        .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+        .unwrap_or_else(|| crate::ledger::journal_date_at(chrono::Utc::now()));
+    let data = crate::insights::llm::collect(&state, days, today).await;
     Json(ApiResponse::success(data))
 }
 
@@ -1638,6 +1707,7 @@ fn is_one_off_host_incident(
     trigger: Option<&str>,
     why: Option<&str>,
     actions: &[String],
+    evidence: Option<&str>,
 ) -> bool {
     let mut combined = format!(
         "{} {} {} {}",
@@ -1661,7 +1731,37 @@ fn is_one_off_host_incident(
         "rtm_newaddr",
         "bubblewrap",
     ];
-    HOST_INCIDENT_MARKERS.iter().any(|m| lower.contains(m))
+    if HOST_INCIDENT_MARKERS.iter().any(|m| lower.contains(m)) {
+        return true;
+    }
+    let incident_only = [
+        "failed",
+        "blocked",
+        "error",
+        "permission denied",
+        "could not",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    let established = evidence.is_some_and(|text| {
+        let lower = text.to_lowercase();
+        let positive = ["confirmed", "verified", "passed", "succeeded", "resolved"]
+            .iter()
+            .any(|marker| contains_marker(&lower, marker));
+        let negative = [
+            "error report",
+            "not confirmed",
+            "not verified",
+            "possible",
+            "unverified",
+            "unconfirmed",
+            "failed",
+        ]
+        .iter()
+        .any(|marker| contains_marker(&lower, marker));
+        positive && !negative
+    });
+    incident_only && evidence.is_some() && !established
 }
 
 fn classify_legacy_rule_scope(project: &str) -> &'static str {
@@ -1877,16 +1977,17 @@ fn extract_consolidated_rules(project: &str, summary_md: &str) -> Vec<Consolidat
     raw_rules
         .into_iter()
         .filter_map(|mut rule| {
+            if is_one_off_host_incident(
+                &rule.name,
+                &rule.summary,
+                rule.trigger.as_deref(),
+                rule.why.as_deref(),
+                &rule.actions,
+                rule.evidence.as_deref(),
+            ) {
+                return None;
+            }
             if rule.scope.is_empty() {
-                if is_one_off_host_incident(
-                    &rule.name,
-                    &rule.summary,
-                    rule.trigger.as_deref(),
-                    rule.why.as_deref(),
-                    &rule.actions,
-                ) {
-                    return None;
-                }
                 rule.scope = classify_legacy_rule_scope(&rule.project).to_string();
             } else if rule.scope == "repo-rule" && is_scratch {
                 // Scratch directories do not have a repository AGENTS.md policy destination.
@@ -2016,9 +2117,12 @@ fn build_workflow_coaching(
             parts.push(format!("{} {}", day_metrics.interrupted, noun));
         }
         let test_note = if day_metrics.test_runs > 0 {
-            format!("across {} test suite runs", day_metrics.test_runs)
+            format!(
+                "across {} recorded test commands; pass/fail is not inferred",
+                day_metrics.test_runs
+            )
         } else {
-            "(0 automated test suites ran)".to_string()
+            "(no automated test commands recorded)".to_string()
         };
         signals.push(format!(
             "Command errors & stopped turns: {} {}. Repeated command failures usually mean the agent is guessing CLI flags or file paths.",
@@ -2067,20 +2171,8 @@ fn build_workflow_coaching(
 
     if signals.is_empty() && session_count > 0 {
         signals.push(format!(
-            "Clean execution ({work_count} shipped work, {review_count} review, {blocked_count} blocked): All sessions completed with 0 command errors."
+            "No command errors recorded ({work_count} work, {review_count} review, {blocked_count} blocked)."
         ));
-    }
-
-    if next_steps.is_empty() {
-        if let Some(top_proj) = project_gains.first() {
-            if let Some(last_acc) = top_proj.accomplishments.last() {
-                next_steps.push(NextStepDto {
-                    tag: "FOLLOW-UP".to_string(),
-                    title: format!("Continue {} momentum", top_proj.project),
-                    detail: format!("Latest shipped milestone: {last_acc}"),
-                });
-            }
-        }
     }
 
     signals.truncate(4);
@@ -2277,9 +2369,22 @@ fn render_daily_markdown(
         .cache_hit_rate
         .map(|r| format!("{}%", (r * 100.0).round() as i64))
         .unwrap_or_else(|| "—".to_string());
+    let cost = if day_metrics.cost_known {
+        format!(
+            "${:.2}{}",
+            day_metrics.total_cost_usd,
+            if day_metrics.unpriced_sessions > 0 {
+                format!(" known ({} unpriced)", day_metrics.unpriced_sessions)
+            } else {
+                String::new()
+            }
+        )
+    } else {
+        "unknown".to_string()
+    };
     out.push_str(&format!(
-        "Metrics: {session_count} sessions ({work_count} work, {review_count} review, {blocked_count} blocked) | Cost: ${:.2} | Cache hit: {cache_pct} | Tests: {} | Failed tools: {}\n",
-        day_metrics.total_cost_usd, day_metrics.test_runs, day_metrics.failed_tool_calls
+        "Metrics: {session_count} sessions ({work_count} work, {review_count} review, {blocked_count} blocked) | Cost: {cost} | Cache hit: {cache_pct} | Test commands: {} | Failed tools: {} | Unfinished tools: {}\n",
+        day_metrics.test_runs, day_metrics.failed_tool_calls, day_metrics.unfinished_tool_calls
     ));
 
     if !efficiency_signals.is_empty() {
@@ -2342,14 +2447,14 @@ fn render_daily_markdown(
     }
 
     if !project_gains.is_empty() {
-        out.push_str("\n## What Shipped & Why — By Project\n");
+        out.push_str("\n## Work & Review — By Project\n");
         for gain in project_gains {
             out.push_str(&format!(
                 "\n### {} ({} work, {} review, ${:.2})\n",
                 gain.project, gain.work_count, gain.review_count, gain.total_cost_usd
             ));
-            for acc in &gain.accomplishments {
-                out.push_str(&format!("- {acc}\n"));
+            for acc in &gain.activity {
+                out.push_str(&format!("- {}\n", acc.statement));
             }
             for dec in &gain.key_decisions {
                 out.push_str(&format!("- **Why / Decision:** {dec}\n"));
@@ -2410,12 +2515,101 @@ fn extract_files_touched(summary_md: &str) -> Vec<String> {
     files
 }
 
+/// Preserve the summary's verb: investigation is not completion, and tool/file
+/// activity is not verification.
+fn activity_statement(title: &str, preview: &str, files_touched: &[String]) -> String {
+    let takeaway = first_sentence(preview);
+    let lower = takeaway.to_lowercase();
+    let attempted = [
+        "attempted",
+        "failed to",
+        "could not",
+        "unable to",
+        "tried to",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    let investigated = [
+        "investigated",
+        "investigating",
+        "diagnosed",
+        "identified",
+        "reproduced",
+        "reproducing",
+        "reported",
+        "tested",
+        "re-tested",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    let context = if takeaway.is_empty() {
+        title.to_string()
+    } else {
+        takeaway
+    };
+    let prefix = if attempted {
+        "Attempted"
+    } else if investigated {
+        "Investigated"
+    } else if files_touched.is_empty() {
+        "Reported"
+    } else {
+        "Edited"
+    };
+    format!("{prefix}: {title} — {context}")
+}
+fn contains_marker(text: &str, marker: &str) -> bool {
+    text.match_indices(marker).any(|(index, _)| {
+        let before = text[..index].chars().next_back();
+        let after = text[index + marker.len()..].chars().next();
+        before.is_none_or(|c| !c.is_alphanumeric()) && after.is_none_or(|c| !c.is_alphanumeric())
+    })
+}
+
+fn has_completed_work(preview: &str, files_touched: &[String]) -> bool {
+    let first = first_sentence(preview).to_lowercase();
+    let lower = preview.to_lowercase();
+    let completed = [
+        "fixed",
+        "implemented",
+        "shipped",
+        "resolved",
+        "added",
+        "removed",
+        "updated",
+    ]
+    .iter()
+    .any(|marker| contains_marker(&first, marker));
+    let unverified = [
+        "not fixed",
+        "not implemented",
+        "not shipped",
+        "not resolved",
+        "not added",
+        "not removed",
+        "not updated",
+        "attempted",
+        "failed",
+        "could not",
+        "unable to",
+        "not verified",
+        "unverified",
+        "not confirmed",
+        "without verification",
+        "not been verified",
+        "no fix was verified",
+        "no tests",
+    ]
+    .iter()
+    .any(|marker| contains_marker(&lower, marker));
+    completed && !unverified && !files_touched.is_empty()
+}
 fn classify_session(
     title: &str,
     summary_preview_text: &str,
     files_touched: &[String],
 ) -> (&'static str, Option<String>) {
-    // Any session that modified code is shipped work, never a blocked survey or read-only review.
+    // File activity alone does not prove that work shipped or was verified.
     if !files_touched.is_empty() {
         return ("work", None);
     }
@@ -2734,6 +2928,15 @@ mod tests {
             crate::ledger::normalize_journal_date("2026-10-31", Some("2026-10-30T23:30:00+02:00")),
             "2026-10-30"
         );
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-14T01:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let today = crate::ledger::journal_date_at(now);
+        assert_eq!(today.to_string(), "2026-11-13");
+        assert_eq!(
+            crate::insights::llm::window_dates(today, 7),
+            ("2026-11-07".into(), "2026-11-13".into())
+        );
     }
 
     #[test]
@@ -2798,7 +3001,7 @@ mod tests {
 
     #[test]
     fn consolidated_rules_v2_and_host_incident_filtering() {
-        let v2_md = "## Summary\nAudited Home Assistant and investigation workflow.\n\n## Learnings & Pitfalls\n- [PITFALL] Script failed because python3.12-venv was missing on the host.\n- [LEARNING] Fallback handler preserves backward compatibility.\n\n## Potential Skills/Commands\n<!-- daybook:workflow-candidates:v2 -->\n  - Trigger: Orphan detail line before any candidate is ignored safely.\n- **[validate-investigation-evidence]**: Require verified tool outputs before accepting an incident hypothesis.\n  - Scope: global-skill\n  - Trigger: When investigating an incident where a tool call returned HTTP 5xx or failed.\n  - Action: Reject citations backed by failed commands or 5xx responses.\n  - Action: Collect fresh, successful evidence from an independent source.\n  - Verify: Confirm every accepted hypothesis cites a successful tool output.\n  - Evidence: Prometheus HTTP 503 responses were previously cited as proof.\n\n- **[python-venv-preflight]**: Check python3.12-venv before running setup.\n  - Trigger: Setup aborts because python3.12-venv is missing.\n  - Why: Supplied by a separate operating-system package.\n\n- **[home-assistant-dependency-audit]**: Audit indirect references before removing HACS components.\n  - Scope: repo-rule\n  - Trigger: When a HACS integration appears unused in the main configuration.\n  - Action: Search nested YAML includes, custom templates, and Node-RED flows.\n  - Verify: Run the Home Assistant configuration check and confirm zero missing references.\n  - Evidence: Indirect references lived inside Node-RED flows.\n";
+        let v2_md = "## Summary\nAudited Home Assistant and investigation workflow.\n\n## Learnings & Pitfalls\n- [PITFALL] Script failed because python3.12-venv was missing on the host.\n- [LEARNING] Fallback handler preserves backward compatibility.\n\n## Potential Skills/Commands\n<!-- daybook:workflow-candidates:v2 -->\n  - Trigger: Orphan detail line before any candidate is ignored safely.\n- **[validate-investigation-evidence]**: Require verified tool outputs before accepting an incident hypothesis.\n  - Scope: global-skill\n  - Trigger: When investigating an incident where a tool call returned HTTP 5xx or failed.\n  - Action: Reject citations backed by failed commands or 5xx responses.\n  - Action: Collect fresh, successful evidence from an independent source.\n  - Verify: Confirm every accepted hypothesis cites a successful tool output.\n  - Evidence: Confirmed by fresh successful tool outputs.\n\n- **[python-venv-preflight]**: Check python3.12-venv before running setup.\n  - Trigger: Setup aborts because python3.12-venv is missing.\n  - Why: Supplied by a separate operating-system package.\n\n- **[home-assistant-dependency-audit]**: Audit indirect references before removing HACS components.\n  - Scope: repo-rule\n  - Trigger: When a HACS integration appears unused in the main configuration.\n  - Action: Search nested YAML includes, custom templates, and Node-RED flows.\n  - Verify: Run the Home Assistant configuration check and confirm zero missing references.\n  - Evidence: Indirect references lived inside Node-RED flows.\n";
         let rules = extract_consolidated_rules("home-ops", v2_md);
         assert_eq!(rules.len(), 2);
         assert_eq!(rules[0].name, "validate-investigation-evidence");
@@ -2822,6 +3025,11 @@ mod tests {
             .draft_markdown
             .contains("  - Do: Search nested YAML"));
 
+        assert!(extract_consolidated_rules(
+            "t3code",
+            "## Summary\nInvestigated authentication and identified a possible bug.\n\n## Potential Skills/Commands\n<!-- daybook:workflow-candidates:v2 -->\n- **[auth-error-retry]**: Retry with a fresh key.\n  - Scope: global-skill\n  - Trigger: One key hit HTTP 403 errors.\n  - Action: Select a different key.\n  - Evidence: Error report, not a confirmed configuration requirement.\n"
+        )
+        .is_empty());
         // Verify explicit [PITFALL] and [LEARNING] tags override keyword heuristics
         let mut map = std::collections::BTreeMap::new();
         for l in extract_learnings(v2_md) {
@@ -2839,6 +3047,65 @@ mod tests {
             "Fallback handler preserves backward compatibility."
         );
     }
+    #[test]
+    fn completion_requires_explicit_completed_work_without_failed_verification() {
+        let files = vec!["src/lib.rs".to_string()];
+        assert!(has_completed_work(
+            "Fixed the parser. `cargo test` passed.",
+            &files
+        ));
+        assert!(!has_completed_work(
+            "Fixed the parser. The fix was not verified.",
+            &files
+        ));
+        assert!(!has_completed_work("Edited the parser.", &files));
+        assert!(!has_completed_work("Fixed the parser.", &[]));
+        assert!(!has_completed_work(
+            "Fixed the parser. Tests failed.",
+            &files
+        ));
+        assert!(!has_completed_work(
+            "Completed investigation of the bug.",
+            &files
+        ));
+        assert!(!has_completed_work(
+            "Investigated an unresolved parser bug.",
+            &files
+        ));
+        assert!(!has_completed_work(
+            "Not fixed; the parser still fails.",
+            &files
+        ));
+    }
+
+    #[test]
+    fn incident_evidence_rejects_negated_confirmation() {
+        assert!(is_one_off_host_incident(
+            "auth-startup",
+            "Startup failed",
+            None,
+            None,
+            &[],
+            Some("Unconfirmed: startup returned HTTP 403.")
+        ));
+        assert!(!is_one_off_host_incident(
+            "auth-startup",
+            "Startup failed",
+            None,
+            None,
+            &[],
+            Some("Confirmed by a successful retry.")
+        ));
+        assert!(!is_one_off_host_incident(
+            "test-failure-triage",
+            "Handle a failed test",
+            None,
+            None,
+            &[],
+            None
+        ));
+    }
+
     fn rec() -> SessionRecord {
         SessionRecord {
             session_id: "s1".into(),
@@ -2961,6 +3228,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_recall_http_contract() {
+        let (app, _state, token) = test_app("recall-contract").await;
+        let mut good = serde_json::to_value(rec()).unwrap();
+        good["project"] = serde_json::json!("daybook");
+        good["summary_md"] = serde_json::json!(format!("{} alpha beta", "x".repeat(7000)));
+        let (s, _) = status_of(&app, ingest_req(Some(token), &good)).await;
+        assert_eq!(s, StatusCode::OK);
+        let mut alpha_only = good.clone();
+        alpha_only["session_id"] = serde_json::json!("alpha-only");
+        alpha_only["content_hash"] = serde_json::json!("h2");
+        alpha_only["summary_md"] = serde_json::json!("alpha only");
+        let (s, _) = status_of(&app, ingest_req(Some(token), &alpha_only)).await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, _) = status_of(&app, get_req("/api/recall?project=daybook", None)).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        let (s, body) = status_of(
+            &app,
+            get_req(
+                "/api/recall?project=daybook&search=alpha%20beta&limit=1",
+                Some(token),
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["data"].as_array().unwrap().len(), 1);
+        assert_eq!(value["data"][0]["summary_md"].as_str().unwrap().len(), 7011);
+        let too_many = "a%20b%20c%20d%20e%20f%20g%20h%20i";
+        let (s, _) = status_of(
+            &app,
+            get_req(&format!("/api/recall?search={too_many}"), Some(token)),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn test_ingest_http_contract() {
         let (app, _state, token) = test_app("contract").await;
         let good = serde_json::to_value(rec()).unwrap();
@@ -3020,7 +3324,9 @@ mod tests {
     async fn test_stats_http_contract() {
         let (app, _state, token) = test_app("stats-contract").await;
         // seed one session so the report has data
-        let good = serde_json::to_value(rec()).unwrap();
+        let today = crate::ledger::journal_date_at(chrono::Utc::now()).to_string();
+        let mut good = serde_json::to_value(rec()).unwrap();
+        good["journal_date"] = serde_json::json!(today);
         let (s, _) = status_of(&app, ingest_req(Some(token), &good)).await;
         assert_eq!(s, StatusCode::OK);
 
@@ -3046,10 +3352,17 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["success"], serde_json::json!(true));
         assert_eq!(v["data"]["totals"]["sessions"], serde_json::json!(1));
-        assert_eq!(
-            v["data"]["days"][0]["date"],
-            serde_json::json!("2026-10-29")
-        );
+        assert_eq!(v["data"]["days"][0]["date"], serde_json::json!(today));
+        let local_req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/api/stats?days=7&today={today}"))
+            .header("authorization", format!("Bearer {token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (s, body) = status_of(&app, local_req).await;
+        assert_eq!(s, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["data"]["totals"]["sessions"], serde_json::json!(1));
         assert!(v["data"]["trend"].is_array());
         // clamps: 0 -> 1, 999 -> 90 (both still 200)
         let (s, _) = status_of(&app, stats_req(Some(token), "0")).await;
@@ -3350,6 +3663,106 @@ mod tests {
         assert!(body.contains("transaction"), "session detail missing body");
     }
 
+    #[tokio::test]
+    async fn investigation_is_not_shipped_or_a_policy() {
+        let (app, _, token) = test_app("investigation-evidence").await;
+        let record = serde_json::json!({
+            "session_id": "investigation-only",
+            "machine": "vm1",
+            "title": "t3code agent",
+            "journal_date": "2025-11-11",
+            "version": 1,
+            "project": "t3code",
+            "runtime": "claude",
+            "started_utc": "2025-11-11T10:00:00Z",
+            "ended_utc": "2025-11-11T10:05:00Z",
+            "content_hash": "a".repeat(64),
+            "summary_md": "## Summary\nInvestigated t3code agent startup authentication and identified a possible bug. No fix was verified.\n\n## Potential Skills/Commands\n<!-- daybook:workflow-candidates:v2 -->\n- **[auth-error-retry]**: Retry with a fresh key.\n  - Scope: global-skill\n  - Trigger: One key hit HTTP 403 errors.\n  - Action: Select a different key.\n  - Verify: Retry startup and confirm authentication succeeds.\n  - Evidence: Error report, not a confirmed configuration requirement.\n"
+        });
+        let (status, body) = status_of(&app, ingest_req(Some(token), &record)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (status, body) = status_of(&app, get_req("/api/dates/2025-11-11", Some(token))).await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let data = &body["data"];
+        assert_eq!(
+            data["project_gains"][0]["accomplishments"],
+            serde_json::json!([])
+        );
+        assert!(data["project_gains"][0]["activity"][0]["statement"]
+            .as_str()
+            .unwrap()
+            .starts_with("Investigated:"));
+        assert!(data["skills"].as_array().unwrap().is_empty());
+        assert!(!data["raw_content"].as_str().unwrap().contains("Shipped"));
+        let long_summary = format!(
+            "## Summary\nFixed the parser. {}\nThe fix was not verified.\n\n## Code Changes\n- `src/lib.rs`",
+            "x".repeat(240)
+        );
+        for (id, title, summary) in [
+            (
+                "review-only",
+                "Correctness review",
+                "## Summary\nThree reviewers completed a review pass.",
+            ),
+            (
+                "blocked-only",
+                "Blocked deploy",
+                "## Summary\nCould not proceed because credentials were unavailable.",
+            ),
+            ("long-unverified", "Parser fix", long_summary.as_str()),
+        ] {
+            let mut extra = record.clone();
+            extra["session_id"] = serde_json::json!(id);
+            extra["content_hash"] = serde_json::json!(if id == "review-only" {
+                "b".repeat(64)
+            } else if id == "blocked-only" {
+                "c".repeat(64)
+            } else {
+                "d".repeat(64)
+            });
+            extra["project"] = serde_json::json!(id);
+            extra["title"] = serde_json::json!(title);
+            extra["summary_md"] = serde_json::json!(summary);
+            if id == "blocked-only" {
+                extra["usage"] = serde_json::json!({"cost_usd": 2.0});
+            }
+            let (status, body) = status_of(&app, ingest_req(Some(token), &extra)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        let (status, body) = status_of(&app, get_req("/api/dates/2025-11-11", Some(token))).await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let data = &body["data"];
+        assert_eq!(data["project_gains"].as_array().unwrap().len(), 4);
+        assert!(data["raw_content"]
+            .as_str()
+            .unwrap()
+            .contains("Investigated:"));
+        assert!(data["project_gains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(
+                |gain| gain["accomplishments"].as_array().unwrap().is_empty()
+                    && !gain["activity"].as_array().unwrap().is_empty()
+            ));
+        let blocked = data["project_gains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|gain| gain["project"] == "blocked-only")
+            .unwrap();
+        assert_eq!(blocked["total_cost_usd"], 2.0);
+        assert_eq!(data["day_metrics"]["total_cost_usd"], 2.0);
+        assert!(!data["next_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["title"].as_str().unwrap_or("").contains("momentum")));
+    }
+
     #[test]
     fn workflow_coaching_computes_signals_and_next_steps() {
         let metrics = DayMetricsDto {
@@ -3360,8 +3773,11 @@ mod tests {
             cache_creation_tokens: 100_000,
             cache_hit_rate: Some(0.308),
             total_cost_usd: 10.0,
+            cost_known: true,
+            unpriced_sessions: 0,
             test_runs: 12,
             failed_tool_calls: 6,
+            unfinished_tool_calls: 0,
             interrupted: 1,
         };
         let gains = vec![ProjectGainDto {
@@ -3373,6 +3789,7 @@ mod tests {
             accomplishments: vec!["Shipped v0.1.17".to_string()],
             key_decisions: vec![],
             files_touched: vec![],
+            activity: vec![],
         }];
         let alerts = vec![WasteAlertDto {
             project: "agent-farm".to_string(),
@@ -3418,7 +3835,7 @@ mod tests {
         assert_eq!(next_steps[1].tag, "COST");
         assert_eq!(next_steps[2].tag, "WORKFLOW");
 
-        // Clean-execution & momentum fallback when no friction signals or follow-ups exist
+        // Tool metrics do not prove completion and do not invent follow-up work.
         let clean_metrics = DayMetricsDto::default();
         let clean_gains = vec![ProjectGainDto {
             project: "daybook".to_string(),
@@ -3429,6 +3846,7 @@ mod tests {
             accomplishments: vec!["Shipped v0.1.17".to_string()],
             key_decisions: vec![],
             files_touched: vec![],
+            activity: vec![],
         }];
         let mut no_costs = Vec::new();
         let (clean_signals, clean_steps) = build_workflow_coaching(
@@ -3444,10 +3862,10 @@ mod tests {
             false,
         );
         assert_eq!(clean_signals.len(), 1);
-        assert!(clean_signals[0].contains("Clean execution (5 shipped work, 0 review, 0 blocked)"));
-        assert_eq!(clean_steps.len(), 1);
-        assert_eq!(clean_steps[0].tag, "FOLLOW-UP");
-        assert!(clean_steps[0].title.contains("Continue daybook momentum"));
+        assert!(
+            clean_signals[0].contains("No command errors recorded (5 work, 0 review, 0 blocked)")
+        );
+        assert!(clean_steps.is_empty());
         assert_eq!(
             extract_learnings("## Learnings\n- Always verify heading prefixes.\n"),
             vec!["Always verify heading prefixes.".to_string()]
@@ -3504,7 +3922,7 @@ mod tests {
         assert!(md.contains("## Pitfalls & Learnings — By Project"));
         assert!(md.contains("### t3code"));
         assert!(md.contains("[PITFALL] The text fallback appeared"));
-        assert!(md.contains("## What Shipped & Why — By Project"));
+        assert!(md.contains("## Work & Review — By Project"));
         assert_eq!(
             render_daily_markdown(0, 0, 0, 0, &metrics, &[], &[], &[], &[], &[]),
             ""

@@ -6,6 +6,19 @@ use super::templates::Templates;
 use crate::config::Config;
 use crate::transcript::TranscriptData;
 
+/// Bump when summary inputs or instructions change in a way that requires refresh.
+pub const SUMMARIZER_VERSION: u32 = 2;
+
+pub(crate) fn frontmatter_value<'a>(content: &'a str, key: &str) -> Option<&'a str> {
+    let mut lines = content.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    let prefix = format!("{}: ", key);
+    lines
+        .take_while(|line| line.trim() != "---")
+        .find_map(|line| line.trim().strip_prefix(&prefix).map(str::trim))
+}
 /// Represents a summarized session ready for archiving
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionArchive {
@@ -15,6 +28,9 @@ pub struct SessionArchive {
     pub cwd: String,
     pub git_branch: Option<String>,
     pub transcript_path: Option<String>,
+    pub transcript_revision: String,
+    pub transcript_modified_ns: u128,
+    pub summarizer_version: u32,
     pub summary: String,
     pub decisions: String,
     pub code_changes: String,
@@ -35,6 +51,9 @@ impl SessionArchive {
             cwd,
             git_branch: None,
             transcript_path: None,
+            transcript_revision: String::new(),
+            transcript_modified_ns: 0,
+            summarizer_version: SUMMARIZER_VERSION,
             summary: String::new(),
             decisions: String::new(),
             code_changes: String::new(),
@@ -91,6 +110,9 @@ impl SessionArchive {
             &self.cwd,
             self.git_branch.as_deref(),
             self.transcript_path.as_deref(),
+            &self.transcript_revision,
+            self.transcript_modified_ns,
+            self.summarizer_version,
             &self.summary,
             &self.decisions,
             &self.code_changes,
@@ -164,5 +186,90 @@ mod tests {
         let md = archive.to_markdown();
         assert!(md.contains("title: \"test-session\""));
         assert!(md.contains("# test-session"));
+        assert!(md.contains("transcript_revision:"));
+        assert!(md.contains(&format!("summarizer_version: {}", SUMMARIZER_VERSION)));
+    }
+
+    #[test]
+    fn test_changed_summary_replaces_existing_session_archive() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.storage.path = temp.path().to_path_buf();
+        let first = SessionArchive::new(
+            "20_33-investigating".into(),
+            "2026-11-11".into(),
+            "same-session".into(),
+            "/tmp/project".into(),
+        )
+        .with_summary(
+            "Still investigating".into(),
+            String::new(),
+            String::new(),
+            String::new(),
+        );
+        let first_path = first.save(&config).unwrap();
+
+        let first_content = std::fs::read_to_string(&first_path).unwrap();
+        let first_version = frontmatter_value(&first_content, "version")
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap();
+        let mut final_archive = SessionArchive::new(
+            "20_33-fix-verified".into(),
+            "2026-11-11".into(),
+            "same-session".into(),
+            "/tmp/project".into(),
+        )
+        .with_summary(
+            "Fix deployed and verified".into(),
+            String::new(),
+            String::new(),
+            String::new(),
+        );
+        final_archive.transcript_modified_ns = 2;
+        let final_path = final_archive.save(&config).unwrap();
+
+        assert_eq!(final_path, first_path);
+        let saved = std::fs::read_to_string(final_path).unwrap();
+        assert!(saved.contains("Fix deployed and verified"));
+        let final_version = frontmatter_value(&saved, "version")
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap();
+        assert!(final_version > first_version);
+        assert!(!saved.contains("Still investigating"));
+        assert_eq!(
+            std::fs::read_dir(temp.path().join("2026-11-11"))
+                .unwrap()
+                .flatten()
+                .count(),
+            2,
+            "daily.md plus one session archive"
+        );
+    }
+
+    #[test]
+    fn test_session_id_in_daily_body_is_not_an_archive() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.storage.path = temp.path().to_path_buf();
+        let manager = ArchiveManager::new(config.clone());
+        manager.ensure_date_dir("2026-11-11").unwrap();
+        let daily_path = temp.path().join("2026-11-11/daily.md");
+        std::fs::write(
+            &daily_path,
+            "---\ndate: 2026-11-11\n---\nsession_id: same-session\n",
+        )
+        .unwrap();
+        let daily_before = std::fs::read_to_string(&daily_path).unwrap();
+
+        let archive = SessionArchive::new(
+            "20_33-fix-verified".into(),
+            "2026-11-11".into(),
+            "same-session".into(),
+            "/tmp/project".into(),
+        );
+        let archive_path = archive.save(&config).unwrap();
+
+        assert_ne!(archive_path, daily_path);
+        assert_eq!(std::fs::read_to_string(daily_path).unwrap(), daily_before);
     }
 }

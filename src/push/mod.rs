@@ -84,6 +84,52 @@ pub fn pending_dir(config: &Config) -> PathBuf {
     config.storage.path.join("pending")
 }
 
+fn redact_facets(facets: &str, config: &Config) -> String {
+    fn visit(value: &mut serde_json::Value, config: &Config, key: Option<&str>) {
+        match value {
+            serde_json::Value::String(text) => {
+                *text = crate::redaction::redact_named_value(key, text, config)
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    visit(item, config, key);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (key, item) in map {
+                    visit(item, config, Some(key));
+                }
+            }
+            serde_json::Value::Number(_)
+                if key.is_some_and(crate::redaction::sensitive_numeric_key) =>
+            {
+                *value = serde_json::Value::String(crate::redaction::REDACTED.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    let Ok(mut value) = serde_json::from_str(facets) else {
+        return crate::redaction::redact_for_config(facets, config);
+    };
+    visit(&mut value, config, None);
+    serde_json::to_string(&value)
+        .unwrap_or_else(|_| crate::redaction::redact_for_config(facets, config))
+}
+
+fn ingest_payload(config: &Config, record: &SessionRecord) -> Result<serde_json::Value> {
+    let mut record = record.clone();
+    record.title = record
+        .title
+        .map(|title| crate::redaction::redact_for_config(&title, config));
+    record.summary_md = crate::redaction::redact_for_config(&record.summary_md, config);
+    record.content_hash = crate::ledger::sha256_hex(record.summary_md.as_bytes());
+    record.facets_json = record
+        .facets_json
+        .map(|facets| redact_facets(&facets, config));
+    Ok(serde_json::to_value(record)?)
+}
+
 /// POST one record; Ok(true) = delivered, Ok(false) = push not configured.
 pub async fn push_record(config: &Config, record: &SessionRecord) -> Result<bool> {
     let Some(url) = config.push.url.clone() else {
@@ -106,11 +152,12 @@ pub async fn push_record(config: &Config, record: &SessionRecord) -> Result<bool
             );
         }
     }
+    let payload = ingest_payload(config, record)?;
     let client = client();
     let resp = client
         .post(format!("{}/api/ingest", url.trim_end_matches('/')))
         .bearer_auth(token)
-        .json(record)
+        .json(&payload)
         .send()
         .await
         .with_context(|| format!("POST {}/api/ingest", url))?;
@@ -209,6 +256,46 @@ pub async fn fetch_daily(config: &Config, date: &str) -> Result<serde_json::Valu
                 .unwrap_or("daily summary request failed")
         )
     }
+}
+/// Fetch project-scoped recall results from the ledger server.
+pub async fn fetch_recall(
+    config: &Config,
+    project: Option<&str>,
+    search: Option<&str>,
+    limit: usize,
+) -> Result<Vec<crate::ledger::RecallRow>> {
+    let url = config.push.url.clone().context(
+        "push.url is not configured — `daybook serve` on some machine, then set push.url",
+    )?;
+    let token = config
+        .push
+        .token
+        .clone()
+        .context("push.token is not configured — mint one with `daybook token`")?;
+    let mut request = client()
+        .get(format!("{}/api/recall", url.trim_end_matches('/')))
+        .bearer_auth(token)
+        .query(&[("limit", limit.clamp(1, 20).to_string())]);
+    if let Some(project) = project {
+        request = request.query(&[("project", project)]);
+    }
+    if let Some(search) = search {
+        request = request.query(&[("search", search)]);
+    }
+    let resp = request.send().await.context("GET /api/recall")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("recall returned {}: {}", status, truncate(&body, 200));
+    }
+    let env: serde_json::Value = resp.json().await.context("malformed recall response")?;
+    if !env["success"].as_bool().unwrap_or(false) {
+        anyhow::bail!(env["error"]
+            .as_str()
+            .unwrap_or("recall request failed")
+            .to_string());
+    }
+    serde_json::from_value(env["data"].clone()).context("malformed recall results")
 }
 
 /// Park a failed record for the next scan. Filename is stable per session
@@ -313,6 +400,26 @@ fn truncate(s: &str, n: usize) -> &str {
     }
 }
 
+/// Recall from the central server, falling back to a local ledger when present.
+pub async fn recall(
+    config: &Config,
+    project: Option<&str>,
+    search: Option<&str>,
+    limit: usize,
+) -> Result<Vec<crate::ledger::RecallRow>> {
+    if config.push.url.is_some() {
+        match fetch_recall(config, project, search, limit).await {
+            Ok(rows) if !rows.is_empty() => return Ok(rows),
+            Ok(_) => {}
+            Err(error) if !config.server.db_path.exists() => return Err(error),
+            Err(_) => {}
+        }
+    }
+    if config.server.db_path.exists() {
+        return crate::ledger::Ledger::open(&config.server.db_path)?.recall(project, search, limit);
+    }
+    Ok(Vec::new())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +466,17 @@ mod tests {
         std::fs::remove_dir_all(pending_dir(&config)).unwrap();
     }
 
+    #[tokio::test]
+    async fn recall_uses_local_ledger_without_push_configuration() {
+        let mut config = test_config();
+        config.server.db_path = config.storage.path.join("ledger.db3");
+        let ledger = crate::ledger::Ledger::open(&config.server.db_path).unwrap();
+        ledger.upsert_session(&rec()).unwrap();
+        let rows = recall(&config, Some("/p"), Some("md"), 5).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source(), "ledger://2026-10-29/m/abc/123");
+        std::fs::remove_dir_all(&config.storage.path).unwrap();
+    }
     #[test]
     fn test_park_record_keeps_newer_revision() {
         let config = test_config();
@@ -370,5 +488,76 @@ mod tests {
         let loaded: SessionRecord = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(loaded.version, 2);
         std::fs::remove_dir_all(pending_dir(&config)).unwrap();
+    }
+    #[test]
+    fn ingest_payload_redacts_content_and_preserves_identity() {
+        let mut config = test_config();
+        config.push.token = Some("configured-token-12345".into());
+        let mut record = rec();
+        record.machine = "dev@example.com".into();
+        record.content_hash = "AIza12345678901234567890123456789012345".into();
+        record.title = Some("used configured-token-12345".into());
+        record.summary_md = "DATABASE_PASSWORD=correct-horse-secret".into();
+        record.facets_json = Some(
+            r#"{"input_tokens":1234,"password":12345678,"command":"export API_KEY=sk-ant-abcdefghijklmnopqrstuvwx","nested":"export PASSWORD=\"hunter2\"","password_attempts":3,"userPassword":12345678,"accessToken":987654,"db-password":1234}"#.into(),
+        );
+
+        let payload = ingest_payload(&config, &record).unwrap();
+        let serialized = serde_json::to_string(&payload).unwrap();
+        assert!(!serialized.contains("configured-token-12345"));
+        assert!(!serialized.contains("correct-horse-secret"));
+        assert!(!serialized.contains("sk-ant-abcdefghijklmnopqrstuvwx"));
+        assert!(!serialized.contains("hunter2"));
+        let facets: serde_json::Value =
+            serde_json::from_str(payload["facets_json"].as_str().unwrap()).unwrap();
+        assert_eq!(facets["input_tokens"], 1234);
+        assert_eq!(facets["password"], crate::redaction::REDACTED);
+        assert_eq!(facets["password_attempts"], 3);
+        assert_eq!(facets["userPassword"], crate::redaction::REDACTED);
+        assert_eq!(facets["accessToken"], crate::redaction::REDACTED);
+        assert_eq!(facets["db-password"], crate::redaction::REDACTED);
+        let named: serde_json::Value = serde_json::from_str(
+            &redact_facets(
+                r#"{"password":"prefix-person@company.internal-secret-suffix","tokenizer":"bert-base"}"#,
+                &config,
+            ),
+        )
+        .unwrap();
+        assert_eq!(named["password"], crate::redaction::REDACTED);
+        assert_eq!(named["tokenizer"], "bert-base");
+        assert_eq!(payload["machine"], "dev@example.com");
+        assert_eq!(
+            payload["content_hash"],
+            crate::ledger::sha256_hex(payload["summary_md"].as_str().unwrap().as_bytes())
+        );
+        assert_eq!(payload["session_id"], "abc/123");
+        assert_eq!(payload["version"], 1);
+    }
+    #[test]
+    fn ingest_hash_matches_direct_and_replayed_summary() {
+        let config = test_config();
+        let mut record = rec();
+        record.summary_md = "PASSWORD=hunter2".into();
+        record.content_hash = crate::ledger::sha256_hex(record.summary_md.as_bytes());
+
+        let direct = ingest_payload(&config, &record).unwrap();
+        let replay = ingest_payload(&config, &record).unwrap();
+        for payload in [direct, replay] {
+            assert_eq!(
+                payload["content_hash"],
+                crate::ledger::sha256_hex(payload["summary_md"].as_str().unwrap().as_bytes())
+            );
+        }
+    }
+    #[test]
+    fn redacts_invalid_facets_as_text() {
+        let config = test_config();
+        let mut record = rec();
+        record.facets_json = Some("not-json DATABASE_PASSWORD=correct-horse-secret".into());
+        let payload = ingest_payload(&config, &record).unwrap();
+        assert_eq!(
+            payload["facets_json"],
+            "not-json DATABASE_PASSWORD=[REDACTED]"
+        );
     }
 }

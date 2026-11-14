@@ -43,28 +43,35 @@ impl SessionMeta {
     /// ponytail: T3 scratch dirs carry no project marker, so they stay
     /// unattributed (shown as "-") until T3 adds one.
     pub fn project(&self) -> Option<String> {
-        let cwd = self.cwd.as_deref()?;
-        // Only absolute paths attribute; a relative cwd says nothing safe.
-        if !cwd.starts_with('/') {
-            return None;
-        }
-        if let Some(rest) = cwd.split("/.t3/worktrees/").nth(1) {
-            return rest
-                .split('/')
-                .next()
-                .filter(|seg| !seg.is_empty() && !seg.contains(".."))
-                .map(String::from);
-        }
-        if cwd.contains("/.t3/scratch/") {
-            return None;
-        }
-        if let Some(name) = resolve_git_project(Path::new(cwd)) {
-            return Some(name);
-        }
-        Path::new(cwd)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
+        self.cwd
+            .as_deref()
+            .and_then(|cwd| project_for_cwd(Path::new(cwd)))
     }
+}
+
+/// Project attribution shared by transcript scanning and fresh-agent recall.
+pub fn project_for_cwd(cwd: &Path) -> Option<String> {
+    let cwd = cwd.to_str()?;
+    // Only absolute paths attribute; a relative cwd says nothing safe.
+    if !cwd.starts_with('/') {
+        return None;
+    }
+    if let Some(rest) = cwd.split("/.t3/worktrees/").nth(1) {
+        return rest
+            .split('/')
+            .next()
+            .filter(|seg| !seg.is_empty() && !seg.contains(".."))
+            .map(String::from);
+    }
+    if cwd.contains("/.t3/scratch/") {
+        return None;
+    }
+    if let Some(name) = resolve_git_project(Path::new(cwd)) {
+        return Some(name);
+    }
+    Path::new(cwd)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
 }
 
 /// Walk up from `start` to the nearest directory holding `.git`.
@@ -102,6 +109,10 @@ pub struct SessionUsage {
     pub output: u64,
     pub cache_read: u64,
     pub cache_creation: u64,
+    /// Recorded provider cost, used when a session spans priced models.
+    pub cost_usd: Option<f64>,
+    /// True when token usage spans models and no single pricing table applies.
+    pub multiple_models: bool,
 }
 
 /// Parsed session: transcript data plus metadata extracted during parse.
@@ -411,6 +422,35 @@ fn first_line_json(path: &Path) -> Option<Value> {
     serde_json::from_str(&line).ok()
 }
 
+/// Modification time captured before hashing orders competing summarization runs.
+pub fn transcript_modified_ns(path: &Path) -> Result<u128> {
+    Ok(std::fs::metadata(path)?
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos())
+}
+
+/// Hash the exact transcript bytes summarized, so a resumed session is refreshed.
+pub fn transcript_revision(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = File::open(path)
+        .with_context(|| format!("Failed to open transcript: {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("Failed to read transcript: {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// Parse a discovered session with the right runtime parser.
 pub fn parse_session(meta: &SessionMeta) -> Result<ParsedSession> {
     match meta.agent {
@@ -482,6 +522,9 @@ fn parse_pi(path: &Path) -> Result<ParsedSession> {
     let mut end = None;
     let mut model = None;
     let mut usage = SessionUsage::default();
+    let mut usage_model: Option<String> = None;
+    let mut usage_messages = 0_u64;
+    let mut costed_messages = 0_u64;
     // toolCallId -> response text, matched back to calls after the loop
     let mut call_ids: Vec<(usize, String)> = Vec::new();
     let mut tool_responses: std::collections::HashMap<String, Value> =
@@ -503,11 +546,13 @@ fn parse_pi(path: &Path) -> Result<ParsedSession> {
 
         match entry.get("type").and_then(|t| t.as_str()) {
             Some("model_change") => {
-                if model.is_none() {
-                    model = entry
-                        .get("modelId")
-                        .and_then(|m| m.as_str())
-                        .map(String::from);
+                if let Some(current_model) = entry.get("modelId").and_then(|m| m.as_str()) {
+                    if model.as_deref().is_some_and(|model| model != current_model) {
+                        usage.multiple_models = true;
+                    }
+                    if model.is_none() {
+                        model = Some(current_model.to_string());
+                    }
                 }
             }
             Some("session_info") => {
@@ -527,6 +572,19 @@ fn parse_pi(path: &Path) -> Result<ParsedSession> {
                         .map(String::from);
                 }
                 if let Some(u) = message.get("usage") {
+                    usage_messages += 1;
+                    if let Some(current_model) = message.get("model").and_then(|m| m.as_str()) {
+                        if model.as_deref().is_some_and(|model| model != current_model) {
+                            usage.multiple_models = true;
+                        }
+                        if usage_model
+                            .as_deref()
+                            .is_some_and(|model| model != current_model)
+                        {
+                            usage.multiple_models = true;
+                        }
+                        usage_model = Some(current_model.to_string());
+                    }
                     usage.input = usage
                         .input
                         .saturating_add(u.get("input").and_then(|v| v.as_u64()).unwrap_or(0));
@@ -535,13 +593,22 @@ fn parse_pi(path: &Path) -> Result<ParsedSession> {
                         .saturating_add(u.get("output").and_then(|v| v.as_u64()).unwrap_or(0));
                     // Pi names cache fields per-variant; take whichever exists.
                     usage.cache_read = usage.cache_read.saturating_add(
-                        ["cachedTokens", "cacheReadTokens", "cache_read_tokens"]
-                            .iter()
-                            .find_map(|k| u.get(*k).and_then(|v| v.as_u64()))
-                            .unwrap_or(0),
+                        [
+                            "cacheRead",
+                            "cachedTokens",
+                            "cacheReadTokens",
+                            "cache_read_tokens",
+                        ]
+                        .iter()
+                        .find_map(|k| u.get(*k).and_then(|v| v.as_u64()))
+                        .unwrap_or(0),
                     );
+                    if let Some(cost) = u.pointer("/cost/total").and_then(Value::as_f64) {
+                        costed_messages += 1;
+                        usage.cost_usd = Some(usage.cost_usd.unwrap_or(0.0) + cost);
+                    }
                     usage.cache_creation = usage.cache_creation.saturating_add(
-                        ["cacheCreationTokens", "cache_creation_tokens"]
+                        ["cacheWrite", "cacheCreationTokens", "cache_creation_tokens"]
                             .iter()
                             .find_map(|k| u.get(*k).and_then(|v| v.as_u64()))
                             .unwrap_or(0),
@@ -617,6 +684,9 @@ fn parse_pi(path: &Path) -> Result<ParsedSession> {
         }
     }
 
+    if costed_messages != usage_messages {
+        usage.cost_usd = None;
+    }
     let usage = (usage.input.saturating_add(usage.output) > 0).then_some(usage);
     let internal = ParsedSession::from_daybook_prompt(&data);
     Ok(ParsedSession {
@@ -630,6 +700,26 @@ fn parse_pi(path: &Path) -> Result<ParsedSession> {
     })
 }
 
+fn codex_tool_output(text: String) -> Value {
+    let parsed = serde_json::from_str::<Value>(&text).ok();
+    let exit_code = parsed
+        .as_ref()
+        .and_then(|v| v.pointer("/metadata/exit_code"))
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            text.lines().find_map(|line| {
+                line.trim()
+                    .strip_prefix("Process exited with code ")
+                    .and_then(|code| code.trim().parse::<i64>().ok())
+            })
+        });
+    if exit_code.is_some_and(|code| code != 0) {
+        serde_json::json!({"is_error": true, "text": text})
+    } else {
+        Value::String(text)
+    }
+}
+
 fn parse_codex(path: &Path) -> Result<ParsedSession> {
     // Lossy whole-file read (see parse_pi).
     let bytes = std::fs::read(path).context("Failed to read Codex transcript")?;
@@ -641,6 +731,7 @@ fn parse_codex(path: &Path) -> Result<ParsedSession> {
     let mut model = None;
     let mut record_usage = SessionUsage::default();
     let mut count_usage: Option<SessionUsage> = None;
+    let mut multiple_models = false;
     let mut call_ids: Vec<(usize, String)> = Vec::new();
     let mut tool_responses: std::collections::HashMap<String, Value> =
         std::collections::HashMap::new();
@@ -663,17 +754,18 @@ fn parse_codex(path: &Path) -> Result<ParsedSession> {
         match entry.get("type").and_then(|t| t.as_str()) {
             Some("token_usage_record") => {
                 if let Some(u) = entry.get("payload").and_then(|p| p.get("usage")) {
-                    record_usage.input = record_usage.input.saturating_add(
-                        u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                    );
+                    let cached = u
+                        .get("cached_input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let input = u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    record_usage.input = record_usage
+                        .input
+                        .saturating_add(input.saturating_sub(cached));
                     record_usage.output = record_usage.output.saturating_add(
                         u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                     );
-                    record_usage.cache_read = record_usage.cache_read.saturating_add(
-                        u.get("cached_input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                    );
+                    record_usage.cache_read = record_usage.cache_read.saturating_add(cached);
                 }
             }
             Some("token_count") => {
@@ -682,7 +774,13 @@ fn parse_codex(path: &Path) -> Result<ParsedSession> {
                         input: total
                             .get("input_tokens")
                             .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
+                            .unwrap_or(0)
+                            .saturating_sub(
+                                total
+                                    .get("cached_input_tokens")
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or(0),
+                            ),
                         output: total
                             .get("output_tokens")
                             .and_then(|v| v.as_u64())
@@ -707,7 +805,13 @@ fn parse_codex(path: &Path) -> Result<ParsedSession> {
                         input: total
                             .get("input_tokens")
                             .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
+                            .unwrap_or(0)
+                            .saturating_sub(
+                                total
+                                    .get("cached_input_tokens")
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or(0),
+                            ),
                         output: total
                             .get("output_tokens")
                             .and_then(|v| v.as_u64())
@@ -720,12 +824,19 @@ fn parse_codex(path: &Path) -> Result<ParsedSession> {
                     });
                 }
             }
-            Some("turn_context") if model.is_none() => {
-                model = entry
+            Some("turn_context") => {
+                if let Some(current) = entry
                     .get("payload")
                     .and_then(|p| p.get("model"))
                     .and_then(|m| m.as_str())
-                    .map(String::from);
+                {
+                    if model.as_deref().is_some_and(|model| model != current) {
+                        multiple_models = true;
+                    }
+                    if model.is_none() {
+                        model = Some(current.to_string());
+                    }
+                }
             }
             _ => {}
         }
@@ -802,20 +913,20 @@ fn parse_codex(path: &Path) -> Result<ParsedSession> {
                         .and_then(|n| n.as_str())
                         .unwrap_or("unknown")
                         .to_string(),
-                    input: Value::String(
-                        payload
-                            .get("arguments")
-                            .and_then(|a| a.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    ),
+                    input: payload
+                        .get("arguments")
+                        .and_then(|a| a.as_str())
+                        .map(|s| {
+                            serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.to_string()))
+                        })
+                        .unwrap_or(Value::Null),
                     response: None,
                 });
             }
             Some("function_call_output") => {
                 if let Some(id) = payload.get("call_id").and_then(|v| v.as_str()) {
                     if let Some(out) = payload.get("output").and_then(|o| o.as_str()) {
-                        tool_responses.insert(id.to_string(), Value::String(out.to_string()));
+                        tool_responses.insert(id.to_string(), codex_tool_output(out.to_string()));
                     }
                 }
             }
@@ -829,7 +940,7 @@ fn parse_codex(path: &Path) -> Result<ParsedSession> {
                             .or_else(|| o.as_str().map(str::to_string))
                     });
                     if let Some(text) = text {
-                        tool_responses.insert(id.to_string(), Value::String(text));
+                        tool_responses.insert(id.to_string(), codex_tool_output(text));
                     }
                 }
             }
@@ -847,7 +958,11 @@ fn parse_codex(path: &Path) -> Result<ParsedSession> {
         Some(record_usage)
     } else {
         count_usage
-    };
+    }
+    .map(|mut usage| {
+        usage.multiple_models = multiple_models;
+        usage
+    });
     let internal = ParsedSession::from_daybook_prompt(&data);
     Ok(ParsedSession {
         internal,
@@ -1034,7 +1149,7 @@ mod tests {
             Some(serde_json::json!({ "is_error": true, "text": "ok" }))
         );
         let text = crate::transcript::TranscriptParser::to_condensed_text(&parsed.data);
-        assert!(text.contains("- write -> ERROR: ok"), "{text}");
+        assert!(text.contains("- [1] write -> ERROR: ok"), "{text}");
     }
 
     #[test]
@@ -1136,11 +1251,54 @@ mod tests {
         let usage = parsed.usage.expect("usage");
         assert_eq!(usage.input, 2720);
         assert_eq!(usage.output, 257);
+        assert_eq!(usage.cache_read, 65_536);
+        assert_eq!(usage.cache_creation, 128);
+        assert_eq!(usage.cost_usd, Some(0.125));
+        assert!(!usage.multiple_models);
         assert_eq!(
             parsed.start_date().as_deref(),
             Some(expected_local_date("2026-10-28T10:00:00.000Z").as_str())
         );
         assert!(parsed.duration().is_some());
+    }
+
+    #[test]
+    fn test_pi_usage_sums_recorded_cost_across_models() {
+        let mut src = std::fs::read_to_string(fixture("pi-session.jsonl")).unwrap();
+        src = src.replace(
+            "\"model\":\"gpt-6.1-sol\",\"usage\"",
+            "\"model\":\"first\",\"usage\"",
+        );
+        src.push('\n');
+        src.push_str(r#"{"type":"message","timestamp":"2026-10-28T10:00:07.000Z","message":{"role":"assistant","content":[],"model":"second","usage":{"input":1,"output":2,"cacheRead":3,"cacheWrite":4,"cost":{"total":0.25}}}}"#);
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("pi-session.jsonl");
+        std::fs::write(&path, &src).unwrap();
+        let parsed = parse_session(&pi_meta(&path).unwrap()).unwrap();
+        let usage = parsed.usage.unwrap();
+        assert!(usage.multiple_models);
+        assert_eq!(usage.cost_usd, Some(0.375));
+        assert_eq!(usage.cache_read, 65_539);
+        assert_eq!(usage.cache_creation, 132);
+        let partial = src.replace(",\"cost\":{\"total\":0.25}", "");
+        std::fs::write(&path, partial).unwrap();
+        let parsed = parse_session(&pi_meta(&path).unwrap()).unwrap();
+        assert_eq!(parsed.usage.unwrap().cost_usd, None);
+    }
+
+    #[test]
+    fn pi_model_changes_mark_usage_mixed_without_message_models() {
+        let mut src = std::fs::read_to_string(fixture("pi-session.jsonl")).unwrap();
+        src = src.replace("\"model\":\"gpt-6.1-sol\",\"usage\"", "\"usage\"");
+        src.push('\n');
+        src.push_str(
+            r#"{"type":"model_change","timestamp":"2026-10-28T10:00:07.000Z","modelId":"second"}"#,
+        );
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("pi-session.jsonl");
+        std::fs::write(&path, src).unwrap();
+        let parsed = parse_session(&pi_meta(&path).unwrap()).unwrap();
+        assert!(parsed.usage.unwrap().multiple_models);
     }
 
     #[test]
@@ -1150,7 +1308,8 @@ mod tests {
         assert_eq!(parsed.model.as_deref(), Some("gpt-6.1-sol"));
         // token_usage_record (1000/50) wins over token_count total (20000/90)
         let usage = parsed.usage.expect("usage");
-        assert_eq!(usage.input, 1000);
+        assert_eq!(usage.input, 500);
+        assert_eq!(usage.cache_read, 500);
         assert_eq!(usage.output, 50);
     }
 
@@ -1180,8 +1339,17 @@ mod tests {
         let meta = codex_meta(&fixture("codex-session-no-record.jsonl")).expect("codex meta");
         let parsed = parse_session(&meta).expect("codex parse");
         let usage = parsed.usage.expect("usage");
-        assert_eq!(usage.input, 20000);
+        assert_eq!(usage.input, 2000);
+        assert_eq!(usage.cache_read, 18_000);
         assert_eq!(usage.output, 90);
+        let mut src = std::fs::read_to_string(fixture("codex-session-no-record.jsonl")).unwrap();
+        src.push('\n');
+        src.push_str(r#"{"type":"turn_context","payload":{"model":"another-model"}}"#);
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("2026-10-28T13-26-10-rollout-multi.jsonl");
+        std::fs::write(&path, src).unwrap();
+        let parsed = parse_session(&codex_meta(&path).unwrap()).unwrap();
+        assert!(parsed.usage.unwrap().multiple_models);
     }
 
     #[test]
@@ -1210,6 +1378,14 @@ mod tests {
     fn test_scratch_session_stays_unattributed() {
         let meta = pi_meta(&fixture("pi-scratch-session.jsonl")).expect("pi meta");
         assert_eq!(meta.project(), None);
+    }
+
+    #[test]
+    fn project_for_cwd_preserves_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("My Project");
+        std::fs::create_dir(&project).unwrap();
+        assert_eq!(project_for_cwd(&project).as_deref(), Some("My Project"));
     }
 
     #[test]
@@ -1250,5 +1426,37 @@ mod tests {
         };
         assert_eq!(meta.project().as_deref(), Some("myproject"));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn codex_tool_arguments_and_exit_status_are_structured() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codex.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"c1","cwd":"/tmp"}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"function_call","call_id":"call-1","name":"exec_command","arguments":"{\"command\":\"cargo test\"}"}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"{\"output\":\"failed\",\"metadata\":{\"exit_code\":1}}"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let parsed = parse_codex(&path).unwrap();
+        assert_eq!(parsed.data.tool_calls[0].input["command"], "cargo test");
+        assert_eq!(
+            parsed.data.tool_calls[0].response,
+            Some(
+                serde_json::json!({"is_error": true, "text": "{\"output\":\"failed\",\"metadata\":{\"exit_code\":1}}"})
+            )
+        );
+        assert_eq!(
+            codex_tool_output("Chunk ID: abc\nWall time: 1s\nProcess exited with code 2".into())
+                .get("is_error")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
     }
 }
