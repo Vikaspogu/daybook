@@ -207,7 +207,8 @@ fn configure_board_mcp_and_hooks(cwd: &Path, home: &Path) -> Result<()> {
     for (event, hook_name, matcher) in [
         ("SessionStart", "session-start", None),
         ("PreToolUse", "pre-tool-use", Some(CLAUDE_EDIT_MATCHER)),
-        ("PostToolUse", "post-tool-use", Some(CLAUDE_EDIT_MATCHER)),
+        ("PostToolUse", "post-tool-use", None),
+        ("PostToolUseFailure", "post-tool-use", None),
         ("SessionEnd", "session-end", None),
     ] {
         let command = format!("daybook hook {hook_name}");
@@ -547,11 +548,19 @@ mod tests {
             settings["hooks"]["SessionStart"].as_array().unwrap().len(),
             1
         );
-        for event in ["PreToolUse", "PostToolUse", "SessionEnd"] {
+        for event in [
+            "PreToolUse",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "SessionEnd",
+        ] {
             assert_eq!(settings["hooks"][event].as_array().unwrap().len(), 1);
         }
         let mcp: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
+        for event in ["PostToolUse", "PostToolUseFailure"] {
+            assert!(settings["hooks"][event][0].get("matcher").is_none());
+        }
         assert_eq!(mcp["mcpServers"]["daybook-board"]["command"], "daybook");
     }
 }

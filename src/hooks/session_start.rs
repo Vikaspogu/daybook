@@ -149,54 +149,15 @@ async fn sync_board_session_start(
     cwd: &std::path::Path,
     session_id: &str,
 ) {
-    if !crate::board::identity::is_valid_board_workspace(cwd) {
-        return;
-    }
-    let Ok(client) = crate::board::client::BoardClient::from_config(config, false) else {
-        return;
-    };
-    let identity = crate::board::identity::resolve_board_identity_for_hook(cwd, session_id);
-    let _ = client
-        .heartbeat(&crate::ledger::BoardHeartbeatReq {
-            project: identity.project.clone(),
-            agent: identity.agent.clone(),
-            runtime: identity.runtime.clone(),
-            branch: identity.branch.clone(),
-            cwd: identity.worktree_root.to_string_lossy().to_string(),
-            status: Some("active".to_string()),
-            current_task: identity.session_title.clone(),
-        })
-        .await;
-
-    if let Ok(snap) = client
-        .status(Some(&identity.project), Some(&identity.agent), None)
-        .await
-    {
-        let other_locks: Vec<_> = snap
-            .locks
-            .iter()
-            .filter(|l| l.agent != identity.agent)
-            .collect();
-        if !other_locks.is_empty() || !snap.unread_mentions.is_empty() {
-            eprintln!(
-                "[daybook board] Project '{}' coordination status (you: @{}):",
-                identity.project, identity.agent
-            );
-            for l in other_locks.iter().take(5) {
-                eprintln!(
-                    "[daybook board]   LOCK [{}] @{} -> {} ({})",
-                    l.id,
-                    l.agent,
-                    l.paths.join(", "),
-                    l.note
-                );
-            }
-            for m in snap.unread_mentions.iter().take(5) {
-                eprintln!(
-                    "[daybook board]   MENTION #{} [{}] @{}: {}",
-                    m.id, m.channel, m.agent, m.body
-                );
-            }
+    if let Some(notice) = crate::hooks::board_notice::prepare(config, cwd, session_id, true) {
+        // SessionStart also prints recall as plain stdout context.
+        use std::io::Write;
+        let mut stdout = std::io::stdout().lock();
+        if writeln!(stdout, "{}", notice.text)
+            .and_then(|_| stdout.flush())
+            .is_ok()
+        {
+            crate::hooks::board_notice::accepted(config, notice);
         }
     }
 }

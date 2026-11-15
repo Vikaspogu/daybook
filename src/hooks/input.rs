@@ -10,6 +10,10 @@ pub struct HookInput {
     #[serde(default)]
     pub session_id: String,
     #[serde(default)]
+    pub board_delivered: Option<Vec<i64>>,
+    #[serde(default)]
+    pub board_legacy_cursor: Option<i64>,
+    #[serde(default)]
     pub transcript_path: PathBuf,
     #[serde(default)]
     pub cwd: PathBuf,

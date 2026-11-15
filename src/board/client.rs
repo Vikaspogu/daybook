@@ -397,9 +397,181 @@ impl BoardClient {
     }
 }
 
+impl BoardClient {
+    pub async fn register_session(
+        &self,
+        req: &crate::ledger::BoardSessionRegistration,
+    ) -> Result<crate::ledger::BoardSession> {
+        match self {
+            Self::Local { ledger, .. } => ledger.board_register_session(req),
+            Self::Remote { .. } => self.post_json("/api/board/sessions", req).await,
+        }
+    }
+
+    async fn session_request<T: DeserializeOwned>(
+        &self,
+        session: &crate::ledger::BoardSession,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<T> {
+        let Self::Remote {
+            base_url,
+            token,
+            http,
+        } = self
+        else {
+            bail!("session_request requires a remote board client")
+        };
+        let url = format!("{base_url}{path}");
+        let req = if let Some(body) = body {
+            http.post(url).json(&body)
+        } else {
+            http.get(url)
+        };
+        let response = req
+            .bearer_auth(token)
+            .header("x-daybook-session", &session.credential)
+            .send()
+            .await?;
+        #[derive(serde::Deserialize)]
+        struct SessionResponse<T> {
+            #[serde(flatten)]
+            response: ApiResponse<T>,
+            code: Option<String>,
+        }
+        let response: SessionResponse<T> = response.json().await?;
+        if !response.response.success
+            && response.code.as_deref() == Some(crate::ledger::InvalidSessionCredential::CODE)
+        {
+            return Err(crate::ledger::InvalidSessionCredential.into());
+        }
+        let response = response.response;
+        if !response.success {
+            bail!("{}", response.error.unwrap_or_default());
+        }
+        response.data.context("missing session response")
+    }
+
+    pub async fn session_status(
+        &self,
+        session: &crate::ledger::BoardSession,
+        status: &str,
+    ) -> Result<()> {
+        match self {
+            Self::Local { ledger, .. } => ledger.board_session_status(&session.credential, status),
+            Self::Remote { .. } => {
+                let _: bool = self
+                    .session_request(
+                        session,
+                        "/api/board/session/status",
+                        Some(serde_json::json!({"status":status})),
+                    )
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn inbox(
+        &self,
+        session: &crate::ledger::BoardSession,
+        notices: bool,
+    ) -> Result<Vec<crate::ledger::BoardDelivery>> {
+        match self {
+            Self::Local { ledger, .. } => ledger.board_inbox(&session.credential, notices),
+            Self::Remote { .. } => {
+                self.session_request(
+                    session,
+                    &format!("/api/board/inbox?notices={notices}"),
+                    None,
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn receipt(
+        &self,
+        session: &crate::ledger::BoardSession,
+        id: i64,
+        ack: bool,
+    ) -> Result<()> {
+        match self {
+            Self::Local { ledger, .. } => ledger.board_receipt(&session.credential, id, ack),
+            Self::Remote { .. } => {
+                let path = if ack {
+                    "/api/board/ack"
+                } else {
+                    "/api/board/delivered"
+                };
+                let _: bool = self
+                    .session_request(session, path, Some(serde_json::json!({"message_id":id})))
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn message(&self, project: &str, id: i64) -> Result<crate::ledger::BoardFullMessage> {
+        match self {
+            Self::Local { ledger, .. } => ledger.board_message(project, id),
+            Self::Remote { .. } => {
+                self.get_json(
+                    &format!("/api/board/messages/{id}"),
+                    &[("project", project.into())],
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn session_post(
+        &self,
+        session: &crate::ledger::BoardSession,
+        req: &BoardPostMessageReq,
+    ) -> Result<crate::ledger::BoardMessageRow> {
+        match self {
+            Self::Local { ledger, .. } => ledger.board_session_post(&session.credential, req),
+            Self::Remote { .. } => {
+                self.session_request(
+                    session,
+                    "/api/board/messages",
+                    Some(serde_json::to_value(req)?),
+                )
+                .await
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_session_request_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let client = BoardClient::Local {
+            ledger: Ledger::open(&tmp.path().join("board.db")).unwrap(),
+            caller: BoardCaller {
+                machine: "local".into(),
+                admin: false,
+            },
+        };
+        let session = crate::ledger::BoardSession {
+            id: "session".into(),
+            project: "repo".into(),
+            handle: "agent".into(),
+            credential: "secret".into(),
+        };
+        let result = client
+            .session_request::<serde_json::Value>(&session, "/api/board/inbox", None)
+            .await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "session_request requires a remote board client"
+        );
+    }
     #[tokio::test]
     async fn sync_active_sessions_preserves_status_and_skips_complete_rows() {
         let tmp = tempfile::tempdir().unwrap();

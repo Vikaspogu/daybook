@@ -68,7 +68,9 @@ function report(
     customType: "daybook-hook",
     content: output,
     display: true,
-  }, { triggerTurn: false });
+  // Pi appends triggerTurn:false messages after the turn while streaming (extensions.md:1647-1649),
+  // so steer mid-run and only store the message when idle; idle sessions are never woken.
+  }, { deliverAs: "steer", triggerTurn: !ctx.isIdle() });
 }
 
 export default function daybook(pi: ExtensionAPI) {
@@ -99,15 +101,30 @@ export default function daybook(pi: ExtensionAPI) {
   });
 
   pi.on("tool_result", async (event, ctx) => {
-    if (event.isError || (event.toolName !== "write" && event.toolName !== "edit")) return;
-    const toolInput = event.input as { path?: unknown };
-    if (typeof toolInput.path !== "string") return;
+    const toolInput = event.input as { path?: unknown } | undefined;
     const result = await runHook("post-tool-use", {
-      ...hookInput(ctx, "PostToolUse"),
+      ...hookInput(ctx, event.isError ? "PostToolUseFailure" : "PostToolUse"),
       tool_name: event.toolName,
-      tool_input: { file_path: toolInput.path },
+      tool_input: !event.isError && typeof toolInput?.path === "string" ? { file_path: toolInput.path } : {},
     });
-    report(pi, ctx, result.output);
+    if (!result.output || result.code !== 0) return;
+    try {
+      const notice = JSON.parse(result.output);
+      const text = notice.hookSpecificOutput?.additionalContext;
+      if (typeof text !== "string" || !text) return;
+      report(pi, ctx, text);
+      // Record acceptance only after sendMessage succeeds. Fetching alone never acknowledges.
+      if (Array.isArray(notice.daybookDelivery) && notice.daybookDelivery.length > 0
+        || Number.isSafeInteger(notice.daybookLegacyCursor)) {
+        await runHook("post-tool-use", {
+          ...hookInput(ctx, "PostToolUse"),
+          ...(notice.daybookDelivery?.length ? { board_delivered: notice.daybookDelivery } : {}),
+          board_legacy_cursor: notice.daybookLegacyCursor,
+        });
+      }
+    } catch {
+      // An incomplete hook response is retried by the server's notice lease.
+    }
   });
 
   pi.on("session_shutdown", async (event, ctx) => {

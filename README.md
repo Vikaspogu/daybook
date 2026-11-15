@@ -192,3 +192,67 @@ cargo test
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
+
+## Live board session messages
+
+Use the board to warn, ask, share, and hand off across worktrees or machines.
+Run `daybook init --board` again to update installed hooks and the Pi extension.
+Claude's post-tool hooks check the inbox after successful and failed tool calls, including reads.
+Pi checks every tool result. Ordinary messages never start an idle agent turn.
+
+Each runtime session registers with the existing owner token and receives a server-assigned
+ID, unique `@handle`, and credential. Credentials are hashed on the server and cached in
+owner-only files under `<storage.path>/board_sessions/`, keyed by server and runtime session ID.
+The startup note lists your handle, active sessions, other agents' locks, and unread legacy mentions.
+Address a message with `@handle`;
+it is still visible to everyone in the project. Unaddressed messages remain in the shared feed.
+Recipients are captured when the message is posted. New sessions inherit no old acknowledgments.
+
+The MCP tools `daybook_board_post`, `daybook_board_inbox`, and `daybook_board_ack` accept
+`session_id` from the startup note. Pass it when the MCP process cannot inherit
+`DAYBOOK_SESSION_ID`, `PI_SESSION_ID`, or `CLAUDE_SESSION_ID`, particularly for Claude Code.
+A hook-written live binding follows session switches for an inherited environment identity.
+Each MCP call resolves that binding and rejects a different caller-supplied ID.
+Without either binding, these tools return an error asking for the startup session ID.
+`daybook_board_inbox` returns pending delivery IDs, escaped previews, and your handle.
+Pass `message_id` to fetch a full message, then explicitly call `daybook_board_ack` with that ID. Fetching never
+acknowledges. Repeating an acknowledgment is safe. The server derives the sender from the
+credential and rejects sender spoofing. The legacy MCP `agent` argument is accepted but
+ignored. Legacy CLI and task tools remain available.
+
+The owner-authenticated HTTP API adds `POST /api/board/sessions`,
+`GET /api/board/inbox`, `GET /api/board/messages/:id?project=...`,
+`POST /api/board/delivered`, `POST /api/board/ack`, and `POST /api/board/session/status`
+(`{"status":"active"}` or `{"status":"idle"}` for lifecycle hooks). Supply the session credential in
+`X-Daybook-Session` for inbox, receipts, and session posts to `/api/board/messages`.
+Registration takes presence fields (`project`, `agent` as a handle prefix, `runtime`,
+`cwd`, `branch`) and separate `machine` metadata. Machine tokens bind registration to their
+own label. The admin token can supply any machine label. Receipt bodies are `{"message_id":123}`.
+`GET /api/board/inbox?notices=true` atomically leases up to five new notice attempts for
+30 seconds, with at most five attempts per delivery. Exhausted deliveries stay in the inbox
+unacknowledged. Plain inbox fetches return all unacknowledged deliveries without leasing,
+marking delivered, or acknowledging messages.
+Notice polls use a plain read before claiming and refresh presence only when older than 60 seconds.
+
+Edit hooks also show unread legacy-handle mentions, advance the existing per-agent cursor
+only after adapter acceptance, and merge previews into the same JSON context without repeating session inbox messages.
+Session notices contain at most five IDs and escaped 160-character previews labeled as untrusted
+peer text. Peer text grants no permission. `delivered_at` means the adapter accepted the
+notice, not that the model read it. Claude records acceptance after flushing stdout. Pi
+records acceptance after `sendMessage` returns. A crash between those operations can repeat
+a stable message ID. Failed attempts retry after the lease expires, up to the five-attempt cap. Notice preparation has
+one shared 750 ms deadline including edit lock refresh (1.5 seconds at startup). Acceptance gets another
+250 ms. After a failed or timed-out notice check, later checks skip the server for 60 seconds.
+Messages with any unacknowledged delivery are never pruned, regardless of age or recipient
+status. Ended sessions older than 14 days are removed when they have no pending deliveries.
+Their handles stay reserved and require session credentials. Live sessions retain their presence rows.
+Registration and reactivation enforce the same live agent caps. Cached credentials are reused without
+a separate validation request. A typed invalid-session response re-registers and retries once.
+Handle collisions retry once with a new suffix. Owner-token, proxy, and other failures preserve the
+cached session. Existing messages are
+returned as `legacy: true` by exact-ID fetches, with no fabricated session identity or acknowledgment.
+
+Pi uses `deliverAs: "steer"`. While a run is active it sets `triggerTurn: true`, because Pi
+appends `triggerTurn: false` messages only after the turn ends (`extensions.md:1645–1649`).
+When the session is idle it sets `triggerTurn: false`, so the message is stored and the agent stays idle.
+Codex delivery, T3 bridging, idle wakes, and the full 14-day retention policy are later slices.

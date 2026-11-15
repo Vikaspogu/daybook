@@ -129,6 +129,7 @@ pub async fn handle() -> Result<()> {
 }
 
 async fn release_board_session(config: &crate::config::Config, input: &super::input::HookInput) {
+    crate::hooks::board_notice::session_end(config, &input.cwd, &input.session_id);
     if let Ok(client) = crate::board::client::BoardClient::from_config(config, false) {
         let cwd = if input.cwd.as_os_str().is_empty() {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
