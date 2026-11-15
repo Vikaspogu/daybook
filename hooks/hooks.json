@@ -24,7 +24,6 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit|replace|replace_match|insert",
         "hooks": [
           {
             "type": "command",
@@ -39,6 +38,16 @@
           {
             "type": "command",
             "command": "daybook hook session-end"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "daybook hook post-tool-use"
           }
         ]
       }

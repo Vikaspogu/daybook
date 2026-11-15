@@ -37,6 +37,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/tokens/revoke", post(handlers::revoke_token_api))
         .route("/ingest", post(handlers::ingest))
         // Multi-Agent Coordination Board routes (`/api/board/*`)
+        .route("/board/sessions", post(board_handlers::register_session))
+        .route(
+            "/board/session/status",
+            post(board_handlers::session_status),
+        )
+        .route("/board/inbox", get(board_handlers::inbox))
+        .route("/board/ack", post(board_handlers::ack))
+        .route("/board/delivered", post(board_handlers::delivered))
+        .route("/board/messages/:id", get(board_handlers::message_by_id))
         .route("/board/status", get(board_handlers::get_board_status))
         .route(
             "/board/messages",

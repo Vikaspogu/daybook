@@ -12,7 +12,9 @@ use std::path::Path;
 use std::sync::Mutex;
 
 pub mod board;
+pub mod board_sessions;
 pub use board::*;
+pub use board_sessions::*;
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct UsageRecord {
     #[serde(default)]
@@ -374,6 +376,36 @@ CREATE INDEX IF NOT EXISTS idx_board_messages_project_id
     ON board_messages(project, id DESC);
 CREATE INDEX IF NOT EXISTS idx_board_messages_project_channel_id
     ON board_messages(project, channel, id DESC);
+CREATE TABLE IF NOT EXISTS board_sessions (
+    id TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    handle TEXT NOT NULL,
+    credential_hash TEXT NOT NULL UNIQUE,
+    machine TEXT NOT NULL,
+    ended_epoch INTEGER,
+    UNIQUE(project, handle)
+);
+CREATE TABLE IF NOT EXISTS board_session_handles (
+    project TEXT NOT NULL,
+    handle TEXT NOT NULL,
+    PRIMARY KEY (project, handle)
+);
+INSERT OR IGNORE INTO board_session_handles SELECT project, handle FROM board_sessions;
+CREATE TABLE IF NOT EXISTS board_message_auth (
+    message_id INTEGER PRIMARY KEY REFERENCES board_messages(id) ON DELETE CASCADE,
+    sender_session_id TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS board_deliveries (
+    message_id INTEGER NOT NULL REFERENCES board_messages(id) ON DELETE CASCADE,
+    recipient_session_id TEXT NOT NULL REFERENCES board_sessions(id) ON DELETE CASCADE,
+    delivered_at TEXT,
+    acked_at TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    attempted_epoch INTEGER,
+    UNIQUE(message_id, recipient_session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_board_deliveries_inbox
+    ON board_deliveries(recipient_session_id, acked_at, message_id);
 ";
 
 /// US Eastern (America/New_York) offset in seconds at `utc`:
@@ -605,7 +637,7 @@ impl Ledger {
         let _: String = conn
             .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
             .with_context(|| "set WAL")?;
-        conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+        conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(SCHEMA)?;
         reconcile_journal_dates(&conn)?;
         // Token hashes and all summaries live here: owner-only on unix.

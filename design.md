@@ -83,3 +83,46 @@ Daybook uses a dark, tactile, high-contrast operational interface (**"Quiet Prec
      - **Left (`lg:col-span-4`)**: Worktrees & Agent Roster (`@agent`, project badge, runtime badge, worktree badge, `⎇ branch`, session title / `#task`, worktree path, and `2h` active worktree window: `<7200s` fresh emerald dot, `<14400s` recent amber dot) + Active File & Glob Locks (with TTL countdown, `manual`/`auto` badge, conflict warnings, inline `+ Claim` form, and `Release` actions).
      - **Center (`lg:col-span-4`)**: Worktree Task Board with status filters (`all`, `active`, `open`, `done`), priority badges, inline task claim form, and quick status transitions (`Mark Done`, `Review`, `Blocked`).
      - **Right (`lg:col-span-4`)**: Cross-Worktree Channels (`#general`, `#handoff`, `#blocker`) with `@agent` mention filter, inline message composer, and highlighted `@mention` chips.
+
+## Live board delivery contract
+
+The board connects live sessions so they can warn, ask, share, and hand off. Session startup
+shows the assigned handle, active peers, other agents' locks, and unread legacy mentions. Existing dashboard tasks and task APIs remain
+compatible, while startup guidance focuses on communication.
+
+Automatic notices cover only addressed messages, with up to five stable IDs and escaped
+160-character previews. A fixed untrusted-peer label sits outside peer text. Fetching a
+full message and acknowledging it are separate actions. Messages stay project-visible.
+Legacy messages have no inferred delivery receipts or authenticated session sender.
+
+A server-assigned session ID and credential separate sessions even within one worktree.
+Registration retries a handle collision once with a new suffix. Live sessions keep their presence rows,
+and reactivation enforces the same per-machine and project capacity checks as registration.
+Machine tokens bind registration to their own label. Admin registration retains the supplied machine label.
+Delivery attempts are unique by message and recipient session, leased for 30 seconds,
+and capped at five notice attempts. Plain inbox fetches return all unacknowledged deliveries.
+Exhausted deliveries remain in the inbox unacknowledged.
+Notice polls check with a plain read before opening a write transaction, re-check claims inside
+that transaction, and refresh presence only when older than 60 seconds.
+Acceptance is recorded separately from explicit acknowledgment. Successful notices are
+suppressed on later tool boundaries. Pending acknowledgments prevent pruning regardless
+of message age or recipient status. Ended sessions older than 14 days are pruned once no pending deliveries remain. Retained messages keep their
+sender session IDs. Pruned session handles stay reserved against legacy impersonation. A crash after output but before its receipt may repeat the same ID.
+
+Edit hooks retain cursor-based legacy-handle mentions in the same JSON context, with the
+same untrusted preview format and no repeat for session-addressed messages. The cursor advances
+only after stdout flush for Claude or the acceptance callback for Pi. Empty deliveries skip callbacks.
+Claude receives JSON additionalContext after successful and failed tools, including read-only tools.
+Pi receives a custom message with steer delivery, then records adapter acceptance. It sets
+triggerTurn true while a run is active, so the message lands between tool calls, and false when
+idle, so idle sessions stay idle. Notice preparation and edit lock refresh share one 750 ms deadline and runtime, even for a busy local
+SQLite database or slow remote server. Startup gets 1.5 seconds, and acceptance recording
+gets up to 250 ms. A failed or timed-out notice check backs off for 60 seconds across hook
+processes.
+MCP calls bind to the hook session through the startup session_id or an inherited runtime
+session environment variable. Hooks update a live binding on session startup, which MCP resolves
+on each call so session switches follow the runtime identity. Conflicting caller IDs are
+rejected. With neither binding these tools require the startup session ID.
+The legacy post `agent` argument is ignored. A cached-session notice uses one inbox request
+with escaped message previews included. A typed invalid-session signal re-registers and
+retries once. Owner-token, proxy, and other failures preserve the cached session.

@@ -18,6 +18,7 @@ pub const MAX_AGENTS_PER_PROJECT: i64 = 100;
 pub const MAX_AGENTS_PER_MACHINE_PROJECT: i64 = 25;
 pub const MAX_TASKS_PER_PROJECT: i64 = 500;
 pub const MAX_BOARD_MESSAGES: i64 = 500;
+pub const ACTIVE_SESSION_SECONDS: i64 = 7200;
 
 pub const DEFAULT_LOCK_TTL_MINUTES: u32 = 30;
 pub const DEFAULT_AUTO_LOCK_TTL_MINUTES: u32 = 15;
@@ -232,6 +233,7 @@ pub struct BoardPostMessageReq {
     pub project: String,
     #[serde(default)]
     pub channel: Option<String>,
+    #[serde(default)]
     pub agent: String,
     pub body: String,
     #[serde(default)]
@@ -247,7 +249,7 @@ pub struct BoardMessagesQuery {
     pub limit: Option<usize>,
 }
 
-fn validate_note(raw: &str) -> Result<String> {
+pub(super) fn validate_note(raw: &str) -> Result<String> {
     let trimmed = raw.trim();
     if trimmed.len() > MAX_NOTE_LEN * 4 || trimmed.chars().count() > MAX_NOTE_LEN {
         bail!("note exceeds maximum length of {MAX_NOTE_LEN} characters");
@@ -255,7 +257,7 @@ fn validate_note(raw: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
-fn validate_channel(raw: Option<&str>) -> Result<String> {
+pub(super) fn validate_channel(raw: Option<&str>) -> Result<String> {
     let ch = raw
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -327,7 +329,7 @@ fn mint_lock_id(project: &str, agent: &str, paths: &[String], now_nanos: i128) -
 }
 
 /// Write-path pruning and bounded table caps inside a single transaction.
-fn prune_board_tx(tx: &Transaction<'_>, project: &str, now_epoch: i64) -> Result<()> {
+pub(super) fn prune_board_tx(tx: &Transaction<'_>, project: &str, now_epoch: i64) -> Result<()> {
     // 1. Expired locks across all projects
     tx.execute(
         "DELETE FROM board_locks WHERE expires_epoch <= ?1",
@@ -378,6 +380,12 @@ fn prune_board_tx(tx: &Transaction<'_>, project: &str, now_epoch: i64) -> Result
                WHERE t.project = board_agents.project
                  AND t.agent = board_agents.agent
                  AND t.status IN ('claimed', 'review', 'blocked')
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM board_sessions s
+               WHERE s.project = board_agents.project
+                 AND s.handle = board_agents.agent
+                 AND s.ended_epoch IS NULL
            )",
         params![project, stale_cutoff, now_epoch],
     )?;
@@ -396,21 +404,64 @@ fn prune_board_tx(tx: &Transaction<'_>, project: &str, now_epoch: i64) -> Result
         )?;
     }
 
+    // Growth is bounded only by unacked deliveries; S2 adds the full retention policy.
     // 5. Retain only the newest MAX_BOARD_MESSAGES (500) messages per project
     tx.execute(
         "DELETE FROM board_messages
          WHERE project = ?1 AND id <= COALESCE(
              (SELECT id FROM board_messages WHERE project = ?1 ORDER BY id DESC LIMIT 1 OFFSET ?2),
              0
+         ) AND NOT EXISTS (
+             SELECT 1 FROM board_deliveries d
+             WHERE d.message_id = board_messages.id AND d.acked_at IS NULL
          )",
         params![project, MAX_BOARD_MESSAGES],
+    )?;
+
+    // Keep sender IDs on retained messages even after the session credential is removed.
+    tx.execute(
+        "DELETE FROM board_sessions
+         WHERE project=?1 AND ended_epoch < ?2
+           AND NOT EXISTS (
+               SELECT 1 FROM board_deliveries d
+               WHERE d.recipient_session_id=board_sessions.id AND d.acked_at IS NULL
+           )",
+        params![project, now_epoch - 14 * 86_400],
     )?;
 
     Ok(())
 }
 
+pub(super) fn check_agent_capacity(
+    conn: &rusqlite::Connection,
+    project: &str,
+    machine: &str,
+    agent: &str,
+    now_epoch: i64,
+) -> Result<()> {
+    let (project_agents, machine_agents): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(machine = ?2), 0) FROM board_agents a
+         WHERE project = ?1 AND agent != ?4 AND (
+             NOT EXISTS (SELECT 1 FROM board_sessions s WHERE s.project = a.project AND s.handle = a.agent)
+             OR (status NOT IN ('idle', 'done') AND last_seen_epoch >= ?3)
+         )",
+        params![project, machine, now_epoch - ACTIVE_SESSION_SECONDS, agent],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if machine_agents >= MAX_AGENTS_PER_MACHINE_PROJECT {
+        bail!(
+            "agent handle cap ({MAX_AGENTS_PER_MACHINE_PROJECT}) reached for machine '{}' in project '{project}'",
+            machine
+        );
+    }
+    if project_agents >= MAX_AGENTS_PER_PROJECT {
+        bail!("agent handle cap ({MAX_AGENTS_PER_PROJECT}) reached in project '{project}'");
+    }
+    Ok(())
+}
+
 /// Verify that `(project, agent)` belongs to `caller.machine` (or is new and within caps) and refresh presence.
-fn ensure_and_touch_agent_tx(
+pub(super) fn ensure_and_touch_agent_tx(
     tx: &Transaction<'_>,
     caller: &BoardCaller,
     project: &str,
@@ -418,6 +469,14 @@ fn ensure_and_touch_agent_tx(
     now_utc: &str,
     now_epoch: i64,
 ) -> Result<()> {
+    let session_handle: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM board_session_handles WHERE project=?1 AND handle=?2)",
+        params![project, agent],
+        |r| r.get(0),
+    )?;
+    if session_handle {
+        return Err(super::SessionAuthorizationError::Required.into());
+    }
     let existing_machine: Option<String> = tx
         .query_row(
             "SELECT machine FROM board_agents WHERE project = ?1 AND agent = ?2",
@@ -441,25 +500,7 @@ fn ensure_and_touch_agent_tx(
             )?;
         }
         None => {
-            let machine_agents: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM board_agents WHERE project = ?1 AND machine = ?2",
-                params![project, caller.machine],
-                |r| r.get(0),
-            )?;
-            if machine_agents >= MAX_AGENTS_PER_MACHINE_PROJECT {
-                bail!(
-                    "agent handle cap ({MAX_AGENTS_PER_MACHINE_PROJECT}) reached for machine '{}' in project '{project}'",
-                    caller.machine
-                );
-            }
-            let project_agents: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM board_agents WHERE project = ?1",
-                params![project],
-                |r| r.get(0),
-            )?;
-            if project_agents >= MAX_AGENTS_PER_PROJECT {
-                bail!("agent handle cap ({MAX_AGENTS_PER_PROJECT}) reached in project '{project}'");
-            }
+            check_agent_capacity(tx, project, &caller.machine, agent, now_epoch)?;
             tx.execute(
                 "INSERT INTO board_agents (
                     project, agent, machine, runtime, cwd, branch, status, current_task, last_seen_utc, last_seen_epoch
@@ -524,7 +565,7 @@ fn enforce_lock_capacity_before_insert_tx(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn post_message_in_tx(
+pub(super) fn post_message_in_tx(
     tx: &Transaction<'_>,
     project: &str,
     channel: &str,
@@ -564,6 +605,13 @@ fn post_message_in_tx(
         ],
     )?;
     let id = tx.last_insert_rowid();
+    for mention in &mentions {
+        tx.execute(
+            "INSERT OR IGNORE INTO board_deliveries (message_id, recipient_session_id)
+             SELECT ?1, id FROM board_sessions WHERE project = ?2 AND handle = ?3 AND handle != ?4",
+            params![id, project, mention, agent],
+        )?;
+    }
     Ok(BoardMessageRow {
         id,
         project: project.to_string(),
