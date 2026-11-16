@@ -41,6 +41,8 @@ pub struct BoardSessionRegistration {
 
 #[derive(Serialize, Deserialize)]
 pub struct BoardDelivery {
+    #[serde(default)]
+    pub refs: Vec<crate::board::refs::BoardRef>,
     pub message_id: i64,
     pub sender: String,
     pub preview: String,
@@ -292,7 +294,7 @@ impl Ledger {
             tx.commit()?;
         }
         let read_deliveries = |conn: &rusqlite::Connection| -> Result<Vec<BoardDelivery>> {
-            let mut stmt = conn.prepare("SELECT d.message_id, d.delivered_at, d.acked_at, d.attempts, m.agent, m.body FROM board_deliveries d JOIN board_messages m ON m.id=d.message_id WHERE d.recipient_session_id=?1 AND d.acked_at IS NULL AND (?2=0 OR (d.delivered_at IS NULL AND d.attempts < ?4 AND (d.attempted_epoch IS NULL OR d.attempted_epoch <= ?3))) ORDER BY d.message_id LIMIT CASE WHEN ?2 THEN 5 ELSE -1 END")?;
+            let mut stmt = conn.prepare("SELECT d.message_id, d.delivered_at, d.acked_at, d.attempts, m.agent, m.body, m.refs_json FROM board_deliveries d JOIN board_messages m ON m.id=d.message_id WHERE d.recipient_session_id=?1 AND d.acked_at IS NULL AND (?2=0 OR (d.delivered_at IS NULL AND d.attempts < ?4 AND (d.attempted_epoch IS NULL OR d.attempted_epoch <= ?3))) ORDER BY d.message_id LIMIT CASE WHEN ?2 THEN 5 ELSE -1 END")?;
             let deliveries = stmt
                 .query_map(
                     params![
@@ -303,6 +305,13 @@ impl Ledger {
                     ],
                     |r| {
                         Ok(BoardDelivery {
+                            refs: serde_json::from_str(&r.get::<_, String>(6)?).map_err(|e| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    6,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(e),
+                                )
+                            })?,
                             message_id: r.get(0)?,
                             delivered_at: r.get(1)?,
                             acked_at: r.get(2)?,
@@ -343,10 +352,10 @@ impl Ledger {
             "UPDATE board_agents SET last_seen_epoch=?1, last_seen_utc=?2 WHERE project=?3 AND agent=?4 AND last_seen_epoch < ?5",
             params![now, chrono::DateTime::from_timestamp(now, 0).unwrap_or_default().to_rfc3339(), session.project, session.handle, now - 60],
         )?;
-        let candidate =
-            |conn: &rusqlite::Connection| -> Result<Option<(i64, String, String, String)>> {
-                Ok(conn.query_row(
-                "SELECT m.id,a.sender_session_id,m.agent,m.body
+        type WakeCandidate = (i64, String, String, String, String);
+        let candidate = |conn: &rusqlite::Connection| -> Result<Option<WakeCandidate>> {
+            Ok(conn.query_row(
+                "SELECT m.id,a.sender_session_id,m.agent,m.body,m.refs_json
                  FROM board_deliveries d JOIN board_messages m ON m.id=d.message_id
                  JOIN board_message_auth a ON a.message_id=m.id
                  JOIN board_agents recipient ON recipient.project=m.project AND recipient.agent=?2
@@ -359,15 +368,15 @@ impl Ledger {
                        AND w.attempted_epoch > ?4)
                  ORDER BY m.id LIMIT 1",
                 params![session.id, session.handle, session.project, now - WAKE_WINDOW_SECONDS, MAX_PROJECT_WAKES],
-                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
             ).optional()?)
-            };
+        };
         if candidate(&conn)?.is_none() {
             return Ok(Vec::new());
         }
         // Serialize eligibility and the attempt across server workers and machines.
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let Some((message_id, sender_id, sender, body)) = candidate(&tx)? else {
+        let Some((message_id, sender_id, sender, body, refs_json)) = candidate(&tx)? else {
             return Ok(Vec::new());
         };
         tx.execute(
@@ -381,6 +390,7 @@ impl Ledger {
         tx.execute("UPDATE board_deliveries SET wake_attempted_epoch=?1 WHERE message_id=?2 AND recipient_session_id=?3", params![now, message_id, session.id])?;
         tx.commit()?;
         Ok(vec![BoardDelivery {
+            refs: serde_json::from_str(&refs_json)?,
             message_id,
             sender,
             preview: crate::board::session::peer_preview(&body),
@@ -406,7 +416,7 @@ impl Ledger {
 
     pub fn board_message(&self, project: &str, id: i64) -> Result<BoardFullMessage> {
         let conn = self.conn.lock().unwrap();
-        let message = conn.query_row("SELECT id,project,channel,agent,machine,body,mentions_json,parent_id,created_utc,created_epoch,kind,addressed_to FROM board_messages WHERE project=?1 AND id=?2", params![project,id], |r| Ok(BoardMessageRow { id:r.get(0)?, project:r.get(1)?, channel:r.get(2)?, agent:r.get(3)?, machine:r.get(4)?, body:r.get(5)?, mentions:serde_json::from_str(&r.get::<_,String>(6)?).unwrap_or_default(), parent_id:r.get(7)?, created_utc:r.get(8)?, created_epoch:r.get(9)?, kind:r.get(10)?, to:r.get(11)? }))?;
+        let message = conn.query_row("SELECT id,project,channel,agent,machine,body,mentions_json,parent_id,created_utc,created_epoch,kind,addressed_to,refs_json FROM board_messages WHERE project=?1 AND id=?2", params![project,id], |r| Ok(BoardMessageRow { id:r.get(0)?, project:r.get(1)?, channel:r.get(2)?, agent:r.get(3)?, machine:r.get(4)?, body:r.get(5)?, mentions:serde_json::from_str(&r.get::<_,String>(6)?).unwrap_or_default(), parent_id:r.get(7)?, created_utc:r.get(8)?, created_epoch:r.get(9)?, kind:r.get(10)?, to:r.get(11)?, refs:serde_json::from_str(&r.get::<_,String>(12)?).map_err(|e| rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(e)))? }))?;
         let sender_session_id: Option<String> = conn
             .query_row(
                 "SELECT sender_session_id FROM board_message_auth WHERE message_id=?1",
@@ -867,6 +877,7 @@ mod tests {
     }
     fn post(a: &BoardSession, b: &BoardSession) -> BoardPostMessageReq {
         BoardPostMessageReq {
+            refs: Vec::new(),
             kind: None,
             to: None,
             project: a.project.clone(),
@@ -1426,6 +1437,7 @@ mod tests {
         let path = tmp.path().join("board.db");
         let ledger = Ledger::open(&path).unwrap();
         let req = BoardPostMessageReq {
+            refs: Vec::new(),
             kind: None,
             to: None,
             project: "repo".into(),
@@ -1513,6 +1525,7 @@ mod tests {
                     admin: false,
                 },
                 &BoardPostMessageReq {
+                    refs: Vec::new(),
                     kind: None,
                     to: None,
                     project: "repo".into(),

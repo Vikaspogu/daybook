@@ -319,6 +319,7 @@ async fn dispatch_tool_call(
                     }
                     _ => {
                         let msg = client.session_post(&session, &BoardPostMessageReq {
+                            refs: args.get("refs").filter(|v| !v.is_null()).cloned().map(serde_json::from_value).transpose().context("invalid refs")?.unwrap_or_default(),
                             kind: if tool_name == "daybook_board_handoff" { Some("handoff".into()) } else { args.get("kind").and_then(Value::as_str).map(ToString::to_string) },
                             to: args.get("to").and_then(Value::as_str).map(ToString::to_string),
                             project: project.clone(), agent: session.handle.clone(),
@@ -492,6 +493,12 @@ async fn dispatch_tool_call(
 }
 
 fn mcp_tool_definitions() -> Value {
+    let refs = json!({"type":"array","maxItems":10,"description":"References only, never fetched. Repo is a repository name, path is relative. ledger://board/<id> names a message in this ledger.","items":{"oneOf":[
+        {"type":"object","additionalProperties":false,"required":["type","repo","path","commit"],"properties":{
+            "type":{"const":"repo"},"repo":{"type":"string","maxLength":64},"path":{"type":"string","maxLength":1024},"commit":{"type":"string","pattern":"^[a-fA-F0-9]{7,40}$"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}},
+        {"type":"object","additionalProperties":false,"required":["type","url"],"properties":{"type":{"const":"url"},"url":{"type":"string","maxLength":2048,"pattern":"^https?://"}}},
+        {"type":"object","additionalProperties":false,"required":["type","uri"],"properties":{"type":{"const":"ledger"},"uri":{"type":"string","maxLength":64,"pattern":"^ledger://board/[1-9][0-9]*$"}}}
+    ]}});
     json!([
         {
             "name":"daybook_board_inbox",
@@ -552,6 +559,7 @@ fn mcp_tool_definitions() -> Value {
                     "kind": { "type": "string", "enum": ["chat", "question", "discovery", "pitfall", "decision", "handoff"], "description": "Default chat. Discovery, pitfall, decision, and handoff are archived permanently. Only an addressed question can wake an idle Pi session." },
                     "to": { "type": "string", "description": "One session @handle. All messages remain project-visible." },
                     "body": { "type": "string", "description": "Message text (use @agent-handle to notify specific agents)." },
+                    "refs": refs,
                     "parent_id": { "type": "integer", "description": "Optional parent message id for threaded replies." }
                 },
                 "required": ["body"]
@@ -566,6 +574,7 @@ fn mcp_tool_definitions() -> Value {
                     "session_id": { "type": "string", "description": "Runtime session_id from the startup note. Must match the inherited runtime identity when present." },
                     "body": { "type": "string", "description": "Completed work, remaining work, and verification or blockers." },
                     "to": { "type": "string", "description": "Optional session @handle. The handoff remains project-visible." },
+                    "refs": refs,
                     "parent_id": { "type": "integer", "description": "Optional parent message id." }
                 },
                 "required": ["body"]
@@ -676,7 +685,7 @@ mod tests {
         let identity = resolve_board_identity(tmp.path(), None, None);
         let result = call_session_tool(
             &client, &identity, &config, "runtime", "daybook_board_handoff",
-            json!({"body":"Done: typed posts. Next: review gates.","kind":"question","agent":"spoof"}),
+            json!({"body":"Done: typed posts. Next: review gates.","kind":"question","agent":"spoof","refs":[{"type":"ledger","uri":"ledger://board/1"}]}),
         ).await;
         assert_eq!(result["isError"], false, "{result}");
         let posted: Value =
@@ -690,6 +699,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored.message.kind, "handoff");
+        assert_eq!(
+            serde_json::to_value(&stored.message.refs).unwrap(),
+            posted["refs"]
+        );
         let definitions = mcp_tool_definitions();
         let tools = definitions.as_array().unwrap();
         assert!(tools
@@ -810,7 +823,11 @@ mod tests {
             &config,
             "a",
             "daybook_board_post",
-            json!({"body":format!("@{} full text", b.handle),"agent":b.handle}),
+            json!({"body":format!("@{} full text", b.handle),"agent":b.handle,"refs":[
+                {"type":"repo","repo":"daybook","path":"src/main.rs","commit":"abcdef0","start_line":1,"end_line":2},
+                {"type":"url","url":"https://example.com"},
+                {"type":"ledger","uri":"ledger://board/1"}
+            ]}),
         )
         .await;
         assert_eq!(posted["isError"], false, "{posted}");
@@ -832,6 +849,7 @@ mod tests {
             serde_json::from_str(inbox["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(pending["handle"], b.handle);
         assert_eq!(pending["deliveries"][0]["message_id"], id);
+        assert_eq!(pending["deliveries"][0]["refs"], message["refs"]);
         let fetched = call_session_tool(
             &client,
             &identity,
@@ -845,6 +863,18 @@ mod tests {
         let full: Value =
             serde_json::from_str(fetched["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(full["untrusted_peer_message"]["body"], message["body"]);
+        assert_eq!(full["untrusted_peer_message"]["refs"], message["refs"]);
+        assert_eq!(message["refs"].as_array().unwrap().len(), 3);
+        let null_refs = call_session_tool(
+            &client,
+            &identity,
+            &config,
+            "a",
+            "daybook_board_post",
+            json!({"body":"no refs","refs":null}),
+        )
+        .await;
+        assert_eq!(null_refs["isError"], false, "{null_refs}");
         assert!(full["permission"]
             .as_str()
             .unwrap()

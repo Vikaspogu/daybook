@@ -649,9 +649,10 @@ impl Ledger {
         conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(SCHEMA)?;
         // Additive migration preserves old message identities and receipt state.
-        const COLUMNS: [(&str, &str, &str); 4] = [
+        const COLUMNS: [(&str, &str, &str); 5] = [
             ("board_messages", "kind", "TEXT NOT NULL DEFAULT 'chat'"),
             ("board_messages", "addressed_to", "TEXT"),
+            ("board_messages", "refs_json", "TEXT NOT NULL DEFAULT '[]'"),
             ("board_deliveries", "wake_attempted_epoch", "INTEGER"),
             (
                 "board_deliveries",
@@ -1199,6 +1200,7 @@ mod tests {
                 for (table, column) in [
                     ("board_messages", "kind"),
                     ("board_messages", "addressed_to"),
+                    ("board_messages", "refs_json"),
                     ("board_deliveries", "wake_attempted_epoch"),
                     ("board_deliveries", "wake_suppressed"),
                 ] {

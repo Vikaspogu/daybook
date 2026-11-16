@@ -270,10 +270,12 @@ pub async fn run(args: BoardArgs) -> Result<()> {
             body,
             channel,
             kind,
+            refs,
             reply_to,
         } => {
             let msg = client
                 .post_message(&BoardPostMessageReq {
+                    refs,
                     kind: Some(kind),
                     to: None,
                     project: identity.project.clone(),

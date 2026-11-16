@@ -2381,6 +2381,24 @@ fn render_board_archive(posts: &[crate::ledger::BoardMessageRow]) -> String {
                     .replace('>', "&gt;")
             ));
         }
+        for reference in &post.refs {
+            out.push_str(&format!(
+                "  > ref: {}\n",
+                reference
+                    .to_string()
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric()
+                            || matches!(c, ' ' | ':' | '/' | '.' | '-' | '_' | '@')
+                        {
+                            c.to_string()
+                        } else {
+                            format!("&#{};", c as u32)
+                        }
+                    })
+                    .collect::<String>()
+            ));
+        }
     }
     out
 }
@@ -3418,6 +3436,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn board_refs_http_roundtrip_and_validation() {
+        let (app, _state, token) = test_app("board-refs").await;
+        let refs = serde_json::json!([
+            {"type":"repo","repo":"daybook","path":"src/main.rs","commit":"abcdef0","start_line":2,"end_line":4},
+            {"type":"url","url":"https://example.com/a?q=1"},
+            {"type":"ledger","uri":"ledger://board/1"}
+        ]);
+        let (status, body) = status_of(&app, post_json_req("/api/board/messages", Some(token),
+            serde_json::json!({"project":"refs","agent":"writer","body":"See references","refs":refs}))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let posted: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(posted["data"]["refs"], refs);
+        let id = posted["data"]["id"].as_i64().unwrap();
+        for (url, list) in [
+            (format!("/api/board/messages/{id}?project=refs"), false),
+            ("/api/board/messages?project=refs".into(), true),
+            ("/api/board/status?project=refs".into(), true),
+        ] {
+            let (status, body) = status_of(&app, get_req(&url, Some(token))).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let fetched: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(
+                if list {
+                    &fetched["data"]["messages"][0]["refs"]
+                } else {
+                    &fetched["data"]["refs"]
+                },
+                &refs,
+                "{body}"
+            );
+        }
+        for invalid in [
+            serde_json::json!([{"type":"repo","repo":"daybook","path":"../secret","commit":"abcdef0"}]),
+            serde_json::json!([{"type":"url","url":"javascript:alert(1)"}]),
+            serde_json::json!(vec![refs[2].clone(); 11]),
+        ] {
+            let (status, body) = status_of(&app, post_json_req("/api/board/messages", Some(token),
+                serde_json::json!({"project":"refs","agent":"writer","body":"Reject","refs":invalid}))).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(body.contains("ref"), "{body}");
+        }
+    }
+
+    #[tokio::test]
     async fn typed_board_posts_appear_in_daily_archive_without_sessions() {
         let (app, _state, token) = test_app("typed-board-archive").await;
         for project in ["alpha", "beta"] {
@@ -3431,7 +3493,7 @@ mod tests {
             ] {
                 let (status, body) = status_of(&app, post_json_req(
                     "/api/board/messages", Some(token),
-                    serde_json::json!({"project":project,"agent":"writer","kind":kind,"body":format!("{project} {kind} evidence\nsecond line")}),
+                    serde_json::json!({"project":project,"agent":"writer","kind":kind,"body":format!("{project} {kind} evidence\nsecond line"), "refs":[{"type":"url","url":"https://example.com/<script>?q=[click](javascript:alert(1))"},{"type":"repo","repo":"daybook","path":"src/main.rs","commit":"abcdef0","start_line":1},{"type":"ledger","uri":"ledger://board/1"}]}),
                 )).await;
                 assert_eq!(status, StatusCode::OK, "{body}");
                 let posted: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -3464,6 +3526,11 @@ mod tests {
         assert!(!archive.contains("chat evidence"));
         assert!(!archive.contains("question evidence"));
         assert!(archive.contains("second line"));
+        assert!(archive.contains("  > ref: daybook:src/main.rs@abcdef0:L1"));
+        assert!(archive.contains("  > ref: ledger://board/1"));
+        assert!(archive.contains("https://example.com/&#60;script&#62;"));
+        assert!(!archive.contains("<script>"));
+        assert!(!archive.contains("[click](javascript:"));
         assert!(archive.contains("@writer"));
         let (_, body) = status_of(&app, get_req("/api/dates/2000-01-01", Some(token))).await;
         let other_day: serde_json::Value = serde_json::from_str(&body).unwrap();

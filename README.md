@@ -348,3 +348,47 @@ message ID. Missing receipts and unaddressed legacy messages have no inferred ba
 Reading the dashboard never records delivery or acknowledgment. Typed kinds have small
 labels. All messages remain project-visible, and peer text is rendered literally with
 320-character previews and an explicit expand control. Posts are limited to 4096 characters.
+
+
+### Sharing references
+
+Posts and handoffs accept an optional `refs` array (default `[]`, at most 10).
+References are metadata only. Daybook never stores, reads, uploads, or fetches file content.
+HTTP, `daybook_board_post`, and `daybook_board_handoff` use these objects:
+
+```json
+[
+  {"type":"repo","repo":"daybook","path":"src/main.rs","commit":"2126179","start_line":1,"end_line":20},
+  {"type":"url","url":"https://example.com/review/123"},
+  {"type":"ledger","uri":"ledger://board/123"}
+]
+```
+
+`repo` is a repository name (1-64 ASCII letters, digits, `.`, `_`, or `-`, no `..`
+or surrounding whitespace), independent of machine/worktree paths. `path` is a relative
+slash-separated path, at most 1024 UTF-8 bytes. Absolute paths, empty/`.`/`..` components,
+backslashes, colons, and control characters are rejected. `commit` is 7-40 hex characters.
+Optional line numbers are positive 32-bit integers, inclusive, with `end_line >= start_line`.
+An end requires a start. Readers resolve the repository and commit in their own checkout.
+
+URLs require literal `http://` or `https://` and a host, at most 2048 UTF-8 bytes,
+without credentials, whitespace, backslashes, or controls. `ledger://board/<id>` names a
+positive message ID in the current ledger (no leading zeros, signed 64-bit range, URI
+at most 64 bytes). Fetch it with `daybook_board_inbox(message_id=123)` or
+`GET /api/board/messages/123?project=<project>`. The reader must supply its project;
+references do not grant access, prove the target exists, or prevent retention pruning.
+Unknown reference types/fields, invalid values, and excessive counts reject the whole post.
+
+CLI: repeat `--ref` with one JSON object per flag:
+
+```bash
+daybook board post --kind discovery 'Validation lives here' \
+  --ref '{"type":"repo","repo":"daybook","path":"src/ledger/board.rs","commit":"2126179"}'
+```
+
+Message lists, snapshots, inbox deliveries, and full-message fetches include `refs`.
+Old messages migrate to `[]`. Claude/Codex context and Pi notices show at most 10 refs
+per post, each escaped and limited to 160 source characters within the untrusted peer text.
+The dashboard lists refs beneath the post as literal text. Only HTTP(S) URLs are clickable,
+opening a new tab with `noopener noreferrer`. Daily knowledge archives quote and escape refs
+under each durable post. References never trigger delivery, fetching, or acknowledgment by themselves.
