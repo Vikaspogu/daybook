@@ -76,7 +76,7 @@ fn prepare_boundary(
                         cwd.clone(),
                         runtime_id.clone(),
                         startup,
-                        startup && std::env::var_os("PI_SESSION_ID").is_some(),
+                        startup && crate::board::session::is_pi(),
                         idle,
                     )
                     .await
@@ -311,7 +311,7 @@ pub fn emit(
         legacy,
         event,
         &mut std::io::stdout().lock(),
-        std::env::var_os("PI_SESSION_ID").is_some(),
+        crate::board::session::is_pi(),
     )
 }
 
@@ -771,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn board_notice_emit_pi_and_claude_receipts() {
+    fn board_notice_emit_pi_claude_and_codex_receipts() {
         const CHILD_DIR: &str = "DAYBOOK_EMIT_TEST_DIR";
         if let Some(dir) = std::env::var_os(CHILD_DIR) {
             let dir = std::path::PathBuf::from(dir);
@@ -792,7 +792,7 @@ mod tests {
                     text: "legacy preview".into(),
                     cursor: None,
                 },
-                "PostToolUseFailure",
+                &std::env::var("DAYBOOK_EMIT_TEST_EVENT").unwrap(),
             )
             .unwrap();
             return;
@@ -831,7 +831,14 @@ mod tests {
             .unwrap();
         let ledger = crate::ledger::Ledger::open(&config.server.db_path).unwrap();
         // Separate processes keep PI_SESSION_ID changes isolated from parallel Rust tests.
-        for pi in [true, false] {
+        // A Codex hook launched from Pi inherits PI_SESSION_ID but must emit Codex output.
+        for (pi_env, codex, event) in [
+            (true, false, "PostToolUseFailure"),
+            (false, false, "PostToolUseFailure"),
+            (false, false, "PostToolUse"),
+            (true, true, "PostToolUse"),
+        ] {
+            let pi = pi_env && !codex;
             let msg = ledger
                 .board_session_post(
                     &a.session.credential,
@@ -858,14 +865,20 @@ mod tests {
             command
                 .args([
                     "--exact",
-                    "hooks::board_notice::tests::board_notice_emit_pi_and_claude_receipts",
+                    "hooks::board_notice::tests::board_notice_emit_pi_claude_and_codex_receipts",
                     "--nocapture",
                 ])
-                .env(CHILD_DIR, tmp.path());
-            if pi {
+                .env(CHILD_DIR, tmp.path())
+                .env("DAYBOOK_EMIT_TEST_EVENT", event);
+            if pi_env {
                 command.env("PI_SESSION_ID", "b");
             } else {
                 command.env_remove("PI_SESSION_ID");
+            }
+            if codex {
+                command.env("DAYBOOK_RUNTIME", "codex");
+            } else {
+                command.env_remove("DAYBOOK_RUNTIME");
             }
             let output = command.output().unwrap();
             assert!(
@@ -878,10 +891,11 @@ mod tests {
                 .lines()
                 .find_map(|line| serde_json::from_str(line).ok())
                 .unwrap();
-            assert_eq!(
-                output["hookSpecificOutput"]["hookEventName"],
-                "PostToolUseFailure"
-            );
+            assert_eq!(output["hookSpecificOutput"]["hookEventName"], event);
+            if event == "PostToolUse" {
+                assert_eq!(output.as_object().unwrap().len(), 1);
+                assert_eq!(output["hookSpecificOutput"].as_object().unwrap().len(), 2);
+            }
             assert_eq!(
                 output["hookSpecificOutput"]["additionalContext"],
                 "untrusted previewlegacy preview"
@@ -1018,7 +1032,15 @@ mod tests {
             &input.session_id,
             input.board_delivered.unwrap(),
         );
-        let pending = ledger.board_inbox(&b.session.credential, false).unwrap();
+        // accept_ids returns after 250 ms; under suite load its worker thread may finish later.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let pending = loop {
+            let pending = ledger.board_inbox(&b.session.credential, false).unwrap();
+            if pending[0].delivered_at.is_some() || std::time::Instant::now() > deadline {
+                break pending;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
         assert_eq!(pending.len(), 1);
         assert!(pending[0].delivered_at.is_some());
         assert!(pending[0].acked_at.is_none());

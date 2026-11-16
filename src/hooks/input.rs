@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::io::{self, Read};
 use std::path::PathBuf;
 
-/// Input data received from Claude Code hooks via stdin
+// Shared Claude, Codex, and Pi hook stdin.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct HookInput {
@@ -15,7 +15,7 @@ pub struct HookInput {
     pub board_delivered: Option<Vec<i64>>,
     #[serde(default)]
     pub board_legacy_cursor: Option<i64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable_path")]
     pub transcript_path: PathBuf,
     #[serde(default)]
     pub cwd: PathBuf,
@@ -29,6 +29,10 @@ pub struct HookInput {
     pub tool_name: Option<String>,
     #[serde(default)]
     pub tool_input: Option<serde_json::Value>,
+}
+
+fn nullable_path<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
+    Ok(Option::<PathBuf>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 impl HookInput {
@@ -82,6 +86,22 @@ pub fn read_hook_input() -> Result<HookInput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_codex_post_tool_input_with_null_transcript() {
+        let input: HookInput = serde_json::from_value(serde_json::json!({
+            "session_id": "019a-codex-thread", "turn_id": "turn-1",
+            "cwd": "/repo", "hook_event_name": "PostToolUse",
+            "transcript_path": null, "model": "gpt-6.1-sol",
+            "permission_mode": "default", "tool_name": "Bash",
+            "tool_use_id": "call-1", "tool_input": {"command": "cat README.md"},
+            "tool_response": {"exit_code": 0}
+        }))
+        .unwrap();
+        assert_eq!(input.session_id, "019a-codex-thread");
+        assert!(input.transcript_path.as_os_str().is_empty());
+        assert_eq!(input.edited_file_path(), None);
+    }
 
     #[test]
     fn test_parse_session_start_input() {

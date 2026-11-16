@@ -152,3 +152,25 @@ rejected. With neither binding these tools require the startup session ID.
 The legacy post `agent` argument is ignored. A cached-session notice uses one inbox request
 with escaped message previews included. A typed invalid-session signal re-registers and
 retries once. Owner-token, proxy, and other failures preserve the cached session.
+
+Codex hook integration requires CLI >= 0.145.0, the first version with SessionEnd and tool hooks.
+Init skips missing, older, prerelease, or unparseable CLI versions before touching Codex files.
+It merges SessionStart, PreToolUse, PostToolUse, and SessionEnd command hooks into
+$CODEX_HOME/hooks.json (default ~/.codex/hooks.json), preserves other definitions, and leaves
+Codex's hook trust review and feature settings to the user. Doctor checks definitions and
+version without changing files or claiming hooks are trusted. Commands explicitly set
+DAYBOOK_RUNTIME=codex. HookInput accepts Codex's nullable transcript_path and reads session_id
+from stdin. Inherited CODEX_THREAD_ID also binds MCP calls to the session.
+Startup uses plain stdout context. PostToolUse reuses the escaped, untrusted additionalContext
+JSON and receipt path. There is no PostToolUseFailure event in the verified Codex schema.
+The existing single-file edit handlers require a structured file path, so apply_patch command
+strings and arbitrary shell edits do not acquire locks or check legacy-handle mentions.
+Session-addressed mentions still arrive after all PostToolUse events. Idle Codex is never
+woken by this integration and receives pending messages at its next tool boundary.
+
+No T3 bridge is installed. The public t3_thread_send mode=steer rejects idle targets but can
+fall back to queueing during maintenance or interrupt/restart for providers without native
+steering. The internal strictTarget guard is absent from the public MCP input schema.
+Checking state before sending cannot prevent a race into those fallback paths. A future
+bridge needs an authenticated public strict-steer operation before automatic delivery can
+meet the no-queue/no-restart requirement. Native Claude/Pi/Codex hooks still work inside T3.

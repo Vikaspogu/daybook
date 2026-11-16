@@ -5,10 +5,34 @@ use anyhow::Result;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
+pub fn is_codex_hook() -> bool {
+    std::env::var("DAYBOOK_RUNTIME").ok().as_deref() == Some("codex")
+}
+
+/// Pi env vars leak into child runtimes, so a Codex hook launched from Pi is not Pi.
+pub fn is_pi() -> bool {
+    !is_codex_hook() && std::env::var_os("PI_SESSION_ID").is_some()
+}
+
 pub fn runtime_session_id() -> String {
-    ["DAYBOOK_SESSION_ID", "PI_SESSION_ID", "CLAUDE_SESSION_ID"]
+    session_id_from(is_codex_hook(), |name| std::env::var(name).ok())
+}
+
+fn session_id_from(codex_hook: bool, get: impl Fn(&str) -> Option<String>) -> String {
+    let names: &[&str] = if codex_hook {
+        // Never bind a parent Pi/Claude/override session from a nested Codex hook.
+        &["CODEX_THREAD_ID"]
+    } else {
+        &[
+            "DAYBOOK_SESSION_ID",
+            "PI_SESSION_ID",
+            "CLAUDE_SESSION_ID",
+            "CODEX_THREAD_ID",
+        ]
+    };
+    names
         .iter()
-        .find_map(|name| std::env::var(name).ok().filter(|s| !s.is_empty()))
+        .find_map(|name| get(name).filter(|s| !s.is_empty()))
         .unwrap_or_default()
 }
 
@@ -230,6 +254,28 @@ pub fn peer_preview(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_codex_hook_ignores_parent_session_ids() {
+        let env = |name: &str| {
+            Some(
+                match name {
+                    "DAYBOOK_SESSION_ID" => "override",
+                    "PI_SESSION_ID" => "pi",
+                    "CLAUDE_SESSION_ID" => "claude",
+                    "CODEX_THREAD_ID" => "codex",
+                    _ => return None,
+                }
+                .to_string(),
+            )
+        };
+        assert_eq!(session_id_from(true, env), "codex");
+        assert_eq!(session_id_from(false, env), "override");
+        assert_eq!(
+            session_id_from(true, |n| (n == "PI_SESSION_ID").then(|| "pi".into())),
+            ""
+        );
+    }
 
     #[tokio::test]
     async fn board_session_cache_reregisters_only_for_invalid_session_signal() {
