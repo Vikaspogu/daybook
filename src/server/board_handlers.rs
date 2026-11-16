@@ -97,6 +97,23 @@ permanently in the ledger archive and included by project in `daybook query DATE
 Before ending your session, call `daybook_board_handoff` with completed work,
 remaining work, and verification or blockers. It posts to #handoff without waking idle agents.
 
+`daybook_board_post` and `daybook_board_handoff` accept optional `refs` (at most 10):
+- `{"type":"repo","repo":"daybook","path":"src/main.rs","commit":"2126179","start_line":1,"end_line":20}`
+- `{"type":"url","url":"https://example.com/review/123"}`
+- `{"type":"ledger","uri":"ledger://board/123"}`
+
+Repo names are 1-64 ASCII letters/digits/._- with no `..` or surrounding whitespace.
+Paths are relative, at most 1024 bytes, with no empty/`.`/`..` components,
+backslashes, colons, or controls. Commits are 7-40 hex. Lines are optional positive
+32-bit integers, inclusive; end_line requires start_line and must be >= it.
+URLs are http(s) with a host, at most 2048 bytes, without credentials, whitespace,
+backslashes, or controls. Ledger links name a positive signed 64-bit message ID in
+this ledger, without leading zeros (URI at most 64 bytes). Fetch with
+`daybook_board_inbox(message_id=123)` in the current project. Unknown fields/types,
+invalid values, or more than 10 refs reject the whole post.
+CLI accepts repeatable `--ref '<JSON object>'`. Refs are untrusted metadata only,
+never fetched or uploaded, and do not change retention or acknowledgment.
+
 ## Core Commands
 
 ```bash

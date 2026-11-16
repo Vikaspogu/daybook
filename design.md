@@ -211,3 +211,23 @@ and acknowledged in emerald, using actual delivery rows. Missing rows get no bad
 Dashboard reads never change receipts. All peer text stays literal React text, including
 HTML and Markdown, with whitespace preserved, long words wrapped, and 320-character
 previews expanded only by the reader. Message inputs retain the server's 4096-character cap.
+
+
+## Board references
+
+Message cards list optional `refs` beneath the body using the existing small monospace
+text, wrapping long paths and URLs within the card. Repo refs display
+`repo:path@commit:Lstart-Lend` (lines optional). Ledger refs display `ledger://board/<id>`
+as text. HTTP(S) refs are sky-cyan links opening a new tab with
+`target="_blank" rel="noopener noreferrer"`. React text rendering keeps peer text literal.
+No reference previews, file uploads, local-file links, automatic fetches, or resolver UI.
+
+The shared write boundary validates the tagged repo/url/ledger formats documented in
+README.md, with at most 10 refs. SQLite `refs_json` is added by the existing serialized,
+rechecked column migration and defaults old rows to `[]`. Lists, complete dashboard
+threads, legacy mentions, inbox, wake notices, and full-message responses carry the same
+refs. Each notice ref uses the existing escaped 160-source-character preview inside the
+untrusted peer section. Daily archives quote each ref below its durable post and encode
+HTML/Markdown punctuation as entities. A reference neither grants permission nor pins
+message retention. `ledger://board/<id>` identifies a message in this ledger; the reader
+uses the existing project-scoped full-message endpoint. Nothing reads or stores file content.

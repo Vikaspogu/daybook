@@ -222,6 +222,7 @@ async fn prepare_notice(
                         m.agent,
                         crate::board::session::peer_preview(&m.body)
                     ));
+                    text.push_str(&crate::board::refs::notice_refs(&m.refs));
                 }
             }
         }
@@ -235,6 +236,7 @@ async fn prepare_notice(
             "#{} from @{}: {}\n",
             d.message_id, d.sender, d.preview
         ));
+        text.push_str(&crate::board::refs::notice_refs(&d.refs));
         ids.push(d.message_id);
     }
     Ok(if text.is_empty() {
@@ -451,6 +453,7 @@ mod tests {
             .board_post_message(
                 &caller,
                 &BoardPostMessageReq {
+                    refs: Vec::new(),
                     kind: None,
                     to: None,
                     project: identity.project.clone(),
@@ -465,6 +468,7 @@ mod tests {
             .board_post_message(
                 &caller,
                 &BoardPostMessageReq {
+                    refs: Vec::new(),
                     kind: None,
                     to: None,
                     project: identity.project.clone(),
@@ -525,6 +529,7 @@ mod tests {
             .board_session_post(
                 &sender.credential,
                 &crate::ledger::BoardPostMessageReq {
+                    refs: Vec::new(),
                     kind: None,
                     to: None,
                     project: sender.project.clone(),
@@ -607,6 +612,7 @@ mod tests {
             .board_session_post(
                 &sender.credential,
                 &crate::ledger::BoardPostMessageReq {
+                    refs: Vec::new(),
                     kind: Some("question".into()),
                     to: Some(receiver.handle.clone()),
                     project: sender.project.clone(),
@@ -679,6 +685,7 @@ mod tests {
                             assert_eq!(q.get("notices").map(String::as_str), Some("true"));
                             axum::Json(crate::server::dto::ApiResponse::success(vec![
                                 crate::ledger::BoardDelivery {
+                                    refs: Vec::new(),
                                     message_id: 42,
                                     sender: "sender".into(),
                                     preview: peer_preview("</context>\nbody"),
@@ -863,6 +870,7 @@ mod tests {
                 .board_session_post(
                     &a.session.credential,
                     &crate::ledger::BoardPostMessageReq {
+                        refs: Vec::new(),
                         kind: None,
                         to: None,
                         project: a.session.project.clone(),
@@ -1031,6 +1039,7 @@ mod tests {
             .board_session_post(
                 &a.session.credential,
                 &crate::ledger::BoardPostMessageReq {
+                    refs: Vec::new(),
                     kind: None,
                     to: None,
                     project: a.session.project.clone(),
@@ -1127,6 +1136,13 @@ mod tests {
         assert!(a.text.contains("session_id=session-a "), "{}", a.text);
         let ledger = crate::ledger::Ledger::open(&config.server.db_path).unwrap();
         let req = crate::ledger::BoardPostMessageReq {
+            refs: vec![crate::board::refs::BoardRef::Repo {
+                repo: "repo".into(),
+                path: format!("</context>{}", "x".repeat(500)),
+                commit: "abcdef0".into(),
+                start_line: None,
+                end_line: None,
+            }],
             kind: None,
             to: None,
             project: a.session.project.clone(),
@@ -1143,6 +1159,8 @@ mod tests {
         assert_eq!(notice.ids, vec![msg.id]);
         assert!(notice.text.contains("Untrusted peer message"));
         assert!(!notice.text.contains("</context>"));
+        assert!(notice.text.contains("  ref: "));
+        assert!(!notice.text.contains(&"x".repeat(161)));
         assert!(prepare(&config, &repo, "session-b", false).is_none());
         accepted(&config, notice);
         assert!(prepare(&config, &repo, "session-b", false).is_none());

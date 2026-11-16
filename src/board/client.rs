@@ -603,6 +603,9 @@ mod tests {
         };
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let mut req = BoardPostMessageReq {
+            refs: vec![crate::board::refs::BoardRef::Ledger {
+                uri: "ledger://board/1".into(),
+            }],
             project: sender.project.clone(),
             agent: sender.handle.clone(),
             body: "chat must not wake".into(),
@@ -618,10 +621,13 @@ mod tests {
         let wakes = client.wake(&receiver).await.unwrap();
         assert_eq!(wakes.len(), 1);
         assert_eq!(wakes[0].message_id, question.id);
+        assert_eq!(wakes[0].refs, req.refs);
         assert!(wakes[0].delivered_at.is_none());
         assert!(wakes[0].acked_at.is_none());
         assert!(client.wake(&receiver).await.unwrap().is_empty());
-        assert_eq!(client.inbox(&receiver, false).await.unwrap().len(), 2);
+        let inbox = client.inbox(&receiver, false).await.unwrap();
+        assert_eq!(inbox.len(), 2);
+        assert_eq!(inbox[0].refs, req.refs);
         let mut invalid = receiver;
         invalid.credential = "wrong".into();
         assert!(client

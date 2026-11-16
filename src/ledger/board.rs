@@ -91,6 +91,8 @@ fn default_message_kind() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoardMessageRow {
+    #[serde(default)]
+    pub refs: Vec<crate::board::refs::BoardRef>,
     // Older servers omit kind; treat their rows as chat.
     #[serde(default = "default_message_kind")]
     pub kind: String,
@@ -240,6 +242,8 @@ pub struct BoardUpdateTaskReq {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoardPostMessageReq {
+    #[serde(default)]
+    pub refs: Vec<crate::board::refs::BoardRef>,
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
@@ -626,6 +630,7 @@ pub(super) fn post_message_in_tx(
         )?;
     }
     Ok(BoardMessageRow {
+        refs: Vec::new(),
         id,
         project: project.to_string(),
         channel: channel.to_string(),
@@ -646,6 +651,7 @@ pub(super) fn route_message_tx(
     msg: &mut BoardMessageRow,
     req: &BoardPostMessageReq,
 ) -> Result<()> {
+    crate::board::refs::validate_refs(&req.refs)?;
     let kind = req.kind.as_deref().unwrap_or("chat");
     anyhow::ensure!(
         matches!(
@@ -675,9 +681,10 @@ pub(super) fn route_message_tx(
         }
     }
     tx.execute(
-        "UPDATE board_messages SET kind=?1,addressed_to=?2 WHERE id=?3",
-        params![kind, to, msg.id],
+        "UPDATE board_messages SET kind=?1,addressed_to=?2,refs_json=?4 WHERE id=?3",
+        params![kind, to, msg.id, serde_json::to_string(&req.refs)?],
     )?;
+    msg.refs = req.refs.clone();
     msg.kind = kind.into();
     msg.to = to;
     Ok(())
@@ -918,17 +925,24 @@ impl Ledger {
                 created_epoch: r.get(9)?,
                 kind: r.get(10)?,
                 to: r.get(11)?,
+                refs: serde_json::from_str(&r.get::<_, String>(12)?).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        12,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?,
             })
         };
         let mut messages = if is_all_projects {
             let sql = if floor_id > 0 {
-                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
+                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to, refs_json
                  FROM board_messages
                  WHERE LOWER(project) NOT IN ('agent', 'all') AND id > ?1
                  ORDER BY id ASC
                  LIMIT 50"
             } else {
-                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
+                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to, refs_json
                  FROM board_messages
                  WHERE LOWER(project) NOT IN ('agent', 'all') AND id > ?1
                  ORDER BY id DESC
@@ -941,13 +955,13 @@ impl Ledger {
             rows
         } else {
             let sql = if floor_id > 0 {
-                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
+                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to, refs_json
                  FROM board_messages
                  WHERE project = ?1 AND id > ?2
                  ORDER BY id ASC
                  LIMIT 50"
             } else {
-                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
+                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to, refs_json
                  FROM board_messages
                  WHERE project = ?1 AND id > ?2
                  ORDER BY id DESC
@@ -1005,7 +1019,7 @@ impl Ledger {
                     LIMIT 2000
                 )
                 SELECT m.id, m.project, channel, agent, machine, body, mentions_json, parent_id,
-                       created_utc, created_epoch, kind, addressed_to
+                       created_utc, created_epoch, kind, addressed_to, refs_json
                 FROM board_messages m JOIN threads t ON m.id = t.id ORDER BY m.id DESC LIMIT 500"
             ))?;
             // ponytail: walk at most 2000 thread rows and return the newest 500 per snapshot;
@@ -1040,7 +1054,7 @@ impl Ledger {
             let like_pat = format!("%\"{needle}\"%");
             let rows: Vec<BoardMessageRow> = if is_all_projects {
                 let mut stmt = conn.prepare(
-                    "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
+                    "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to, refs_json
                      FROM board_messages
                      WHERE LOWER(project) NOT IN ('agent', 'all') AND id > ?1 AND agent != ?2 AND mentions_json LIKE ?3
                      ORDER BY id ASC",
@@ -1051,7 +1065,7 @@ impl Ledger {
                 collected
             } else {
                 let mut stmt = conn.prepare(
-                    "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
+                    "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to, refs_json
                      FROM board_messages
                      WHERE project = ?1 AND id > ?2 AND agent != ?3 AND mentions_json LIKE ?4
                      ORDER BY id ASC",
@@ -1129,7 +1143,7 @@ impl Ledger {
         let midnight = date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
+            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to, refs_json
              FROM board_messages
              WHERE kind IN ('discovery', 'pitfall', 'decision', 'handoff')
                AND created_epoch >= ?1 AND created_epoch < ?2
@@ -1151,6 +1165,13 @@ impl Ledger {
                 created_epoch: r.get(9)?,
                 kind: r.get(10)?,
                 to: r.get(11)?,
+                refs: serde_json::from_str(&r.get::<_, String>(12)?).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        12,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?,
             })
         })?;
         let mut posts = Vec::new();
@@ -1195,7 +1216,7 @@ impl Ledger {
         let conn = self.conn.lock().unwrap();
         let mention_like = mention.as_ref().map(|m| format!("%\"{m}\"%"));
         let sql = if floor_id > 0 {
-            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
+            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to, refs_json
              FROM board_messages
              WHERE project = ?1
                AND id > ?2
@@ -1204,7 +1225,7 @@ impl Ledger {
              ORDER BY id ASC
              LIMIT ?5"
         } else {
-            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
+            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to, refs_json
              FROM board_messages
              WHERE project = ?1
                AND id > ?2
@@ -1234,6 +1255,13 @@ impl Ledger {
                         created_epoch: r.get(9)?,
                         kind: r.get(10)?,
                         to: r.get(11)?,
+                        refs: serde_json::from_str(&r.get::<_, String>(12)?).map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                12,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?,
                     })
                 },
             )?
@@ -1611,7 +1639,7 @@ impl Ledger {
         let recent_cutoff = now_epoch - 900; // last 15 minutes when since_id is 0
         let like_pat = format!("%\"{agent}\"%");
         let mut msg_stmt = tx.prepare(
-            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
+            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to, refs_json
              FROM board_messages
              WHERE project = ?1
                AND id > ?2
@@ -1640,6 +1668,13 @@ impl Ledger {
                         created_epoch: r.get(9)?,
                         kind: r.get(10)?,
                         to: r.get(11)?,
+                        refs: serde_json::from_str(&r.get::<_, String>(12)?).map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                12,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?,
                     })
                 },
             )?
@@ -2304,6 +2339,7 @@ mod tests {
         let spoof = ledger.board_post_message(
             &vm2,
             &BoardPostMessageReq {
+                refs: Vec::new(),
                 kind: None,
                 to: None,
                 project: "daybook".into(),
@@ -2364,6 +2400,7 @@ mod tests {
             .board_post_message(
                 &vm1,
                 &BoardPostMessageReq {
+                    refs: Vec::new(),
                     kind: None,
                     to: None,
                     project: "daybook".into(),
@@ -2487,6 +2524,7 @@ mod tests {
             .board_post_message(
                 &vm2,
                 &BoardPostMessageReq {
+                    refs: Vec::new(),
                     kind: None,
                     to: None,
                     project: "daybook".into(),
@@ -2635,6 +2673,7 @@ mod tests {
                 .board_post_message(
                     &vm1,
                     &BoardPostMessageReq {
+                        refs: Vec::new(),
                         kind: None,
                         to: None,
                         project: reserved.into(),
@@ -2666,6 +2705,7 @@ mod tests {
             .board_post_message(
                 &vm1,
                 &BoardPostMessageReq {
+                    refs: Vec::new(),
                     kind: None,
                     to: None,
                     project: "other-repo".into(),

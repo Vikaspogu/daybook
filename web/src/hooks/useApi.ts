@@ -425,7 +425,13 @@ export type BoardChannel = 'general' | 'handoff' | 'blocker' | 'review'
 export type BoardMessageKind = 'chat' | 'question' | 'discovery' | 'pitfall' | 'decision' | 'handoff'
 export type BoardDeliveryStatus = 'pending' | 'delivered' | 'acknowledged'
 
+export type BoardRef =
+  | { type: 'repo'; repo: string; path: string; commit: string; start_line?: number; end_line?: number }
+  | { type: 'url'; url: string }
+  | { type: 'ledger'; uri: string }
+
 export interface BoardMessage {
+  refs?: BoardRef[]
   kind: BoardMessageKind
   to?: string | null
   id: number

@@ -449,6 +449,10 @@ pub enum BoardAction {
         #[arg(long, default_value = "chat", value_parser = ["chat", "question", "discovery", "pitfall", "decision", "handoff"])]
         kind: String,
 
+        /// Reference JSON object (repo, url, or ledger), repeat up to 10 times
+        #[arg(long = "ref", value_parser = |s: &str| serde_json::from_str::<crate::board::refs::BoardRef>(s))]
+        refs: Vec<crate::board::refs::BoardRef>,
+
         /// Parent message id for threaded replies
         #[arg(long)]
         reply_to: Option<i64>,
@@ -587,9 +591,18 @@ mod tests {
                 "Review ready",
             ],
             vec!["daybook", "board", "messages", "--channel", "review"],
+            vec![
+                "daybook",
+                "board",
+                "post",
+                "--ref",
+                r#"{"type":"url","url":"https://example.com"}"#,
+                "See link",
+            ],
         ] {
             assert!(Cli::try_parse_from(args).is_ok());
         }
+        assert!(Cli::try_parse_from(["daybook", "board", "post", "--ref", "nope", "x"]).is_err());
     }
 
     #[test]

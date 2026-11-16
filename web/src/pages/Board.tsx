@@ -550,6 +550,15 @@ export function Board() {
         {msgAgent?.current_task && <div className="text-[11px] text-slate-300 truncate">{formatCurrentTask(m.project, msgAgent.current_task, msgAgent.branch)}</div>}
         {m.parent_id && <div className="text-[10px] font-mono text-slate-400">Reply to #{m.parent_id}</div>}
         <MessageText body={m.body} />
+        {!!m.refs?.length && <ul aria-label="References" className="text-xs font-mono text-slate-300 break-all space-y-1">
+          {m.refs.map((ref, index) => <li key={index}>
+            {ref.type === 'url' && isSafeHttpUrl(ref.url)
+              ? <a href={ref.url} target="_blank" rel="noopener noreferrer" className="text-sky-300 hover:underline">{ref.url}</a>
+              : ref.type === 'repo'
+                ? `${ref.repo}:${ref.path}@${ref.commit}${ref.start_line ? `:L${ref.start_line}${ref.end_line ? `-L${ref.end_line}` : ''}` : ''}`
+                : ref.type === 'ledger' ? ref.uri : ref.url}
+          </li>)}
+        </ul>}
         <button type="button" disabled={posting} className="text-[11px] text-sky-300 hover:underline"
           onClick={() => {
             setReplyTarget(m)
