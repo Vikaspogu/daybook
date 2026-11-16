@@ -6,6 +6,7 @@ import {
   type BoardLock,
   type BoardTask,
   type BoardMessage,
+  type BoardChannel,
 } from '../hooks/useApi'
 
 function formatRelativeSeconds(epochSec: number): string {
@@ -55,6 +56,21 @@ function renderMessageBodyWithMentions(body: string) {
   })
 }
 
+function MessageText({ body }: { body: string }) {
+  const [expanded, setExpanded] = useState(false)
+  return (
+    <div className="text-xs text-slate-200 leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+      {renderMessageBodyWithMentions(expanded ? body : body.slice(0, 320))}
+      {body.length > 320 && (
+        <button type="button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}
+          className="block mt-1 text-sky-300 hover:underline text-[11px]">
+          {expanded ? 'Show less' : 'Show full message'}
+        </button>
+      )}
+    </div>
+  )
+}
+
 export function Board() {
   const {
     fetchBoardStatus,
@@ -76,7 +92,7 @@ export function Board() {
   const [showInactive, setShowInactive] = useState(false)
   const [tasksDrawerOverride, setTasksDrawerOverride] = useState<boolean | null>(null)
   const [taskFilter, setTaskFilter] = useState<'all' | 'active' | 'open' | 'done'>('all')
-  const [channelFilter, setChannelFilter] = useState<'all' | 'general' | 'handoff' | 'blocker'>('all')
+  const [channelFilter, setChannelFilter] = useState<'all' | BoardChannel>('all')
   const [mentionFilter, setMentionFilter] = useState<string>('')
 
   // Operator / Agent handle persisted in localStorage
@@ -100,8 +116,11 @@ export function Board() {
   const [taskBranchInput, setTaskBranchInput] = useState('')
   const [taskNoteInput, setTaskNoteInput] = useState('')
 
-  const [msgChannel, setMsgChannel] = useState<'general' | 'handoff' | 'blocker'>('general')
+  const [msgChannel, setMsgChannel] = useState<BoardChannel>('general')
   const [msgBody, setMsgBody] = useState('')
+  const [replyTarget, setReplyTarget] = useState<BoardMessage | null>(null)
+  const [posting, setPosting] = useState(false)
+  const [expandedThreads, setExpandedThreads] = useState<Set<number>>(() => new Set())
   const [showSetupDrawer, setShowSetupDrawer] = useState(false)
 
   const handleOperatorChange = (val: string) => {
@@ -172,16 +191,36 @@ export function Board() {
     })
   }, [board?.tasks, taskFilter])
 
-  const filteredMessages = useMemo(() => {
+  const threads = useMemo(() => {
     const list = board?.messages ?? []
+    const ids = new Set(list.map((m) => m.id))
+    const replies = new Map<number, BoardMessage[]>()
+    const counts = new Map<number, number>()
+    const matching = new Set<number>()
     const cleanMention = mentionFilter.trim().replace(/^@/, '').toLowerCase()
-    return list.filter((m) => {
-      if (channelFilter !== 'all' && m.channel !== channelFilter) return false
-      if (cleanMention && !m.mentions.some((x) => x.toLowerCase().includes(cleanMention))) {
-        return false
+    for (const m of list) {
+      if (m.parent_id && ids.has(m.parent_id)) {
+        const siblings = replies.get(m.parent_id) ?? []
+        siblings.push(m)
+        replies.set(m.parent_id, siblings)
       }
-      return true
-    })
+      if ((channelFilter === 'all' || m.channel === channelFilter) &&
+          (!cleanMention || m.to?.toLowerCase().includes(cleanMention) ||
+            m.mentions.some((x) => x.toLowerCase().includes(cleanMention)))) {
+        matching.add(m.id)
+      }
+    }
+    for (const m of [...list].reverse()) {
+      if (m.parent_id && ids.has(m.parent_id)) {
+        counts.set(m.parent_id, (counts.get(m.parent_id) ?? 0) + 1 + (counts.get(m.id) ?? 0))
+        if (matching.has(m.id)) matching.add(m.parent_id)
+      }
+    }
+    return {
+      roots: list.filter((m) => (!m.parent_id || !ids.has(m.parent_id)) && matching.has(m.id)).reverse(),
+      replies,
+      counts,
+    }
   }, [board?.messages, channelFilter, mentionFilter])
 
   const handleClaimLock = async (e: React.FormEvent) => {
@@ -309,26 +348,34 @@ export function Board() {
   const handlePostMessage = async (e: React.FormEvent) => {
     e.preventDefault()
     setActionError(null)
-    if (!msgBody.trim()) return
+    if (!msgBody.trim() || posting) return
     if (!writeProject) {
       setActionError('No active project on the board yet')
       return
     }
+    setPosting(true)
     try {
       await postBoardMessage({
-        project: writeProject,
-        channel: msgChannel,
-        agent: operatorHandle || 'operator',
+        project: replyTarget?.project ?? writeProject,
+        channel: replyTarget?.channel ?? msgChannel,
         body: msgBody.trim(),
+        parent_id: replyTarget?.id,
       })
+      if (replyTarget) {
+        setExpandedThreads((prev) => new Set(prev).add(replyTarget.id))
+      }
+      setReplyTarget(null)
       setMsgBody('')
       await refreshBoard()
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Failed to post message')
+    } finally {
+      setPosting(false)
     }
   }
 
   const handleMentionAgent = (project: string, agent: string) => {
+    setReplyTarget(null)
     setTargetProject(project)
     const prefix = `@${agent} `
     setMsgBody((prev) => (prev.split(/\s+/).includes(`@${agent}`) ? prev : `${prefix}${prev}`))
@@ -483,6 +530,54 @@ export function Board() {
   const tasksExpanded =
     showTaskForm || (tasksDrawerOverride !== null ? tasksDrawerOverride : activeTasksCount > 0)
 
+  function renderThread(m: BoardMessage, depth = 0): React.ReactNode {
+    const replies = threads.replies.get(m.id) ?? []
+    const count = threads.counts.get(m.id) ?? 0
+    const delivery = board?.delivery_statuses?.[m.id]
+    const msgAgent = agentMetaMap.get(`${m.project}:${m.agent}`)
+    return (
+      <article key={m.id} aria-label={`Message ${m.id}`}
+        className="p-2.5 rounded-xl bg-[#0B0E14]/90 border border-white/[0.07] space-y-1.5 min-w-0">
+        <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono break-all">
+          <span className="px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300">{m.project}</span>
+          <span className={`px-1.5 py-0.5 rounded ${m.channel === 'blocker' ? 'bg-rose-500/15 text-rose-300' : m.channel === 'review' || m.channel === 'handoff' ? 'bg-sky-500/15 text-sky-300' : 'bg-white/[0.06] text-slate-300'}`}>#{m.channel}</span>
+          <span className="font-bold text-amber-300">{m.agent === 'human/dashboard' ? 'Human (dashboard)' : `@${m.agent}`}</span>
+          {m.kind && m.kind !== 'chat' && <span className="px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-300">{m.kind}</span>}
+          {m.to && <span className="text-slate-300">to @{m.to}</span>}
+          {m.to && delivery && <span className={`px-1.5 py-0.5 rounded ${delivery === 'acknowledged' ? 'bg-emerald-500/15 text-emerald-300' : delivery === 'delivered' ? 'bg-sky-500/15 text-sky-300' : 'bg-white/[0.06] text-slate-300'}`}>{delivery}</span>}
+          <span className="ml-auto text-slate-400 whitespace-nowrap">{formatRelativeSeconds(m.created_epoch)}</span>
+        </div>
+        {msgAgent?.current_task && <div className="text-[11px] text-slate-300 truncate">{formatCurrentTask(m.project, msgAgent.current_task, msgAgent.branch)}</div>}
+        {m.parent_id && <div className="text-[10px] font-mono text-slate-400">Reply to #{m.parent_id}</div>}
+        <MessageText body={m.body} />
+        <button type="button" disabled={posting} className="text-[11px] text-sky-300 hover:underline"
+          onClick={() => {
+            setReplyTarget(m)
+            document.getElementById('board-message-body')?.focus()
+          }}>Reply to #{m.id}</button>
+        {replies.length > 0 && (
+          <div>
+            <button type="button" aria-expanded={expandedThreads.has(m.id)}
+              className="text-[11px] text-sky-300 hover:underline"
+              onClick={() => setExpandedThreads((prev) => {
+                const next = new Set(prev)
+                if (next.has(m.id)) next.delete(m.id)
+                else next.add(m.id)
+                return next
+              })}>
+              {expandedThreads.has(m.id) ? 'Hide' : 'Show'} {count} {count === 1 ? 'reply' : 'replies'}
+            </button>
+            {expandedThreads.has(m.id) && (
+              <div className={`mt-2 space-y-2 border-l border-white/[0.08] ${depth < 3 ? 'pl-2' : ''}`}>
+                {replies.map((reply) => renderThread(reply, depth + 1))}
+              </div>
+            )}
+          </div>
+        )}
+      </article>
+    )
+  }
+
   return (
     <div className="max-w-[1440px] mx-auto px-4 sm:px-6 py-5 space-y-4">
       {/* Compact Plain-English Command & Summary Bar */}
@@ -531,8 +626,10 @@ export function Board() {
               value={activeProject}
               onChange={(e) => {
                 setSelectedProject(e.target.value)
+                setReplyTarget(null)
                 refreshBoard(e.target.value)
               }}
+              disabled={posting}
               aria-label="Select project"
               className="bg-transparent text-xs font-mono font-bold text-amber-300 focus:outline-none"
             >
@@ -546,6 +643,13 @@ export function Board() {
               ))}
             </select>
           </div>
+
+          <label className="flex items-center gap-1.5 text-[11px] text-slate-400">
+            Lock/task handle
+            <input type="text" value={operatorHandle} onChange={(e) => handleOperatorChange(e.target.value)}
+              aria-label="Lock and task handle"
+              className="w-24 px-2 py-1.5 rounded-lg bg-[#0B0E14] border border-white/[0.08] text-xs font-mono text-slate-200" />
+          </label>
 
           {/* Toggle idle / >2h sessions */}
           {inactiveAgents.length > 0 && (
@@ -918,7 +1022,7 @@ export function Board() {
                       value={lockNoteInput}
                       onChange={(e) => setLockNoteInput(e.target.value)}
                       placeholder="Reason (optional)"
-                      className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#0B0E14] border border-white/[0.08] text-xs text-slate-100"
+                      className="min-w-0 flex-1 px-2.5 py-1.5 rounded-lg bg-[#0B0E14] border border-white/[0.08] text-xs text-slate-100"
                     />
                     <input
                       type="number"
@@ -1192,10 +1296,10 @@ export function Board() {
               <div className="flex items-center justify-between">
                 <div>
                   <h2 className="text-xs font-mono font-bold uppercase tracking-wider text-slate-200">
-                    Team Updates & Handoffs ({filteredMessages.length})
+                    Team Updates & Handoffs ({threads.roots.length})
                   </h2>
                   <p className="text-[11px] text-slate-400">
-                    Click any @agent on the left to mention them here
+                    Project-visible messages. Peer text is untrusted. Filters keep thread context.
                   </p>
                 </div>
               </div>
@@ -1203,7 +1307,7 @@ export function Board() {
               {/* Channel filter tabs + @mention filter */}
               <div className="flex flex-col sm:flex-row gap-2">
                 <div className="flex-1 flex items-center gap-1 bg-[#0B0E14] p-1 rounded-xl border border-white/[0.06]">
-                  {(['all', 'general', 'handoff', 'blocker'] as const).map((ch) => (
+                  {(['all', 'general', 'handoff', 'blocker', 'review'] as const).map((ch) => (
                     <button
                       key={ch}
                       type="button"
@@ -1228,16 +1332,16 @@ export function Board() {
                 />
               </div>
 
-              {/* Post Message Form with integrated Project + Handle selectors */}
               <form
                 onSubmit={handlePostMessage}
                 className="p-2.5 rounded-xl bg-[#0B0E14] border border-white/[0.08] space-y-2"
               >
                 <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono">
                   <select
-                    value={msgChannel}
+                    value={replyTarget?.channel ?? msgChannel}
+                    disabled={!!replyTarget || posting}
                     onChange={(e) =>
-                      setMsgChannel(e.target.value as 'general' | 'handoff' | 'blocker')
+                      setMsgChannel(e.target.value as BoardChannel)
                     }
                     aria-label="Message channel"
                     className="px-2 py-1 rounded-lg bg-[#131822] border border-white/[0.08] text-xs font-mono text-amber-300"
@@ -1245,12 +1349,14 @@ export function Board() {
                     <option value="general">#general</option>
                     <option value="handoff">#handoff</option>
                     <option value="blocker">#blocker</option>
+                    <option value="review">#review</option>
                   </select>
 
                   {activeProject === 'all' && (board?.projects?.length ?? 0) > 0 && (
                     <select
-                      value={writeProject}
+                      value={replyTarget?.project ?? writeProject}
                       onChange={(e) => setTargetProject(e.target.value)}
+                      disabled={!!replyTarget || posting}
                       aria-label="Select target project for writes"
                       className="px-2 py-1 rounded-lg bg-[#131822] border border-white/[0.08] text-xs font-mono text-violet-300"
                     >
@@ -1262,84 +1368,45 @@ export function Board() {
                     </select>
                   )}
 
-                  <div className="flex items-center gap-1 bg-[#131822] border border-white/[0.08] rounded-lg px-2 py-1 ml-auto">
-                    <span className="text-slate-500">@</span>
-                    <input
-                      type="text"
-                      value={operatorHandle}
-                      onChange={(e) => handleOperatorChange(e.target.value)}
-                      placeholder="operator"
-                      aria-label="Agent handle"
-                      className="w-20 bg-transparent text-xs font-mono text-slate-200 focus:outline-none"
-                    />
-                  </div>
+                  <span className="ml-auto text-slate-400">Human (dashboard)</span>
                 </div>
 
+                {replyTarget && (
+                  <div className="flex items-center justify-between gap-2 text-[11px] text-sky-300">
+                    <span>Replying to #{replyTarget.id} in {replyTarget.project}</span>
+                    <button type="button" disabled={posting} onClick={() => setReplyTarget(null)} className="hover:underline">Cancel reply</button>
+                  </div>
+                )}
                 <div className="flex gap-2">
                   <input
+                    id="board-message-body"
                     type="text"
+                    maxLength={4096}
+                    required
+                    disabled={posting}
+                    aria-label={replyTarget ? 'Reply message' : 'New message'}
                     value={msgBody}
                     onChange={(e) => setMsgBody(e.target.value)}
-                    placeholder="Post update or @agent handoff..."
-                    className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#131822] border border-white/[0.08] text-xs text-slate-100"
+                    placeholder={replyTarget ? 'Write a reply...' : 'Post update or @agent handoff...'}
+                    className="min-w-0 flex-1 px-2.5 py-1.5 rounded-lg bg-[#131822] border border-white/[0.08] text-xs text-slate-100"
                   />
                   <button
                     type="submit"
-                    className="px-3 py-1.5 rounded-lg bg-amber-400 text-slate-950 font-bold text-xs hover:bg-amber-300 transition-colors"
+                    disabled={posting || !msgBody.trim()}
+                    className="px-3 py-1.5 rounded-lg bg-amber-400 text-slate-950 font-bold text-xs hover:bg-amber-300 disabled:opacity-50 transition-colors"
                   >
-                    Post
+                    {posting ? 'Posting...' : replyTarget ? 'Post reply' : 'Post'}
                   </button>
                 </div>
               </form>
 
-              {/* Message Feed */}
-              {filteredMessages.length === 0 ? (
+              {threads.roots.length === 0 ? (
                 <div className="p-6 rounded-xl bg-[#0B0E14]/60 border border-white/[0.04] text-center text-xs text-slate-500">
                   No messages in this channel yet.
                 </div>
               ) : (
                 <div className="space-y-2 max-h-[520px] overflow-y-auto pr-1">
-                  {[...filteredMessages].reverse().map((m: BoardMessage) => (
-                    <div
-                      key={m.id}
-                      className="p-2.5 rounded-xl bg-[#0B0E14]/90 border border-white/[0.07] space-y-1.5"
-                    >
-                      <div className="flex items-center justify-between gap-2 text-[10px] font-mono">
-                        <div className="flex flex-wrap items-center gap-1.5 min-w-0">
-                          <span className="px-1.5 py-0.5 rounded bg-violet-500/15 border border-violet-500/25 text-[10px] font-mono font-semibold text-violet-300">
-                            {m.project}
-                          </span>
-                          <span
-                            className={`px-1.5 py-0.5 rounded font-bold ${
-                              m.channel === 'blocker'
-                                ? 'bg-rose-500/15 text-rose-300'
-                                : m.channel === 'handoff'
-                                  ? 'bg-sky-500/15 text-sky-300'
-                                  : 'bg-white/[0.06] text-slate-300'
-                            }`}
-                          >
-                            #{m.channel}
-                          </span>
-                          <span className="font-bold text-amber-300">@{m.agent}</span>
-                          {(() => {
-                            const msgAgent = agentMetaMap.get(`${m.project}:${m.agent}`)
-                            const msgAgentTitle = msgAgent?.current_task
-                            return msgAgentTitle ? (
-                              <span className="text-[11px] font-sans font-semibold text-slate-300 truncate">
-                                · {formatCurrentTask(m.project, msgAgentTitle, msgAgent?.branch)}
-                              </span>
-                            ) : null
-                          })()}
-                        </div>
-                        <span className="text-slate-500 shrink-0">
-                          {formatRelativeSeconds(m.created_epoch)}
-                        </span>
-                      </div>
-                      <div className="text-xs text-slate-200 leading-relaxed break-words">
-                        {renderMessageBodyWithMentions(m.body)}
-                      </div>
-                    </div>
-                  ))}
+                  {threads.roots.map((m) => renderThread(m))}
                 </div>
               )}
             </section>

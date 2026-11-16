@@ -576,6 +576,23 @@ mod tests {
     use clap::CommandFactory;
 
     #[test]
+    fn board_cli_accepts_review_channel() {
+        for args in [
+            vec![
+                "daybook",
+                "board",
+                "post",
+                "--channel",
+                "review",
+                "Review ready",
+            ],
+            vec!["daybook", "board", "messages", "--channel", "review"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+    }
+
+    #[test]
     fn cli_debug_assert_has_no_flag_collisions() {
         Cli::command().debug_assert();
     }

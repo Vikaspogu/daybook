@@ -376,6 +376,8 @@ CREATE INDEX IF NOT EXISTS idx_board_messages_project_id
     ON board_messages(project, id DESC);
 CREATE INDEX IF NOT EXISTS idx_board_messages_project_channel_id
     ON board_messages(project, channel, id DESC);
+CREATE INDEX IF NOT EXISTS idx_board_messages_project_parent
+    ON board_messages(project, parent_id);
 CREATE TABLE IF NOT EXISTS board_sessions (
     id TEXT PRIMARY KEY,
     project TEXT NOT NULL,

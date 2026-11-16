@@ -421,7 +421,13 @@ export interface BoardTask {
   updated_epoch: number
 }
 
+export type BoardChannel = 'general' | 'handoff' | 'blocker' | 'review'
+export type BoardMessageKind = 'chat' | 'question' | 'discovery' | 'pitfall' | 'decision' | 'handoff'
+export type BoardDeliveryStatus = 'pending' | 'delivered' | 'acknowledged'
+
 export interface BoardMessage {
+  kind: BoardMessageKind
+  to?: string | null
   id: number
   project: string
   channel: string
@@ -441,6 +447,7 @@ export interface BoardStatusData {
   locks: BoardLock[]
   tasks: BoardTask[]
   messages: BoardMessage[]
+  delivery_statuses: Record<string, BoardDeliveryStatus>
   unread_mentions: BoardMessage[]
   next_since_id: number
 }
@@ -587,10 +594,10 @@ export function useApi() {
   )
 
   const postBoardMessage = useCallback(
-    (payload: { project: string; channel: string; agent: string; body: string; parent_id?: number }) =>
+    (payload: { project: string; channel: string; body: string; parent_id?: number }) =>
       request<BoardMessage>('/board/messages', {
         method: 'POST',
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...payload, dashboard: true }),
       }),
     [request]
   )
