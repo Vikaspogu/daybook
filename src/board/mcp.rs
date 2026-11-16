@@ -633,6 +633,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_posts_to_review_channel_and_advertises_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.storage.path = tmp.path().join("storage");
+        config.server.db_path = tmp.path().join("board.db");
+        let client = BoardClient::from_config(&config, true).unwrap();
+        let identity = resolve_board_identity(tmp.path(), None, None);
+        let result = call_session_tool(
+            &client,
+            &identity,
+            &config,
+            "review-runtime",
+            "daybook_board_post",
+            json!({"channel":"review","body":"Ready for review"}),
+        )
+        .await;
+        assert_eq!(result["isError"], false, "{result}");
+        let posted: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(posted["channel"], "review");
+        let definitions = mcp_tool_definitions();
+        let post = definitions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "daybook_board_post")
+            .unwrap();
+        assert!(post["inputSchema"]["properties"]["channel"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("review")));
+    }
+
+    #[tokio::test]
     async fn mcp_handoff_posts_durable_kind_with_session_identity() {
         let tmp = tempfile::tempdir().unwrap();
         let mut config = crate::config::Config::default();

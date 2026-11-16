@@ -115,6 +115,8 @@ pub struct BoardStatusSnapshot {
     pub locks: Vec<BoardLockRow>,
     pub tasks: Vec<BoardTaskRow>,
     pub messages: Vec<BoardMessageRow>,
+    #[serde(default)]
+    pub delivery_statuses: std::collections::BTreeMap<i64, String>,
     pub unread_mentions: Vec<BoardMessageRow>,
     pub next_since_id: i64,
 }
@@ -767,6 +769,7 @@ impl Ledger {
                 locks: Vec::new(),
                 tasks: Vec::new(),
                 messages: Vec::new(),
+                delivery_statuses: Default::default(),
                 unread_mentions: Vec::new(),
                 next_since_id: since_id.unwrap_or(0),
             });
@@ -981,6 +984,58 @@ impl Ledger {
             floor_id.max(max_id)
         };
 
+        // Complete threads around the recent feed, including parents outside its 50-message window.
+        if floor_id == 0 && !messages.is_empty() {
+            let ids = messages
+                .iter()
+                .map(|m| m.id.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut stmt = conn.prepare(&format!(
+                "WITH RECURSIVE ancestors(id, parent_id, project) AS (
+                    SELECT id, parent_id, project FROM board_messages WHERE id IN ({ids})
+                    UNION
+                    SELECT m.id, m.parent_id, m.project FROM board_messages m
+                    JOIN ancestors a ON m.id = a.parent_id AND m.project = a.project
+                ), threads(id, project) AS (
+                    SELECT id, project FROM ancestors
+                    UNION
+                    SELECT m.id, m.project FROM board_messages m
+                    JOIN threads t ON m.parent_id = t.id AND m.project = t.project
+                    LIMIT 2000
+                )
+                SELECT m.id, m.project, channel, agent, machine, body, mentions_json, parent_id,
+                       created_utc, created_epoch, kind, addressed_to
+                FROM board_messages m JOIN threads t ON m.id = t.id ORDER BY m.id DESC LIMIT 500"
+            ))?;
+            // ponytail: walk at most 2000 thread rows and return the newest 500 per snapshot;
+            // replies beyond that need thread pagination.
+            messages = stmt
+                .query_map([], map_msg)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            messages.reverse();
+        }
+        let mut delivery_statuses = std::collections::BTreeMap::new();
+        // Same handle can have several sessions (restarts); the strongest status wins (last insert).
+        if !messages.is_empty() {
+            let ids = messages
+                .iter()
+                .map(|m| m.id.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT m.id, CASE WHEN d.acked_at IS NOT NULL THEN 'acknowledged'
+                    WHEN d.delivered_at IS NOT NULL THEN 'delivered' ELSE 'pending' END
+                 FROM board_messages m JOIN board_deliveries d ON d.message_id = m.id
+                 JOIN board_sessions s ON s.id = d.recipient_session_id
+                 WHERE m.id IN ({ids}) AND s.handle = m.addressed_to AND s.project = m.project
+                 ORDER BY d.acked_at IS NOT NULL, d.delivered_at IS NOT NULL"
+            ))?;
+            delivery_statuses = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+        }
+
         let unread_mentions = if let Some(needle) = validated_agent {
             let like_pat = format!("%\"{needle}\"%");
             let rows: Vec<BoardMessageRow> = if is_all_projects {
@@ -1020,6 +1075,7 @@ impl Ledger {
             locks,
             tasks,
             messages,
+            delivery_statuses,
             unread_mentions,
             next_since_id,
         })
@@ -2001,9 +2057,31 @@ impl Ledger {
         caller: &BoardCaller,
         req: &BoardPostMessageReq,
     ) -> Result<BoardMessageRow> {
+        self.post_board_message(caller, req, false)
+    }
+
+    pub fn board_dashboard_post(
+        &self,
+        caller: &BoardCaller,
+        req: &BoardPostMessageReq,
+    ) -> Result<BoardMessageRow> {
+        self.post_board_message(caller, req, true)
+    }
+
+    fn post_board_message(
+        &self,
+        caller: &BoardCaller,
+        req: &BoardPostMessageReq,
+        dashboard: bool,
+    ) -> Result<BoardMessageRow> {
         let proj = validate_identifier(&req.project, "project")?;
         let channel = validate_channel(req.channel.as_deref())?;
-        let agent = validate_agent_handle(&req.agent)?;
+        // The slash cannot occur in a validated agent handle, keeping human posts distinct.
+        let agent = if dashboard {
+            "human/dashboard".into()
+        } else {
+            validate_agent_handle(&req.agent)?
+        };
         let body = req.body.trim();
         if body.is_empty() {
             bail!("message body must not be empty");
@@ -2019,7 +2097,9 @@ impl Ledger {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         prune_board_tx(&tx, &proj, now_epoch)?;
-        ensure_and_touch_agent_tx(&tx, caller, &proj, &agent, &now_utc, now_epoch)?;
+        if !dashboard {
+            ensure_and_touch_agent_tx(&tx, caller, &proj, &agent, &now_utc, now_epoch)?;
+        }
 
         let mut msg = post_message_in_tx(
             &tx,

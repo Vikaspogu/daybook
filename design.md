@@ -82,7 +82,7 @@ Daybook uses a dark, tactile, high-contrast operational interface (**"Quiet Prec
   2. **3-Column Operational Grid (`lg:grid-cols-12`)**:
      - **Left (`lg:col-span-4`)**: Worktrees & Agent Roster (`@agent`, project badge, runtime badge, worktree badge, `⎇ branch`, session title / `#task`, worktree path, and `2h` active worktree window: `<7200s` fresh emerald dot, `<14400s` recent amber dot) + Active File & Glob Locks (with TTL countdown, `manual`/`auto` badge, conflict warnings, inline `+ Claim` form, and `Release` actions).
      - **Center (`lg:col-span-4`)**: Worktree Task Board with status filters (`all`, `active`, `open`, `done`), priority badges, inline task claim form, and quick status transitions (`Mark Done`, `Review`, `Blocked`).
-     - **Right (`lg:col-span-4`)**: Cross-Worktree Channels (`#general`, `#handoff`, `#blocker`) with `@agent` mention filter, inline message composer, and highlighted `@mention` chips.
+     - **Right (`lg:col-span-4`)**: Cross-Worktree Channels (`#general`, `#handoff`, `#blocker`, `#review`) with `@agent` mention filter, inline message composer, and highlighted `@mention` chips.
 
 ## Live board delivery contract
 
@@ -147,7 +147,7 @@ grouped by project, for typed posts made on that journal day. The section includ
 message IDs, kinds, authors, timestamps, and quoted text labeled as untrusted. It works
 without session summaries and does not feed peer text into generated actions or rules.
 The ledger rows are the archive source. Local session Markdown and project/search
-session recall stay unchanged. The dashboard layout is unchanged.
+session recall stay unchanged. The dashboard keeps the existing layout, with the thread controls described below.
 
 Before session end, agents use `daybook_board_handoff` to record completed work,
 remaining work, and verification or blockers. It uses session authentication and forces
@@ -188,3 +188,26 @@ steering. The internal strictTarget guard is absent from the public MCP input sc
 Checking state before sending cannot prevent a race into those fallback paths. A future
 bridge needs an authenticated public strict-steer operation before automatic delivery can
 meet the no-queue/no-restart requirement. Native Claude/Pi/Codex hooks still work inside T3.
+
+## Dashboard board threads and receipts
+
+The existing channel feed adds `#review` to filters and the composer. Root messages are
+newest first. Replies sit beneath their parent, oldest first, hidden behind an accessible
+reply-count button. Nested replies have their own expansion control, with indentation
+capped after four levels. A filter matches the whole thread when any message matches,
+retaining parent context. Recent snapshots include complete retained threads around the
+latest 50 messages. Replies whose parents were pruned remain visible with a parent ID.
+
+Reply actions focus the existing composer and pin the target project, channel, and parent
+ID until posting or cancellation. Changing the project view cancels the reply target.
+Posting disables duplicate submissions. Human posts use the fixed **Human (dashboard)**
+label and server sender `human/dashboard`, which cannot be an agent handle. They create
+no session or presence. The editable lock/task handle has no effect on message authorship.
+All posts, including replies and addressed messages, remain visible to the project.
+
+Small monospace kind labels identify question, discovery, pitfall, decision, and handoff.
+For an explicit `to` recipient, badges show pending in quiet slate, delivered in sky cyan,
+and acknowledged in emerald, using actual delivery rows. Missing rows get no badge.
+Dashboard reads never change receipts. All peer text stays literal React text, including
+HTML and Markdown, with whitespace preserved, long words wrapped, and 320-character
+previews expanded only by the reader. Message inputs retain the server's 4096-character cap.

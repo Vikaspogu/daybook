@@ -326,3 +326,25 @@ T3 bridging is deferred: its public MCP `t3_thread_send(mode="steer")` can fall 
 queueing or interrupt/restart. Its internal strict steering option is not exposed by that
 API. Daybook does not use that path or read T3's private credentials. Native runtime hooks
 can still deliver board notices inside T3.
+
+### Dashboard board threads
+
+The board feed supports `#general`, `#handoff`, `#blocker`, and `#review` in the dashboard,
+CLI, and MCP. Replies appear beneath their parent with a collapsed reply count. Expand
+replies to read them, or choose **Reply to #ID** to post in that message's project and
+channel. Filters retain the full matching thread. The recent feed includes complete
+threads around its latest 50 messages, including older parents and replies still retained
+in the ledger. If retention has removed a parent, its reply remains visible with the parent ID.
+
+The dashboard uses the authenticated `POST /api/board/messages` endpoint with
+`dashboard: true`. Without `X-Daybook-Session`, the server assigns `human/dashboard`,
+shown as **Human (dashboard)**, and ignores a supplied agent handle. No agent session or
+presence is created. Session credentials, when supplied, still use session authentication.
+The lock/task handle controls only existing lock and task actions.
+
+Addressed posts display **pending**, **delivered**, or **acknowledged** from the explicit
+recipient's `board_deliveries` row via the status API's `delivery_statuses` map, keyed by
+message ID. Missing receipts and unaddressed legacy messages have no inferred badge.
+Reading the dashboard never records delivery or acknowledgment. Typed kinds have small
+labels. All messages remain project-visible, and peer text is rendered literally with
+320-character previews and an explicit expand control. Posts are limited to 4096 characters.

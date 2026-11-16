@@ -217,16 +217,27 @@ pub async fn post_board_tasks_update(
     }
 }
 
+#[derive(serde::Deserialize)]
+pub struct BoardPostRequest {
+    #[serde(flatten)]
+    message: BoardPostMessageReq,
+    #[serde(default)]
+    dashboard: bool,
+}
+
 /// POST /api/board/messages
 pub async fn post_board_messages(
     State(state): State<Arc<AppState>>,
     Extension(authed): Extension<Authed>,
     headers: axum::http::HeaderMap,
-    Json(req): Json<BoardPostMessageReq>,
+    Json(post): Json<BoardPostRequest>,
 ) -> Response {
+    let req = post.message;
     let caller = caller_from_authed(&authed);
     let result = if headers.contains_key("x-daybook-session") {
         session_credential(&headers).and_then(|c| state.ledger.board_session_post(c, &req))
+    } else if post.dashboard {
+        state.ledger.board_dashboard_post(&caller, &req)
     } else {
         state.ledger.board_post_message(&caller, &req)
     };
@@ -498,6 +509,254 @@ mod tests {
             .await
             .unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn dashboard_threads_review_and_delivery_statuses() {
+        use serde_json::json;
+        let (app, owner, _, _tmp) = test_app();
+        let (_, session) = session_http(&app, Some(&owner), None, "POST", "/api/board/sessions",
+            json!({"project":"repo","agent":"pi","runtime":"pi","cwd":"/repo","branch":"main","machine":"test"})).await;
+        let session = &session["data"];
+        let payload = json!({"dashboard":true,"project":"repo","agent":session["handle"],"channel":"review","kind":"question","to":session["handle"],"body":"<img src=x onerror=alert(1)> **literal**"});
+        assert_eq!(
+            session_http(
+                &app,
+                None,
+                None,
+                "POST",
+                "/api/board/messages",
+                payload.clone()
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            session_http(
+                &app,
+                Some(&owner),
+                Some("wrong"),
+                "POST",
+                "/api/board/messages",
+                payload.clone()
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, parent) = session_http(
+            &app,
+            Some(&owner),
+            None,
+            "POST",
+            "/api/board/messages",
+            payload.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parent}");
+        let parent = &parent["data"];
+        assert_eq!(parent["agent"], "human/dashboard");
+        assert_eq!(parent["channel"], "review");
+        assert_eq!(parent["kind"], "question");
+        assert_eq!(parent["body"], payload["body"]);
+        let id = parent["id"].as_i64().unwrap();
+        let (_, full) = session_http(
+            &app,
+            Some(&owner),
+            None,
+            "GET",
+            &format!("/api/board/messages/{id}?project=repo"),
+            json!(null),
+        )
+        .await;
+        assert!(full["data"]["sender_session_id"].is_null());
+        let (_, wake) = session_http(
+            &app,
+            Some(&owner),
+            session["credential"].as_str(),
+            "GET",
+            "/api/board/inbox?wake=true",
+            json!(null),
+        )
+        .await;
+        assert!(wake["data"].as_array().unwrap().is_empty());
+        let mut reply = json!({"dashboard":true,"project":"repo","channel":"review","body":"first reply","parent_id":id});
+        let (status, posted_reply) = session_http(
+            &app,
+            Some(&owner),
+            None,
+            "POST",
+            "/api/board/messages",
+            reply.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{posted_reply}");
+        let reply_id = posted_reply["data"]["id"].as_i64().unwrap();
+        reply["parent_id"] = json!(reply_id);
+        reply["body"] = json!("nested reply");
+        assert_eq!(
+            session_http(
+                &app,
+                Some(&owner),
+                None,
+                "POST",
+                "/api/board/messages",
+                reply.clone()
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        reply["project"] = json!("other");
+        assert_eq!(
+            session_http(
+                &app,
+                Some(&owner),
+                None,
+                "POST",
+                "/api/board/messages",
+                reply.clone()
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        reply["project"] = json!("repo");
+        reply["parent_id"] = json!(999999);
+        assert_eq!(
+            session_http(
+                &app,
+                Some(&owner),
+                None,
+                "POST",
+                "/api/board/messages",
+                reply.clone()
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        for body in ["", &"x".repeat(4097)] {
+            let mut invalid = payload.clone();
+            invalid["body"] = json!(body);
+            assert_eq!(
+                session_http(
+                    &app,
+                    Some(&owner),
+                    None,
+                    "POST",
+                    "/api/board/messages",
+                    invalid
+                )
+                .await
+                .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let mut invalid = payload.clone();
+        invalid["channel"] = json!("invalid");
+        assert_eq!(
+            session_http(
+                &app,
+                Some(&owner),
+                None,
+                "POST",
+                "/api/board/messages",
+                invalid
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        for (receipt, expected) in [
+            (None, "pending"),
+            (Some("delivered"), "delivered"),
+            (Some("ack"), "acknowledged"),
+        ] {
+            if let Some(route) = receipt {
+                assert_eq!(
+                    session_http(
+                        &app,
+                        Some(&owner),
+                        session["credential"].as_str(),
+                        "POST",
+                        &format!("/api/board/{route}"),
+                        json!({"message_id":id})
+                    )
+                    .await
+                    .0,
+                    StatusCode::OK
+                );
+            }
+            for project in ["repo", "all"] {
+                let (_, snapshot) = session_http(
+                    &app,
+                    Some(&owner),
+                    None,
+                    "GET",
+                    &format!("/api/board/status?project={project}"),
+                    json!(null),
+                )
+                .await;
+                assert_eq!(
+                    snapshot["data"]["delivery_statuses"][id.to_string()],
+                    expected
+                );
+                assert!(snapshot["data"]["delivery_statuses"]
+                    .get(reply_id.to_string())
+                    .is_none());
+            }
+        }
+        let (_, listed) = session_http(
+            &app,
+            Some(&owner),
+            None,
+            "GET",
+            "/api/board/messages?project=repo&channel=review",
+            json!(null),
+        )
+        .await;
+        assert_eq!(listed["data"]["messages"].as_array().unwrap().len(), 3);
+        // An old parent and sibling still accompany a recent reply beyond the feed boundary.
+        for _ in 0..51 {
+            session_http(
+                &app,
+                Some(&owner),
+                None,
+                "POST",
+                "/api/board/messages",
+                json!({"dashboard":true,"project":"repo","body":"unrelated"}),
+            )
+            .await;
+        }
+        reply["parent_id"] = json!(id);
+        session_http(
+            &app,
+            Some(&owner),
+            None,
+            "POST",
+            "/api/board/messages",
+            reply,
+        )
+        .await;
+        let (_, snapshot) = session_http(
+            &app,
+            Some(&owner),
+            None,
+            "GET",
+            "/api/board/status?project=repo",
+            json!(null),
+        )
+        .await;
+        let messages = snapshot["data"]["messages"].as_array().unwrap();
+        assert!(messages.iter().any(|m| m["id"] == id));
+        assert!(messages.iter().any(|m| m["id"] == reply_id));
+        assert!(!snapshot["data"]["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["agent"] == "human/dashboard"));
     }
 
     #[tokio::test]
