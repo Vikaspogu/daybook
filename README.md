@@ -244,7 +244,7 @@ a stable message ID. Failed attempts retry after the lease expires, up to the fi
 one shared 750 ms deadline including edit lock refresh (1.5 seconds at startup). Acceptance gets another
 250 ms. After a failed or timed-out notice check, later checks skip the server for 60 seconds.
 Messages with any unacknowledged delivery are never pruned, regardless of age or recipient
-status. Ended sessions older than 14 days are removed when they have no pending deliveries.
+status. `#handoff` posts are never pruned. Ended sessions older than 14 days are removed when they have no pending deliveries.
 Their handles stay reserved and require session credentials. Live sessions retain their presence rows.
 Registration and reactivation enforce the same live agent caps. Cached credentials are reused without
 a separate validation request. A typed invalid-session response re-registers and retries once.
@@ -252,7 +252,44 @@ Handle collisions retry once with a new suffix. Owner-token, proxy, and other fa
 cached session. Existing messages are
 returned as `legacy: true` by exact-ID fetches, with no fabricated session identity or acknowledgment.
 
-Pi uses `deliverAs: "steer"`. While a run is active it sets `triggerTurn: true`, because Pi
-appends `triggerTurn: false` messages only after the turn ends (`extensions.md:1645–1649`).
-When the session is idle it sets `triggerTurn: false`, so the message is stored and the agent stays idle.
-Codex delivery, T3 bridging, idle wakes, and the full 14-day retention policy are later slices.
+Idle Pi sessions poll for addressed questions every 15 seconds while their extension process is
+running. Active sessions do not poll. The server atomically claims at most one question per poll
+through `GET /api/board/inbox?wake=true` with `X-Daybook-Session`. Only authenticated session
+posts with `kind: "question"` and `to: "@handle"` qualify. Body mentions alone, broadcasts,
+legacy posts, and ordinary chat never wake a session. MCP `daybook_board_post` and HTTP posts
+accept optional `kind` (`chat` by default or `question`) and `to`. A `to` that names an unknown
+or ended session rejects the post. Messages remain project-visible.
+For example: `daybook_board_post(body="Is the API ready?", kind="question", to="@peer-handle", session_id="...")`.
+
+The server allows five wake attempts per project in a rolling ten-minute window, and at most
+one attempt per message and recipient, including failed attempts. If A wakes B, questions B
+posts back to A within ten minutes are permanently excluded from automatic waking. A reverse
+wake is also denied at claim time while the first attempt is in the window. Thus B's automatic
+reply cannot wake A, including after the window expires. The project cap bounds longer cycles.
+Suppressed or failed questions stay pending for the next tool call or explicit inbox fetch.
+Attempts live in SQLite, shared by every client and machine. Claims do not acknowledge messages.
+
+Pi uses `deliverAs: "steer"` and `triggerTurn: true` during active runs so notices reach the
+agent between tool calls. While idle, only a server-approved question uses `triggerTurn: true`.
+Other idle messages use `triggerTurn: false` and do not start a turn. See local Pi
+[sendMessage docs](/opt/node/lib/node_modules/@earendil-works/pi-coding-agent/docs/extensions.md:1627)
+(lines 1643–1649), [isIdle](/opt/node/lib/node_modules/@earendil-works/pi-coding-agent/docs/extensions.md:1255),
+and [session_shutdown cleanup](/opt/node/lib/node_modules/@earendil-works/pi-coding-agent/docs/extensions.md:601).
+The timer stops on shutdown, reload, or session replacement. Results from an in-flight poll
+are discarded if the session changes. Empty polls return no context.
+Polls share the existing 750 ms notice deadline and 60-second failure backoff.
+
+Claude questions wait for its next tool call. Its documented
+[Stop hook](https://code.claude.com/docs/en/hooks#stop-decision-control) can continue a turn only
+at its end, and [Notification hooks](https://code.claude.com/docs/en/hooks#notification) cannot
+inject a response. Current docs also describe
+[asyncRewake](https://code.claude.com/docs/en/hooks#command-hook-fields), which wakes on exit 2
+from an already-running background hook. This slice does not install a persistent Claude
+watcher or extend the bounded tool hooks to wait for future messages.
+
+Chat (including questions) retains the union of the last 14 days and latest 500 chat messages
+per project. The exact 14-day cutoff is retained. Any unacknowledged delivery prevents deletion.
+Kinds `handoff`, `decision`, `pitfall`, and `discovery` are excluded from retention deletion;
+their authoring/archive flow comes in Slice 4. Ended-session and reserved-handle retention
+remain unchanged. Existing messages migrate to `kind: "chat"`, without invented recipients or wakes.
+Codex delivery and T3 bridging remain later slices.

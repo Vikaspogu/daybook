@@ -316,6 +316,8 @@ async fn dispatch_tool_call(
                     }
                     _ => {
                         let msg = client.session_post(&session, &BoardPostMessageReq {
+                            kind: args.get("kind").and_then(Value::as_str).map(ToString::to_string),
+                            to: args.get("to").and_then(Value::as_str).map(ToString::to_string),
                             project: project.clone(), agent: session.handle.clone(),
                             channel: args.get("channel").and_then(Value::as_str).map(ToString::to_string),
                             body: args.get("body").and_then(Value::as_str).unwrap_or("").to_string(),
@@ -544,6 +546,8 @@ fn mcp_tool_definitions() -> Value {
                     "session_id": { "type": "string", "description": "Runtime session_id from the startup note. Must match the inherited runtime identity when present." },
                     "agent": { "type": "string", "deprecated": true, "description": "Deprecated. Accepted for compatibility and ignored. Sender is bound to the session credential." },
                     "channel": { "type": "string", "enum": ["general", "handoff", "blocker", "review"], "description": "Message channel (default general)." },
+                    "kind": { "type": "string", "enum": ["chat", "question"], "description": "Only an addressed question can wake an idle Pi session." },
+                    "to": { "type": "string", "description": "One session @handle. All messages remain project-visible." },
                     "body": { "type": "string", "description": "Message text (use @agent-handle to notify specific agents)." },
                     "parent_id": { "type": "integer", "description": "Optional parent message id for threaded replies." }
                 },

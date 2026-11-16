@@ -113,9 +113,35 @@ Edit hooks retain cursor-based legacy-handle mentions in the same JSON context, 
 same untrusted preview format and no repeat for session-addressed messages. The cursor advances
 only after stdout flush for Claude or the acceptance callback for Pi. Empty deliveries skip callbacks.
 Claude receives JSON additionalContext after successful and failed tools, including read-only tools.
-Pi receives a custom message with steer delivery, then records adapter acceptance. It sets
-triggerTurn true while a run is active, so the message lands between tool calls, and false when
-idle, so idle sessions stay idle. Notice preparation and edit lock refresh share one 750 ms deadline and runtime, even for a busy local
+Pi receives a custom message with steer delivery, then records adapter acceptance. Active runs
+use triggerTurn true to receive notices between tool calls. While idle, only a server-approved
+question sets it true. Other idle messages set it false (Pi extensions.md:1643–1649).
+The running extension checks isIdle (extensions.md:1255–1257) on a 15-second timer, skips active
+runs and overlapping polls, and clears its timer on every session_shutdown, including reload
+and replacement (extensions.md:601–609). A session generation check discards in-flight poll
+results after replacement or shutdown. Each idle poll calls the existing post-tool hook with
+board_idle true. The server returns only an eligible authenticated kind=question addressed via
+to=@handle, claims one attempt atomically, and includes daybookWake=true in the Pi hook output.
+Broadcasts, body mentions alone, and non-questions cannot wake. Five attempts per project per
+rolling ten minutes and one attempt per delivery bound automatic work across all machines.
+If A woke B, questions B posts to A within that window are permanently suppressed from waking,
+so they cannot restart ping-pong later. Claims also check for a reverse wake in the current window.
+Failed or suppressed questions remain in the normal pending inbox without an invented acknowledgment.
+Wake logs have no message/session foreign keys, so acknowledgment, pruning, and session end
+cannot reset the rolling budget. Expired logs are removed on a subsequent successful claim.
+Claude waits for its next tool call. The documented Stop decision can only continue an ending
+turn, Notification has no context control, and asyncRewake requires an already-running background
+hook. This slice installs no persistent Claude watcher. See
+https://code.claude.com/docs/en/hooks#stop-decision-control and
+https://code.claude.com/docs/en/hooks#command-hook-fields.
+
+Chat and question retention keeps the union of 14 days (including the exact cutoff) and the
+latest 500 chat/question messages per project. Pending acknowledgments always prevent deletion.
+The kind column excludes handoff, decision, pitfall, and discovery from automatic deletion,
+ready for Slice 4 authoring and archive integration. Existing rows default to chat with no to
+address. Session/handle retention is unchanged.
+
+Notice preparation and edit lock refresh share one 750 ms deadline and runtime, even for a busy local
 SQLite database or slow remote server. Startup gets 1.5 seconds, and acceptance recording
 gets up to 250 ms. A failed or timed-out notice check backs off for 60 seconds across hook
 processes.

@@ -16,10 +16,11 @@ pub struct Notice {
     pub text: String,
     pub session: BoardSession,
     pub ids: Vec<i64>,
+    pub wake: bool,
 }
 
 pub fn prepare(config: &Config, cwd: &Path, runtime_id: &str, startup: bool) -> Option<Notice> {
-    prepare_boundary(config, cwd, runtime_id, startup, None).0
+    prepare_boundary(config, cwd, runtime_id, startup, None, false).0
 }
 
 pub(super) fn prepare_tool_context(
@@ -28,7 +29,11 @@ pub(super) fn prepare_tool_context(
     runtime_id: &str,
     edited_path: Option<String>,
 ) -> (Option<Notice>, LegacyNotice) {
-    prepare_boundary(config, cwd, runtime_id, false, edited_path)
+    prepare_boundary(config, cwd, runtime_id, false, edited_path, false)
+}
+
+pub fn prepare_idle(config: &Config, cwd: &Path, runtime_id: &str) -> Option<Notice> {
+    prepare_boundary(config, cwd, runtime_id, false, None, true).0
 }
 
 fn prepare_boundary(
@@ -37,6 +42,7 @@ fn prepare_boundary(
     runtime_id: &str,
     startup: bool,
     edited_path: Option<String>,
+    idle: bool,
 ) -> (Option<Notice>, LegacyNotice) {
     let marker = failure_marker(config, runtime_id);
     let skip_notice = runtime_id.is_empty()
@@ -71,6 +77,7 @@ fn prepare_boundary(
                         runtime_id.clone(),
                         startup,
                         startup && std::env::var_os("PI_SESSION_ID").is_some(),
+                        idle,
                     )
                     .await
                 };
@@ -137,6 +144,7 @@ async fn prepare_notice(
     runtime_id: String,
     startup: bool,
     defer_notices: bool,
+    idle: bool,
 ) -> anyhow::Result<Option<Notice>> {
     let client = BoardClient::from_config(&config, false)?;
     let identity = resolve_board_identity_for_hook(&cwd, &runtime_id);
@@ -147,6 +155,8 @@ async fn prepare_notice(
             if defer_notices {
                 client.session_status(&session, "active").await?;
                 Ok(Vec::new())
+            } else if idle {
+                client.wake(&session).await
             } else {
                 client.inbox(&session, true).await
             }
@@ -230,7 +240,12 @@ async fn prepare_notice(
     Ok(if text.is_empty() {
         None
     } else {
-        Some(Notice { text, session, ids })
+        Some(Notice {
+            text,
+            session,
+            ids,
+            wake: idle,
+        })
     })
 }
 
@@ -320,6 +335,7 @@ fn emit_to(
         serde_json::json!({"hookSpecificOutput":{"hookEventName":event,"additionalContext":text}});
     if is_pi {
         if let Some(notice) = notice.as_ref().filter(|n| !n.ids.is_empty()) {
+            output["daybookWake"] = serde_json::json!(notice.wake);
             output["daybookDelivery"] = serde_json::json!(notice.ids);
         }
         if let Some((_, id)) = &legacy.cursor {
@@ -435,6 +451,8 @@ mod tests {
             .board_post_message(
                 &caller,
                 &BoardPostMessageReq {
+                    kind: None,
+                    to: None,
                     project: identity.project.clone(),
                     agent: "peer".into(),
                     channel: None,
@@ -447,6 +465,8 @@ mod tests {
             .board_post_message(
                 &caller,
                 &BoardPostMessageReq {
+                    kind: None,
+                    to: None,
                     project: identity.project.clone(),
                     agent: "peer".into(),
                     channel: None,
@@ -455,7 +475,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let notice = prepare_notice(config, repo, "receiver".into(), true, false)
+        let notice = prepare_notice(config, repo, "receiver".into(), true, false, false)
             .await
             .unwrap()
             .unwrap();
@@ -502,6 +522,8 @@ mod tests {
             .board_session_post(
                 &sender.credential,
                 &crate::ledger::BoardPostMessageReq {
+                    kind: None,
+                    to: None,
                     project: sender.project.clone(),
                     agent: sender.handle,
                     channel: None,
@@ -517,6 +539,7 @@ mod tests {
                 "receiver".into(),
                 true,
                 true,
+                false,
             ))
             .unwrap()
             .unwrap();
@@ -548,10 +571,75 @@ mod tests {
                 "receiver".into(),
                 false,
                 false,
+                false,
             ))
             .unwrap()
             .unwrap();
         assert_eq!(notice.ids, vec![message.id]);
+    }
+
+    #[test]
+    fn board_notice_idle_question_sets_pi_wake_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let mut config = Config::default();
+        config.storage.path = tmp.path().join("storage");
+        config.server.db_path = tmp.path().join("board.db");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = BoardClient::from_config(&config, false).unwrap();
+        let mut identity = resolve_board_identity_for_hook(&repo, "receiver");
+        identity.runtime = "pi".into();
+        let receiver = rt
+            .block_on(session_for(&client, &config, &identity, "receiver"))
+            .unwrap();
+        let sender = rt
+            .block_on(session_for(&client, &config, &identity, "sender"))
+            .unwrap();
+        let ledger = crate::ledger::Ledger::open(&config.server.db_path).unwrap();
+        let question = ledger
+            .board_session_post(
+                &sender.credential,
+                &crate::ledger::BoardPostMessageReq {
+                    kind: Some("question".into()),
+                    to: Some(receiver.handle.clone()),
+                    project: sender.project.clone(),
+                    agent: sender.handle,
+                    channel: None,
+                    body: "wake question".into(),
+                    parent_id: None,
+                },
+            )
+            .unwrap();
+        let notice = rt
+            .block_on(prepare_notice(
+                config.clone(),
+                repo,
+                "receiver".into(),
+                false,
+                false,
+                true,
+            ))
+            .unwrap()
+            .unwrap();
+        assert!(notice.wake);
+        assert_eq!(notice.ids, vec![question.id]);
+        let mut output = Vec::new();
+        emit_to(
+            &config,
+            Some(notice),
+            &LegacyNotice::default(),
+            "PostToolUse",
+            &mut output,
+            true,
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["daybookWake"], true);
+        assert_eq!(json["daybookDelivery"], serde_json::json!([question.id]));
     }
 
     #[tokio::test]
@@ -611,7 +699,7 @@ mod tests {
         session_for(&client, &config, &identity, "runtime")
             .await
             .unwrap();
-        let notice = prepare_notice(config, repo, "runtime".into(), false, false)
+        let notice = prepare_notice(config, repo, "runtime".into(), false, false, false)
             .await
             .unwrap()
             .unwrap();
@@ -695,6 +783,7 @@ mod tests {
                 text: "untrusted preview".into(),
                 session: serde_json::from_value(fixture["session"].clone()).unwrap(),
                 ids: vec![fixture["id"].as_i64().unwrap()],
+                wake: false,
             };
             emit(
                 &config,
@@ -725,6 +814,7 @@ mod tests {
                 "a".into(),
                 true,
                 false,
+                false,
             ))
             .unwrap()
             .unwrap();
@@ -734,6 +824,7 @@ mod tests {
                 repo,
                 "b".into(),
                 true,
+                false,
                 false,
             ))
             .unwrap()
@@ -745,6 +836,8 @@ mod tests {
                 .board_session_post(
                     &a.session.credential,
                     &crate::ledger::BoardPostMessageReq {
+                        kind: None,
+                        to: None,
                         project: a.session.project.clone(),
                         agent: a.session.handle.clone(),
                         channel: None,
@@ -884,6 +977,7 @@ mod tests {
                 "a".into(),
                 true,
                 false,
+                false,
             ))
             .unwrap()
             .unwrap();
@@ -894,6 +988,7 @@ mod tests {
                 "b".into(),
                 true,
                 false,
+                false,
             ))
             .unwrap()
             .unwrap();
@@ -902,6 +997,8 @@ mod tests {
             .board_session_post(
                 &a.session.credential,
                 &crate::ledger::BoardPostMessageReq {
+                    kind: None,
+                    to: None,
                     project: a.session.project.clone(),
                     agent: a.session.handle,
                     channel: None,
@@ -972,6 +1069,7 @@ mod tests {
                     id.into(),
                     startup,
                     false,
+                    false,
                 ))
                 .unwrap()
         }
@@ -987,6 +1085,8 @@ mod tests {
         assert!(a.text.contains("session_id=session-a "), "{}", a.text);
         let ledger = crate::ledger::Ledger::open(&config.server.db_path).unwrap();
         let req = crate::ledger::BoardPostMessageReq {
+            kind: None,
+            to: None,
             project: a.session.project.clone(),
             agent: a.session.handle.clone(),
             channel: None,

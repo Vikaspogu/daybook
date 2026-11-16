@@ -273,6 +273,8 @@ pub async fn run(args: BoardArgs) -> Result<()> {
         } => {
             let msg = client
                 .post_message(&BoardPostMessageReq {
+                    kind: None,
+                    to: None,
                     project: identity.project.clone(),
                     channel: Some(channel),
                     agent: identity.agent.clone(),

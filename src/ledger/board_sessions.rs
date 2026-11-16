@@ -5,6 +5,8 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 const MAX_NOTICE_ATTEMPTS: i64 = 5;
+const WAKE_WINDOW_SECONDS: i64 = 600;
+const MAX_PROJECT_WAKES: i64 = 5;
 
 #[derive(Debug, thiserror::Error)]
 #[error("invalid session credential")]
@@ -227,7 +229,7 @@ impl Ledger {
             [&session.id],
             |r| r.get(0),
         )?;
-        let msg = super::board::post_message_in_tx(
+        let mut msg = super::board::post_message_in_tx(
             &tx,
             &session.project,
             &channel,
@@ -238,9 +240,23 @@ impl Ledger {
             &now.to_rfc3339(),
             now.timestamp(),
         )?;
+        route_message_tx(&tx, &mut msg, req)?;
         tx.execute(
             "INSERT INTO board_message_auth VALUES (?1,?2)",
             params![msg.id, session.id],
+        )?;
+        // A reply to a recent waker must never become a delayed automatic wake.
+        tx.execute(
+            "UPDATE board_deliveries SET wake_suppressed=1 WHERE message_id=?1
+            AND EXISTS (SELECT 1 FROM board_wake_attempts w WHERE w.project=?2
+                AND w.sender_session_id=board_deliveries.recipient_session_id
+                AND w.recipient_session_id=?3 AND w.attempted_epoch > ?4)",
+            params![
+                msg.id,
+                session.project,
+                session.id,
+                now.timestamp() - WAKE_WINDOW_SECONDS
+            ],
         )?;
         tx.commit()?;
         Ok(msg)
@@ -314,6 +330,66 @@ impl Ledger {
         Ok(deliveries)
     }
 
+    // Only the idle adapter calls this path. A claim is an attempt, never proof of delivery.
+    pub fn board_wake(&self, credential: &str) -> Result<Vec<BoardDelivery>> {
+        self.board_wake_at(credential, chrono::Utc::now().timestamp())
+    }
+
+    fn board_wake_at(&self, credential: &str, now: i64) -> Result<Vec<BoardDelivery>> {
+        let session = self.board_session(credential)?;
+        let mut conn = self.conn.lock().unwrap();
+        // Idle polls are the session's only heartbeat; refresh presence at most once a minute.
+        conn.execute(
+            "UPDATE board_agents SET last_seen_epoch=?1, last_seen_utc=?2 WHERE project=?3 AND agent=?4 AND last_seen_epoch < ?5",
+            params![now, chrono::DateTime::from_timestamp(now, 0).unwrap_or_default().to_rfc3339(), session.project, session.handle, now - 60],
+        )?;
+        let candidate =
+            |conn: &rusqlite::Connection| -> Result<Option<(i64, String, String, String)>> {
+                Ok(conn.query_row(
+                "SELECT m.id,a.sender_session_id,m.agent,m.body
+                 FROM board_deliveries d JOIN board_messages m ON m.id=d.message_id
+                 JOIN board_message_auth a ON a.message_id=m.id
+                 JOIN board_agents recipient ON recipient.project=m.project AND recipient.agent=?2
+                 WHERE d.recipient_session_id=?1 AND d.acked_at IS NULL AND d.delivered_at IS NULL
+                   AND d.wake_attempted_epoch IS NULL AND d.wake_suppressed=0 AND m.kind='question' AND m.addressed_to=?2
+                   AND recipient.runtime='pi'
+                   AND (SELECT COUNT(*) FROM board_wake_attempts WHERE project=?3 AND attempted_epoch > ?4) < ?5
+                   AND NOT EXISTS (SELECT 1 FROM board_wake_attempts w WHERE w.project=?3
+                       AND w.sender_session_id=?1 AND w.recipient_session_id=a.sender_session_id
+                       AND w.attempted_epoch > ?4)
+                 ORDER BY m.id LIMIT 1",
+                params![session.id, session.handle, session.project, now - WAKE_WINDOW_SECONDS, MAX_PROJECT_WAKES],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+            ).optional()?)
+            };
+        if candidate(&conn)?.is_none() {
+            return Ok(Vec::new());
+        }
+        // Serialize eligibility and the attempt across server workers and machines.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some((message_id, sender_id, sender, body)) = candidate(&tx)? else {
+            return Ok(Vec::new());
+        };
+        tx.execute(
+            "DELETE FROM board_wake_attempts WHERE attempted_epoch <= ?1",
+            [now - WAKE_WINDOW_SECONDS],
+        )?;
+        tx.execute(
+            "INSERT INTO board_wake_attempts VALUES (?1,?2,?3,?4)",
+            params![session.project, sender_id, session.id, now],
+        )?;
+        tx.execute("UPDATE board_deliveries SET wake_attempted_epoch=?1 WHERE message_id=?2 AND recipient_session_id=?3", params![now, message_id, session.id])?;
+        tx.commit()?;
+        Ok(vec![BoardDelivery {
+            message_id,
+            sender,
+            preview: crate::board::session::peer_preview(&body),
+            delivered_at: None,
+            acked_at: None,
+            attempts: 0,
+        }])
+    }
+
     pub fn board_receipt(&self, credential: &str, message_id: i64, ack: bool) -> Result<()> {
         let session = self.board_session(credential)?;
         let conn = self.conn.lock().unwrap();
@@ -330,7 +406,7 @@ impl Ledger {
 
     pub fn board_message(&self, project: &str, id: i64) -> Result<BoardFullMessage> {
         let conn = self.conn.lock().unwrap();
-        let message = conn.query_row("SELECT id,project,channel,agent,machine,body,mentions_json,parent_id,created_utc,created_epoch FROM board_messages WHERE project=?1 AND id=?2", params![project,id], |r| Ok(BoardMessageRow { id:r.get(0)?, project:r.get(1)?, channel:r.get(2)?, agent:r.get(3)?, machine:r.get(4)?, body:r.get(5)?, mentions:serde_json::from_str(&r.get::<_,String>(6)?).unwrap_or_default(), parent_id:r.get(7)?, created_utc:r.get(8)?, created_epoch:r.get(9)? }))?;
+        let message = conn.query_row("SELECT id,project,channel,agent,machine,body,mentions_json,parent_id,created_utc,created_epoch,kind,addressed_to FROM board_messages WHERE project=?1 AND id=?2", params![project,id], |r| Ok(BoardMessageRow { id:r.get(0)?, project:r.get(1)?, channel:r.get(2)?, agent:r.get(3)?, machine:r.get(4)?, body:r.get(5)?, mentions:serde_json::from_str(&r.get::<_,String>(6)?).unwrap_or_default(), parent_id:r.get(7)?, created_utc:r.get(8)?, created_epoch:r.get(9)?, kind:r.get(10)?, to:r.get(11)? }))?;
         let sender_session_id: Option<String> = conn
             .query_row(
                 "SELECT sender_session_id FROM board_message_auth WHERE message_id=?1",
@@ -349,6 +425,327 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pi_registration(cwd: &str) -> BoardSessionRegistration {
+        let mut req = registration(cwd);
+        req.presence.runtime = "pi".into();
+        req
+    }
+
+    fn question(a: &BoardSession, b: &BoardSession) -> BoardPostMessageReq {
+        let mut req = post(a, b);
+        req.kind = Some("question".into());
+        req.to = Some(format!("@{}", b.handle));
+        req.body = "Is the API ready?".into();
+        req
+    }
+
+    #[test]
+    fn route_message_rejects_invalid_kind_and_unknown_recipient() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&tmp.path().join("board.db")).unwrap();
+        let sender = ledger.board_register_session(&registration("/a")).unwrap();
+        let receiver = ledger.board_register_session(&registration("/b")).unwrap();
+        for (kind, to, error) in [
+            (
+                "invalid",
+                receiver.handle.as_str(),
+                "kind must be chat or question",
+            ),
+            ("question", "missing", "unknown recipient @missing"),
+        ] {
+            let mut req = question(&sender, &receiver);
+            req.kind = Some(kind.into());
+            req.to = Some(format!("@{to}"));
+            assert_eq!(
+                ledger
+                    .board_session_post(&sender.credential, &req)
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                error
+            );
+        }
+        assert!(ledger
+            .board_list_messages(&BoardMessagesQuery {
+                project: "repo".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .messages
+            .is_empty());
+        assert!(ledger
+            .board_inbox(&receiver.credential, false)
+            .unwrap()
+            .is_empty());
+        // An ended session never polls again, so a question to it must fail loudly.
+        ledger
+            .board_session_status(&receiver.credential, "idle")
+            .unwrap();
+        assert_eq!(
+            ledger
+                .board_session_post(&sender.credential, &question(&sender, &receiver))
+                .err()
+                .unwrap()
+                .to_string(),
+            format!("unknown recipient @{}", receiver.handle)
+        );
+    }
+
+    #[test]
+    fn board_wake_requires_authenticated_explicit_question_and_is_once_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&tmp.path().join("board.db")).unwrap();
+        let a = ledger
+            .board_register_session(&pi_registration("/a"))
+            .unwrap();
+        let b = ledger
+            .board_register_session(&pi_registration("/b"))
+            .unwrap();
+        let c = ledger
+            .board_register_session(&registration("/claude"))
+            .unwrap();
+        for (kind, to) in [
+            (None, None),
+            (Some("question"), None),
+            (Some("chat"), Some(format!("@{}", b.handle))),
+        ] {
+            let mut req = post(&a, &b);
+            req.kind = kind.map(String::from);
+            req.to = to;
+            ledger.board_session_post(&a.credential, &req).unwrap();
+            assert!(ledger.board_wake(&b.credential).unwrap().is_empty());
+        }
+        // Legacy posts have no authenticated sender for reverse-wake checks.
+        let mut legacy = question(&a, &b);
+        legacy.agent = "legacy".into();
+        ledger
+            .board_post_message(&BoardCaller::local(), &legacy)
+            .unwrap();
+        assert!(ledger.board_wake(&b.credential).unwrap().is_empty());
+        ledger
+            .board_session_post(&a.credential, &question(&a, &c))
+            .unwrap();
+        assert!(ledger.board_wake(&c.credential).unwrap().is_empty());
+        let msg = ledger
+            .board_session_post(&a.credential, &question(&a, &b))
+            .unwrap();
+        assert_eq!(msg.kind, "question");
+        assert_eq!(msg.to.as_deref(), Some(b.handle.as_str()));
+        let wake = ledger.board_wake(&b.credential).unwrap();
+        assert_eq!(wake.len(), 1);
+        assert_eq!(wake[0].message_id, msg.id);
+        assert!(ledger.board_wake(&b.credential).unwrap().is_empty());
+        // At-most-once survives reopening and expiration of the rolling window.
+        let other = Ledger::open(&tmp.path().join("board.db")).unwrap();
+        assert!(other
+            .board_wake_at(&b.credential, chrono::Utc::now().timestamp() + 601)
+            .unwrap()
+            .is_empty());
+        assert!(other
+            .board_inbox(&b.credential, false)
+            .unwrap()
+            .iter()
+            .all(|d| d.acked_at.is_none()));
+    }
+
+    #[test]
+    fn board_wake_blocks_reverse_ping_pong_and_caps_project_across_connections() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("board.db");
+        let ledger = Ledger::open(&path).unwrap();
+        let a = ledger
+            .board_register_session(&pi_registration("/a"))
+            .unwrap();
+        let b = ledger
+            .board_register_session(&pi_registration("/b"))
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        ledger
+            .board_session_post(&a.credential, &question(&a, &b))
+            .unwrap();
+        assert_eq!(ledger.board_wake_at(&b.credential, now).unwrap().len(), 1);
+        ledger
+            .board_session_post(&b.credential, &question(&b, &a))
+            .unwrap();
+        let other = Ledger::open(&path).unwrap();
+        assert!(other
+            .board_wake_at(&a.credential, now + 599)
+            .unwrap()
+            .is_empty());
+        // Four more attempts fill the project budget, including across connections.
+        for _ in 0..4 {
+            ledger
+                .board_session_post(&a.credential, &question(&a, &b))
+                .unwrap();
+            assert_eq!(other.board_wake_at(&b.credential, now).unwrap().len(), 1);
+        }
+        ledger
+            .board_session_post(&a.credential, &question(&a, &b))
+            .unwrap();
+        assert!(other
+            .board_wake_at(&b.credential, now + 599)
+            .unwrap()
+            .is_empty());
+        // Exact expiry: (now-600, now] is the rolling window.
+        assert!(other
+            .board_wake_at(&a.credential, now + 600)
+            .unwrap()
+            .is_empty());
+        // A suppressed reply stays pending after expiry; a fresh project budget is available.
+        assert_eq!(
+            ledger
+                .board_wake_at(&b.credential, now + 600)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn board_wake_parallel_polls_claim_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("board.db");
+        let ledger = Ledger::open(&path).unwrap();
+        let a = ledger
+            .board_register_session(&pi_registration("/a"))
+            .unwrap();
+        let b = ledger
+            .board_register_session(&pi_registration("/b"))
+            .unwrap();
+        ledger
+            .board_session_post(&a.credential, &question(&a, &b))
+            .unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut threads = Vec::new();
+        for _ in 0..2 {
+            let worker = Ledger::open(&path).unwrap();
+            let barrier = barrier.clone();
+            let key = b.credential.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                worker.board_wake(&key).unwrap().len()
+            }));
+        }
+        assert_eq!(
+            threads
+                .into_iter()
+                .map(|t| t.join().unwrap())
+                .sum::<usize>(),
+            1
+        );
+    }
+
+    #[test]
+    fn board_wake_refreshes_idle_presence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&tmp.path().join("board.db")).unwrap();
+        let b = ledger
+            .board_register_session(&pi_registration("/b"))
+            .unwrap();
+        ledger
+            .conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE board_agents SET last_seen_epoch=0", [])
+            .unwrap();
+        let seen = || {
+            ledger
+                .board_status(Some("repo"), None, None)
+                .unwrap()
+                .agents
+                .into_iter()
+                .find(|a| a.agent == b.handle)
+                .unwrap()
+                .last_seen_epoch
+        };
+        let t = chrono::Utc::now().timestamp();
+        assert!(ledger.board_wake_at(&b.credential, t).unwrap().is_empty());
+        assert_eq!(seen(), t);
+        // Throttled: a poll inside the minute does not write presence again.
+        ledger.board_wake_at(&b.credential, t + 59).unwrap();
+        assert_eq!(seen(), t);
+        ledger.board_wake_at(&b.credential, t + 61).unwrap();
+        assert_eq!(seen(), t + 61);
+    }
+
+    #[test]
+    fn board_retention_keeps_union_of_age_count_durable_and_unacked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&tmp.path().join("board.db")).unwrap();
+        let b = ledger.board_register_session(&registration("/b")).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let cutoff = now - 14 * 86_400;
+        let mut conn = ledger.conn.lock().unwrap();
+        let tx = conn.transaction().unwrap();
+        let insert = |kind: &str, epoch: i64| {
+            tx.execute("INSERT INTO board_messages(project,agent,machine,body,created_utc,created_epoch,kind) VALUES ('repo','legacy','machine','body','test',?1,?2)", params![epoch, kind]).unwrap();
+            tx.last_insert_rowid()
+        };
+        let old = insert("chat", cutoff - 1);
+        let exact = insert("chat", cutoff);
+        let young = insert("chat", cutoff + 1);
+        let unacked = insert("chat", cutoff - 1);
+        tx.execute(
+            "INSERT INTO board_deliveries(message_id,recipient_session_id) VALUES (?1,?2)",
+            params![unacked, b.id],
+        )
+        .unwrap();
+        let durable: Vec<_> = ["handoff", "decision", "pitfall", "discovery"]
+            .iter()
+            .map(|kind| insert(kind, 0))
+            .collect();
+        let mut latest = Vec::new();
+        for _ in 0..500 {
+            latest.push(insert("chat", 0));
+        }
+        // A newer #handoff post must not push general chats out of the newest-500 window.
+        let handoff_channel = insert("chat", 0);
+        tx.execute(
+            "UPDATE board_messages SET channel='handoff' WHERE id=?1",
+            [handoff_channel],
+        )
+        .unwrap();
+        prune_board_tx(&tx, "repo", now).unwrap();
+        let exists = |id| {
+            tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM board_messages WHERE id=?1)",
+                [id],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap()
+        };
+        assert!(!exists(old));
+        assert!(exists(exact));
+        assert!(exists(young));
+        assert!(exists(unacked));
+        assert!(durable.iter().chain(latest.iter()).all(|id| exists(*id)));
+        assert!(exists(handoff_channel));
+        tx.execute(
+            "UPDATE board_deliveries SET acked_at='ack' WHERE message_id=?1",
+            [unacked],
+        )
+        .unwrap();
+        prune_board_tx(&tx, "repo", now).unwrap();
+        assert!(!exists(unacked));
+        // Exactly 500 old chats remain protected independently of durable posts.
+        tx.execute(
+            "DELETE FROM board_messages WHERE id IN (?1,?2)",
+            params![exact, young],
+        )
+        .unwrap();
+        prune_board_tx(&tx, "repo", now).unwrap();
+        assert_eq!(
+            tx.query_row(
+                "SELECT COUNT(*) FROM board_messages WHERE kind='chat' AND channel != 'handoff'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            500
+        );
+        tx.commit().unwrap();
+    }
 
     #[test]
     fn session_handle_tolerates_changed_id_formats() {
@@ -415,6 +812,8 @@ mod tests {
     }
     fn post(a: &BoardSession, b: &BoardSession) -> BoardPostMessageReq {
         BoardPostMessageReq {
+            kind: None,
+            to: None,
             project: a.project.clone(),
             agent: a.handle.clone(),
             channel: None,
@@ -786,6 +1185,15 @@ mod tests {
         assert!(ledger.board_message("repo", m.id).is_ok());
         ledger.board_receipt(&b.credential, m.id, true).unwrap();
         ledger
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE board_messages SET created_epoch=0 WHERE id=?1",
+                [m.id],
+            )
+            .unwrap();
+        ledger
             .board_session_post(&a.credential, &post(&a, &a))
             .unwrap();
         assert!(ledger.board_message("repo", m.id).is_err());
@@ -860,7 +1268,16 @@ mod tests {
         assert!(ledger.board_message("repo", old.id).is_ok());
         assert!(ledger.board_message("repo", ended.id).is_ok());
         assert!(ledger.board_message("repo", recent.id).is_ok());
-        assert!(ledger.board_message("repo", legacy.id).is_err());
+        assert!(ledger.board_message("repo", legacy.id).is_ok());
+        ledger
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE board_messages SET created_epoch=0 WHERE id IN (?1,?2)",
+                params![old.id, ended.id],
+            )
+            .unwrap();
         ledger.board_receipt(&b.credential, old.id, true).unwrap();
         ledger.board_receipt(&c.credential, ended.id, true).unwrap();
         ledger
@@ -954,6 +1371,8 @@ mod tests {
         let path = tmp.path().join("board.db");
         let ledger = Ledger::open(&path).unwrap();
         let req = BoardPostMessageReq {
+            kind: None,
+            to: None,
             project: "repo".into(),
             agent: "old-agent".into(),
             channel: None,
@@ -963,11 +1382,13 @@ mod tests {
         let m = ledger
             .board_post_message(&BoardCaller::local(), &req)
             .unwrap();
-        ledger.conn.lock().unwrap().execute_batch("DROP TABLE board_deliveries; DROP TABLE board_message_auth; DROP TABLE board_sessions;").unwrap();
+        ledger.conn.lock().unwrap().execute_batch("DROP TABLE board_deliveries; DROP TABLE board_message_auth; DROP TABLE board_sessions; ALTER TABLE board_messages DROP COLUMN kind; ALTER TABLE board_messages DROP COLUMN addressed_to;").unwrap();
         drop(ledger);
         let ledger = Ledger::open(&path).unwrap();
         let legacy = ledger.board_message("repo", m.id).unwrap();
         assert!(legacy.legacy);
+        assert_eq!(legacy.message.kind, "chat");
+        assert!(legacy.message.to.is_none());
         assert!(legacy.sender_session_id.is_none());
         assert_eq!(legacy.message.id, m.id);
         let b = ledger.board_register_session(&registration("/b")).unwrap();
@@ -1037,6 +1458,8 @@ mod tests {
                     admin: false,
                 },
                 &BoardPostMessageReq {
+                    kind: None,
+                    to: None,
                     project: "repo".into(),
                     agent: "legacy-cli".into(),
                     channel: None,

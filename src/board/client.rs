@@ -490,6 +490,19 @@ impl BoardClient {
         }
     }
 
+    pub async fn wake(
+        &self,
+        session: &crate::ledger::BoardSession,
+    ) -> Result<Vec<crate::ledger::BoardDelivery>> {
+        match self {
+            Self::Local { ledger, .. } => ledger.board_wake(&session.credential),
+            Self::Remote { .. } => {
+                self.session_request(session, "/api/board/inbox?wake=true", None)
+                    .await
+            }
+        }
+    }
+
     pub async fn receipt(
         &self,
         session: &crate::ledger::BoardSession,
@@ -547,6 +560,78 @@ impl BoardClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn remote_wake_routes_authenticated_question_once() {
+        use crate::ledger::BoardSessionRegistration;
+        use crate::server::{create_router, handlers::AppState};
+        use crate::usage::pricing::PricingData;
+        use std::sync::{Arc, RwLock};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&tmp.path().join("board.db")).unwrap();
+        let registration = BoardSessionRegistration {
+            machine: "test".into(),
+            presence: BoardHeartbeatReq {
+                project: "repo".into(),
+                agent: "pi".into(),
+                runtime: "pi".into(),
+                cwd: tmp.path().to_string_lossy().into(),
+                branch: "main".into(),
+                status: None,
+                current_task: None,
+            },
+        };
+        let sender = ledger.board_register_session(&registration).unwrap();
+        let receiver = ledger.board_register_session(&registration).unwrap();
+        let mut config = Config::default();
+        config.server.admin_token = Some("owner".into());
+        let state = Arc::new(AppState {
+            config: RwLock::new(config),
+            pricing: PricingData::from_map(std::collections::HashMap::new()),
+            ledger,
+        });
+        let app = create_router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = BoardClient::Remote {
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            token: "owner".into(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut req = BoardPostMessageReq {
+            project: sender.project.clone(),
+            agent: sender.handle.clone(),
+            body: "chat must not wake".into(),
+            kind: Some("chat".into()),
+            to: Some(format!("@{}", receiver.handle)),
+            channel: None,
+            parent_id: None,
+        };
+        client.session_post(&sender, &req).await.unwrap();
+        req.kind = Some("question".into());
+        req.body = "Is the API ready?".into();
+        let question = client.session_post(&sender, &req).await.unwrap();
+        let wakes = client.wake(&receiver).await.unwrap();
+        assert_eq!(wakes.len(), 1);
+        assert_eq!(wakes[0].message_id, question.id);
+        assert!(wakes[0].delivered_at.is_none());
+        assert!(wakes[0].acked_at.is_none());
+        assert!(client.wake(&receiver).await.unwrap().is_empty());
+        assert_eq!(client.inbox(&receiver, false).await.unwrap().len(), 2);
+        let mut invalid = receiver;
+        invalid.credential = "wrong".into();
+        assert!(client
+            .wake(&invalid)
+            .await
+            .err()
+            .unwrap()
+            .is::<crate::ledger::InvalidSessionCredential>());
+        server.abort();
+    }
 
     #[tokio::test]
     async fn local_session_request_returns_error() {

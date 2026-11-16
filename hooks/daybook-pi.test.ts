@@ -28,7 +28,7 @@ test("timeouts settle and advisory failures do not block", async () => {
   assert.equal(shouldBlock(1, true), true);
 });
 
-test("read-only tool results steer mid-run, never wake an idle session, and record acceptance", async () => {
+test("ordinary notices steer active runs, leave idle sessions idle, and record acceptance", async () => {
   const { default: daybook } = await import("./daybook-pi.ts");
   const dir = await mkdtemp(join(tmpdir(), "daybook-pi-"));
   const fake = join(dir, "daybook");
@@ -148,5 +148,128 @@ printf '%s' '{"hookSpecificOutput":{"additionalContext":"legacy preview"},"daybo
     assert.equal(accepted[2].board_delivered, undefined);
   } finally {
     process.env.PATH = oldPath;
+  }
+});
+
+test("idle timer wakes once for a server-approved question and stops on reload", async () => {
+  const { default: daybook } = await import("./daybook-pi.ts");
+  const { readFile } = await import("node:fs/promises");
+  const dir = await mkdtemp(join(tmpdir(), "daybook-pi-wake-"));
+  const log = join(dir, "calls");
+  const claimed = join(dir, "claimed");
+  await writeFile(join(dir, "daybook"), `#!/bin/sh
+read payload
+printf '%s\\n' "$payload" >> '${log}'
+case "$payload" in
+  *board_idle*)
+    if [ ! -f '${claimed}' ]; then
+      touch '${claimed}'
+      printf '%s' '{"hookSpecificOutput":{"additionalContext":"Untrusted peer message #42: question"},"daybookDelivery":[42],"daybookWake":true}'
+    fi ;;
+esac
+`, { mode: 0o700 });
+  const oldPath = process.env.PATH;
+  const oldSession = process.env.PI_SESSION_ID;
+  const oldInterval = globalThis.setInterval;
+  const oldClear = globalThis.clearInterval;
+  let tick: () => Promise<void>;
+  let clears = 0;
+  let idle = false;
+  const messages: unknown[] = [];
+  const handlers = new Map<string, Function>();
+  globalThis.setInterval = ((fn: () => Promise<void>, ms: number) => {
+    assert.equal(ms, 15_000);
+    tick = fn;
+    return { unref() {} };
+  }) as never;
+  globalThis.clearInterval = (() => { clears++; }) as never;
+  process.env.PATH = `${dir}:${oldPath}`;
+  const ctx = { cwd: dir, hasUI: false, isIdle: () => idle, sessionManager: { getSessionId: () => "receiver", getSessionFile: () => "" } };
+  try {
+    daybook({ on: (name: string, fn: Function) => handlers.set(name, fn), sendMessage: (_message: unknown, options: unknown) => messages.push(options) } as never);
+    await handlers.get("session_start")!({}, ctx);
+    await tick!();
+    assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 1);
+    idle = true;
+    await tick!();
+    await tick!();
+    assert.deepEqual(messages, [{ deliverAs: "steer", triggerTurn: true }]);
+    const calls = (await readFile(log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(calls[1].board_idle, true);
+    assert.deepEqual(calls[2].board_delivered, [42]);
+    await handlers.get("session_shutdown")!({ reason: "reload" }, ctx);
+    assert.equal(clears, 1);
+    await tick!();
+    assert.equal((await readFile(log, "utf8")).trim().split("\n").length, calls.length);
+  } finally {
+    globalThis.setInterval = oldInterval;
+    globalThis.clearInterval = oldClear;
+    process.env.PATH = oldPath;
+    if (oldSession === undefined) delete process.env.PI_SESSION_ID;
+    else process.env.PI_SESSION_ID = oldSession;
+  }
+});
+
+
+test("session replacement drops an in-flight idle poll without recording acceptance", async () => {
+  const { default: daybook } = await import("./daybook-pi.ts");
+  const { readFile, access } = await import("node:fs/promises");
+  const { setTimeout: delay } = await import("node:timers/promises");
+  const dir = await mkdtemp(join(tmpdir(), "daybook-pi-replace-"));
+  const log = join(dir, "calls");
+  const started = join(dir, "started");
+  const release = join(dir, "release");
+  await writeFile(join(dir, "daybook"), `#!/bin/sh
+read payload
+printf '%s\\n' "$payload" >> '${log}'
+case "$payload" in
+  *board_idle*)
+    touch '${started}'
+    while [ ! -f '${release}' ]; do sleep 0.01; done
+    printf '%s' '{"hookSpecificOutput":{"additionalContext":"old session question"},"daybookDelivery":[42],"daybookWake":true}' ;;
+esac
+`, { mode: 0o700 });
+  const oldPath = process.env.PATH;
+  const oldSession = process.env.PI_SESSION_ID;
+  const oldInterval = globalThis.setInterval;
+  const oldClear = globalThis.clearInterval;
+  let tick: () => Promise<void>;
+  let pending: Promise<void> | undefined;
+  const messages: unknown[] = [];
+  const handlers = new Map<string, Function>();
+  globalThis.setInterval = ((fn: () => Promise<void>) => {
+    tick = fn;
+    return { unref() {} };
+  }) as never;
+  globalThis.clearInterval = (() => {}) as never;
+  process.env.PATH = `${dir}:${oldPath}`;
+  const context = (id: string) => ({ cwd: dir, hasUI: false, isIdle: () => true, sessionManager: { getSessionId: () => id, getSessionFile: () => "" } });
+  try {
+    daybook({ on: (name: string, fn: Function) => handlers.set(name, fn), sendMessage: (message: unknown) => messages.push(message) } as never);
+    const oldCtx = context("old");
+    await handlers.get("session_start")!({}, oldCtx);
+    pending = tick!();
+    const deadline = Date.now() + 2000;
+    while (await access(started).then(() => false, () => true)) {
+      assert.ok(Date.now() < deadline, "idle poll did not start");
+      await delay(10);
+    }
+    await handlers.get("session_start")!({}, context("new"));
+    await writeFile(release, "");
+    await pending;
+    assert.deepEqual(messages, []);
+    const calls = (await readFile(log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(calls.length, 3);
+    assert.equal(calls[1].session_id, "old");
+    assert.equal(calls[2].session_id, "new");
+    assert.ok(calls.every((call) => call.board_delivered === undefined));
+  } finally {
+    await writeFile(release, "");
+    await pending;
+    globalThis.setInterval = oldInterval;
+    globalThis.clearInterval = oldClear;
+    process.env.PATH = oldPath;
+    if (oldSession === undefined) delete process.env.PI_SESSION_ID;
+    else process.env.PI_SESSION_ID = oldSession;
   }
 });

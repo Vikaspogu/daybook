@@ -35,6 +35,15 @@ pub async fn handle() -> Result<()> {
     } else {
         "PostToolUse"
     };
+    if input.board_idle {
+        let notice = board_notice::prepare_idle(&config, &cwd, &input.session_id);
+        return board_notice::emit(
+            &config,
+            notice,
+            &board_notice::LegacyNotice::default(),
+            event,
+        );
+    }
     let (notice, legacy) = board_notice::prepare_tool_context(
         &config,
         &cwd,

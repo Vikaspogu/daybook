@@ -404,6 +404,13 @@ CREATE TABLE IF NOT EXISTS board_deliveries (
     attempted_epoch INTEGER,
     UNIQUE(message_id, recipient_session_id)
 );
+CREATE TABLE IF NOT EXISTS board_wake_attempts (
+    project TEXT NOT NULL,
+    sender_session_id TEXT NOT NULL,
+    recipient_session_id TEXT NOT NULL,
+    attempted_epoch INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_board_wake_project_epoch ON board_wake_attempts(project, attempted_epoch);
 CREATE INDEX IF NOT EXISTS idx_board_deliveries_inbox
     ON board_deliveries(recipient_session_id, acked_at, message_id);
 ";
@@ -631,7 +638,7 @@ impl Ledger {
                 let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
             }
         }
-        let conn =
+        let mut conn =
             Connection::open(path).with_context(|| format!("open ledger {}", path.display()))?;
         // WAL: readers don't block the ingest writer.
         let _: String = conn
@@ -639,6 +646,40 @@ impl Ledger {
             .with_context(|| "set WAL")?;
         conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(SCHEMA)?;
+        // Additive migration preserves old message identities and receipt state.
+        const COLUMNS: [(&str, &str, &str); 4] = [
+            ("board_messages", "kind", "TEXT NOT NULL DEFAULT 'chat'"),
+            ("board_messages", "addressed_to", "TEXT"),
+            ("board_deliveries", "wake_attempted_epoch", "INTEGER"),
+            (
+                "board_deliveries",
+                "wake_suppressed",
+                "INTEGER NOT NULL DEFAULT 0",
+            ),
+        ];
+        let column_exists = |c: &Connection, table: &str, column: &str| -> Result<bool> {
+            Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                [table, column],
+                |r| r.get(0),
+            )?)
+        };
+        // Read-only probe first so steady-state opens never take the write lock.
+        let mut missing = false;
+        for (table, column, _) in COLUMNS {
+            missing |= !column_exists(&conn, table, column)?;
+        }
+        if missing {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            for (table, column, definition) in COLUMNS {
+                if !column_exists(&tx, table, column)? {
+                    tx.execute_batch(&format!(
+                        "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                    ))?;
+                }
+            }
+            tx.commit()?;
+        }
         reconcile_journal_dates(&conn)?;
         // Token hashes and all summaries live here: owner-only on unix.
         #[cfg(unix)]
@@ -1125,6 +1166,48 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_opens_migrate_legacy_board_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        for attempt in 0..3 {
+            let path = dir.path().join(format!("legacy-{attempt}.db"));
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA user_version=2;")
+                .unwrap();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let workers: Vec<_> = (0..2)
+                .map(|_| {
+                    let path = path.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        Ledger::open(&path)
+                    })
+                })
+                .collect();
+            for worker in workers {
+                let ledger = worker.join().unwrap().unwrap();
+                let conn = ledger.conn.lock().unwrap();
+                for (table, column) in [
+                    ("board_messages", "kind"),
+                    ("board_messages", "addressed_to"),
+                    ("board_deliveries", "wake_attempted_epoch"),
+                    ("board_deliveries", "wake_suppressed"),
+                ] {
+                    let count: i64 = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name=?2",
+                            [table, column],
+                            |r| r.get(0),
+                        )
+                        .unwrap();
+                    assert_eq!(count, 1, "{table}.{column}");
+                }
+            }
+        }
+    }
 
     fn record(session_id: &str, version: i64, hash: &str) -> SessionRecord {
         record_md(session_id, version, hash, "# md")
