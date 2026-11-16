@@ -112,7 +112,7 @@ Install and delete decisions are appended to `~/.daybook/skill-decisions.jsonl`.
 | `daybook config [--show \| -i]` | Show or interactively update configuration |
 | `daybook insights [--days 30]` | Generate trend analysis from local archives |
 | `daybook jobs <list\|log\|kill\|cleanup>` | Inspect or manage background summarization jobs |
-| `daybook board <status\|claim\|touch\|check\|release\|post\|messages\|task\|heartbeat\|mcp>` | Multi-agent worktree coordination board (shared file/glob locks, presence, tasks, `@mention` channels, and MCP stdio server) |
+| `daybook board <status\|claim\|touch\|check\|release\|post\|messages\|heartbeat\|mcp>` | Multi-agent worktree coordination board (shared file/glob locks, presence, `@mention` channels, and MCP stdio server) |
 | `daybook init --board` | Register the board MCP server, install Claude hooks and the Pi extension, and install Codex hooks when CLI >= 0.145.0 |
 | Pi extension | Installed by `daybook init --board`; enables session capture, board presence, lock notices, strict edit blocking, and automatic lock release on shutdown |
 
@@ -235,7 +235,15 @@ Set `DAYBOOK_SESSION_ID` in that runtime's MCP server environment to choose the 
 Pass `message_id` to fetch a full message, then explicitly call `daybook_board_ack` with that ID. Fetching never
 acknowledges. Repeating an acknowledgment is safe. The server derives the sender from the
 credential and rejects sender spoofing. The legacy MCP `agent` argument is accepted but
-ignored. Legacy CLI and task tools remain available.
+ignored.
+
+Task assignment is deprecated. Use `daybook_board_post` for progress, questions, and
+blockers, and `daybook_board_handoff` for completed work, remaining work, and verification.
+Existing `board_tasks` rows and `/api/board/tasks/*` endpoints remain unchanged.
+`daybook_board_claim_task` and `daybook_board_update_task` stay listed and callable with
+`Deprecated:` descriptions. `daybook board task ...` still works, prints a one-line notice
+to stderr, and is hidden from board help. The dashboard shows existing tasks only in a
+collapsed **Legacy tasks (read-only)** section, with no creation or status actions.
 
 The owner-authenticated HTTP API adds `POST /api/board/sessions`,
 `GET /api/board/inbox`, `GET /api/board/messages/:id?project=...`,
@@ -340,7 +348,7 @@ The dashboard uses the authenticated `POST /api/board/messages` endpoint with
 `dashboard: true`. Without `X-Daybook-Session`, the server assigns `human/dashboard`,
 shown as **Human (dashboard)**, and ignores a supplied agent handle. No agent session or
 presence is created. Session credentials, when supplied, still use session authentication.
-The lock/task handle controls only existing lock and task actions.
+The lock handle controls only file lock actions.
 
 Addressed posts display **pending**, **delivered**, or **acknowledged** from the explicit
 recipient's `board_deliveries` row via the status API's `delivery_statuses` map, keyed by

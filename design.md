@@ -78,16 +78,15 @@ Daybook uses a dark, tactile, high-contrast operational interface (**"Quiet Prec
   3. **No Server-Side Install Button**:
      - Because Daybook runs as a centralized multi-host ledger server, cards provide copy-ready `SKILL.md` and `AGENTS.md` payloads instead of calling a local filesystem install endpoint.
 - **Multi-Worktree Agent Coordination Board (`/board`, `web/src/pages/Board.tsx`)**:
-  1. **KPI & Live Sync Header**: Project selector, operator/agent handle, `5s` visibility-aware live polling, and 4 KPI cards (`Worktrees & Agents`, `Active File Locks`, `In-Flight Tasks`, `Channel Feed`).
-  2. **3-Column Operational Grid (`lg:grid-cols-12`)**:
-     - **Left (`lg:col-span-4`)**: Worktrees & Agent Roster (`@agent`, project badge, runtime badge, worktree badge, `⎇ branch`, session title / `#task`, worktree path, and `2h` active worktree window: `<7200s` fresh emerald dot, `<14400s` recent amber dot) + Active File & Glob Locks (with TTL countdown, `manual`/`auto` badge, conflict warnings, inline `+ Claim` form, and `Release` actions).
-     - **Center (`lg:col-span-4`)**: Worktree Task Board with status filters (`all`, `active`, `open`, `done`), priority badges, inline task claim form, and quick status transitions (`Mark Done`, `Review`, `Blocked`).
-     - **Right (`lg:col-span-4`)**: Cross-Worktree Channels (`#general`, `#handoff`, `#blocker`, `#review`) with `@agent` mention filter, inline message composer, and highlighted `@mention` chips.
+  1. **Live Sync Header**: Project selector, lock handle, `5s` visibility-aware live polling, active session/project counts, and blocker status. Setup and manual file locking remain secondary actions.
+  2. **Operational Grid (`lg:grid-cols-12`)**:
+     - **Left (`lg:col-span-8`)**: Project-grouped live sessions with runtime, worktree, branch, session title, and inline active file locks. Existing task IDs remain readable in session labels.
+     - **Right (`lg:col-span-4`)**: Manual file lock form and cross-worktree channels (`#general`, `#handoff`, `#blocker`, `#review`) with `@agent` filtering and the message composer. Existing tasks appear only when present in a collapsed, neutral **Legacy tasks (read-only)** disclosure. It retains status filters and task details without creation or status actions.
 
 ## Live board delivery contract
 
 The board connects live sessions so they can warn, ask, share, and hand off. Session startup
-shows the assigned handle, active peers, other agents' locks, and unread legacy mentions. Existing dashboard tasks and task APIs remain
+shows the assigned handle, active peers, other agents' locks, and unread legacy mentions. Legacy task data and APIs remain
 compatible, while startup guidance focuses on communication.
 
 Automatic notices cover only addressed messages, with up to five stable IDs and escaped
@@ -202,7 +201,7 @@ Reply actions focus the existing composer and pin the target project, channel, a
 ID until posting or cancellation. Changing the project view cancels the reply target.
 Posting disables duplicate submissions. Human posts use the fixed **Human (dashboard)**
 label and server sender `human/dashboard`, which cannot be an agent handle. They create
-no session or presence. The editable lock/task handle has no effect on message authorship.
+no session or presence. The editable lock handle has no effect on message authorship.
 All posts, including replies and addressed messages, remain visible to the project.
 
 Small monospace kind labels identify question, discovery, pitfall, decision, and handoff.

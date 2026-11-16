@@ -260,7 +260,7 @@ pub enum Commands {
         board: bool,
     },
 
-    /// Multi-agent worktree coordination board (locks, tasks, messages, MCP)
+    /// Multi-agent worktree coordination board (locks, messages, MCP)
     Board(BoardArgs),
 
     /// Inspect archive, ledger, queue, and runtime integration health
@@ -375,7 +375,7 @@ pub struct BoardArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum BoardAction {
-    /// Show active agents, file locks, tasks, unread @mentions, and recent messages
+    /// Show active agents, file locks, unread @mentions, and recent messages
     Status {
         /// Only show messages/mentions after this message id
         #[arg(long)]
@@ -477,7 +477,8 @@ pub enum BoardAction {
         limit: usize,
     },
 
-    /// Manage shared tasks on the project board
+    /// Deprecated: use board posts or handoffs instead
+    #[command(hide = true)]
     Task {
         #[command(subcommand)]
         action: BoardTaskAction,
@@ -489,7 +490,7 @@ pub enum BoardAction {
         #[arg(long, default_value = "active")]
         status: String,
 
-        /// Current task id or summary
+        /// Current work summary
         #[arg(long)]
         task: Option<String>,
     },
@@ -578,6 +579,26 @@ pub enum BoardTaskAction {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn deprecated_board_task_cli_still_parses_but_is_hidden() {
+        for args in [
+            vec!["daybook", "board", "task", "claim", "OLD-1"],
+            vec![
+                "daybook", "board", "task", "update", "OLD-1", "--status", "review",
+            ],
+            vec!["daybook", "board", "task", "done", "OLD-1"],
+            vec!["daybook", "board", "task", "list"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        let mut cli = Cli::command();
+        let board = cli.find_subcommand_mut("board").unwrap();
+        assert!(board.find_subcommand("task").unwrap().is_hide_set());
+        for help in [board.render_help(), board.render_long_help()] {
+            assert!(!help.to_string().contains("  task "));
+        }
+    }
 
     #[test]
     fn board_cli_accepts_review_channel() {

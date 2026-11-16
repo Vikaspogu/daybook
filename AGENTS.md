@@ -64,7 +64,7 @@ Daybook is a multi-agent context archive and operational ledger that discovers, 
 4. **Server Synthesis & Dashboard (`src/server/handlers.rs`, `web/src/pages/DayDetail.tsx`)**:
    - Synthesizes the 5-minute daily brief, project-grouped shipped outcomes, pitfalls/learnings, workflow coaching, and scoped copy-ready `SKILL.md` vs `<repo>/AGENTS.md` rules for the web dashboard and `daybook query` / `daybook stats`.
 5. **Multi-Worktree Agent Coordination Board (`src/board/`, `src/ledger/board.rs`, `web/src/pages/Board.tsx`)**:
-   - Coordinates concurrent coding agents across separate git worktrees (`T3 Code`, `Claude Code`, `Codex`, `Pi`) via SQLite-backed presence, advisory/strict glob file locks (`PreToolUse`/`PostToolUse` hooks), task claiming, `@mention` channels (`#general`, `#handoff`, `#blocker`), `/api/board/*` endpoints, `daybook board` CLI, and `daybook board mcp` JSON-RPC 2.0 stdio server.
+   - Coordinates concurrent coding agents across separate git worktrees (`T3 Code`, `Claude Code`, `Codex`, `Pi`) via SQLite-backed presence, advisory/strict glob file locks (`PreToolUse`/`PostToolUse` hooks), session messages, durable handoffs, `@mention` channels (`#general`, `#handoff`, `#blocker`), `/api/board/*` endpoints, `daybook board` CLI, and `daybook board mcp` JSON-RPC 2.0 stdio server.
 
 ### Module Structure
 

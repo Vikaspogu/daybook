@@ -4,7 +4,6 @@ import {
   type BoardStatusData,
   type BoardAgent,
   type BoardLock,
-  type BoardTask,
   type BoardMessage,
   type BoardChannel,
 } from '../hooks/useApi'
@@ -77,8 +76,6 @@ export function Board() {
     postBoardMessage,
     claimBoardLocks,
     releaseBoardLocks,
-    claimBoardTask,
-    updateBoardTask,
   } = useApi()
 
   const [selectedProject, setSelectedProject] = useState<string>('all')
@@ -90,7 +87,6 @@ export function Board() {
 
   // View toggles & filters
   const [showInactive, setShowInactive] = useState(false)
-  const [tasksDrawerOverride, setTasksDrawerOverride] = useState<boolean | null>(null)
   const [taskFilter, setTaskFilter] = useState<'all' | 'active' | 'open' | 'done'>('all')
   const [channelFilter, setChannelFilter] = useState<'all' | BoardChannel>('all')
   const [mentionFilter, setMentionFilter] = useState<string>('')
@@ -108,13 +104,6 @@ export function Board() {
   const [lockPathsInput, setLockPathsInput] = useState('')
   const [lockNoteInput, setLockNoteInput] = useState('')
   const [lockTtlInput, setLockTtlInput] = useState(30)
-
-  const [showTaskForm, setShowTaskForm] = useState(false)
-  const [taskIdInput, setTaskIdInput] = useState('')
-  const [taskTitleInput, setTaskTitleInput] = useState('')
-  const [taskPriorityInput, setTaskPriorityInput] = useState<'high' | 'medium' | 'low'>('medium')
-  const [taskBranchInput, setTaskBranchInput] = useState('')
-  const [taskNoteInput, setTaskNoteInput] = useState('')
 
   const [msgChannel, setMsgChannel] = useState<BoardChannel>('general')
   const [msgBody, setMsgBody] = useState('')
@@ -295,56 +284,6 @@ export function Board() {
     await refreshBoard()
   }
 
-  const handleClaimTask = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setActionError(null)
-    if (!taskIdInput.trim()) return
-    if (!writeProject) {
-      setActionError('No active project on the board yet')
-      return
-    }
-    try {
-      const res = await claimBoardTask({
-        project: writeProject,
-        task_id: taskIdInput.trim(),
-        title: taskTitleInput.trim() || taskIdInput.trim(),
-        priority: taskPriorityInput,
-        agent: operatorHandle || 'operator',
-        branch: taskBranchInput.trim() || undefined,
-        note: taskNoteInput.trim() || undefined,
-      })
-      if (!res.ok) {
-        setActionError(`Task [${res.task.task_id}] is already claimed by @${res.held_by}`)
-      } else {
-        setTaskIdInput('')
-        setTaskTitleInput('')
-        setTaskBranchInput('')
-        setTaskNoteInput('')
-        setShowTaskForm(false)
-      }
-      await refreshBoard()
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Failed to claim task')
-    }
-  }
-
-  const handleQuickTaskStatus = async (task: BoardTask, nextStatus: string) => {
-    setActionError(null)
-    try {
-      await updateBoardTask({
-        project: task.project,
-        task_id: task.task_id,
-        agent: task.agent || operatorHandle || 'operator',
-        status: nextStatus,
-        release_locks: nextStatus === 'done',
-        force: true,
-      })
-      await refreshBoard()
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Failed to update task')
-    }
-  }
-
   const handlePostMessage = async (e: React.FormEvent) => {
     e.preventDefault()
     setActionError(null)
@@ -519,16 +458,11 @@ export function Board() {
     () => locks.reduce((acc, l) => acc + l.paths.length, 0),
     [locks]
   )
-  const activeTasksCount = tasks.filter(
-    (t) => t.status === 'claimed' || t.status === 'review' || t.status === 'blocked'
-  ).length
   const blockerMessagesCount = messages.filter(
     (m) => m.channel === 'blocker' && nowSec - m.created_epoch < 7200
   ).length
   const blockedSessionsCount = activeAgents.filter((a) => a.status === 'blocked').length
   const totalBlockers = blockerMessagesCount + blockedSessionsCount
-  const tasksExpanded =
-    showTaskForm || (tasksDrawerOverride !== null ? tasksDrawerOverride : activeTasksCount > 0)
 
   function renderThread(m: BoardMessage, depth = 0): React.ReactNode {
     const replies = threads.replies.get(m.id) ?? []
@@ -654,9 +588,9 @@ export function Board() {
           </div>
 
           <label className="flex items-center gap-1.5 text-[11px] text-slate-400">
-            Lock/task handle
+            Lock handle
             <input type="text" value={operatorHandle} onChange={(e) => handleOperatorChange(e.target.value)}
-              aria-label="Lock and task handle"
+              aria-label="Lock handle"
               className="w-24 px-2 py-1.5 rounded-lg bg-[#0B0E14] border border-white/[0.08] text-xs font-mono text-slate-200" />
           </label>
 
@@ -684,17 +618,6 @@ export function Board() {
             className="px-2.5 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] text-xs font-semibold text-amber-300 transition-colors"
           >
             {showLockForm ? 'Close Lock Form' : '+ Lock Files'}
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setShowTaskForm((v) => !v)
-              setTasksDrawerOverride(true)
-            }}
-            className="px-2.5 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] text-xs font-semibold text-sky-300 transition-colors"
-          >
-            {showTaskForm ? 'Close Task Form' : '+ New Task'}
           </button>
 
           <button
@@ -739,7 +662,7 @@ export function Board() {
                 {`{ "mcpServers": { "daybook-board": { "command": "daybook", "args": ["board", "mcp"] } } }`}
               </pre>
               <p className="text-[11px] text-slate-400">
-                Gives agents native tools to check status, lock files, claim tasks, and post updates.
+                Gives agents native tools to check status, lock files, and post updates or handoffs.
               </p>
             </div>
             <div className="p-3 rounded-xl bg-[#0B0E14] border border-white/[0.06] space-y-1.5">
@@ -1070,136 +993,32 @@ export function Board() {
               </section>
             )}
 
-            {/* Shared Tasks Section (Compact 1-line bar when 0 tasks, expandable on click) */}
-            <section className="qp-card p-3.5 space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowTaskForm(false)
-                    setTasksDrawerOverride(!tasksExpanded)
-                  }}
-                  className="flex items-center gap-2 text-left"
-                >
-                  <h2 className="text-xs font-mono font-bold uppercase tracking-wider text-sky-300">
-                    Shared Tasks ({activeTasksCount} active)
-                  </h2>
-                  <span className="text-[11px] font-mono text-slate-500">
-                    {tasksExpanded ? '▾' : '▸'}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowTaskForm((v) => !v)
-                    setTasksDrawerOverride(true)
-                  }}
-                  className="px-2 py-0.5 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/30 text-[11px] font-mono font-bold text-sky-300"
-                >
-                  {showTaskForm ? 'Cancel' : '+ Claim Task'}
-                </button>
-              </div>
-
-              {tasksExpanded && (
-                <>
-                  {showTaskForm && (
-                    <form
-                      onSubmit={handleClaimTask}
-                      className="p-3 rounded-xl bg-[#0B0E14] border border-white/[0.08] space-y-2"
-                    >
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          value={taskIdInput}
-                          onChange={(e) => setTaskIdInput(e.target.value)}
-                          placeholder="Task ID (e.g. AUTH-1)"
-                          className="w-32 px-2.5 py-1.5 rounded-lg bg-[#131822] border border-white/[0.08] text-xs font-mono text-slate-100"
-                          required
-                        />
-                        <select
-                          value={taskPriorityInput}
-                          onChange={(e) =>
-                            setTaskPriorityInput(e.target.value as 'high' | 'medium' | 'low')
-                          }
-                          aria-label="Task priority"
-                          className="px-2 py-1.5 rounded-lg bg-[#131822] border border-white/[0.08] text-xs font-mono text-slate-200"
-                        >
-                          <option value="high">high</option>
-                          <option value="medium">medium</option>
-                          <option value="low">low</option>
-                        </select>
-                      </div>
-                      <input
-                        type="text"
-                        value={taskTitleInput}
-                        onChange={(e) => setTaskTitleInput(e.target.value)}
-                        placeholder="Plain-English task description"
-                        className="w-full px-2.5 py-1.5 rounded-lg bg-[#131822] border border-white/[0.08] text-xs text-slate-100"
-                      />
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          value={taskBranchInput}
-                          onChange={(e) => setTaskBranchInput(e.target.value)}
-                          placeholder="Branch (optional)"
-                          className="w-1/2 px-2.5 py-1.5 rounded-lg bg-[#131822] border border-white/[0.08] text-xs font-mono text-slate-100"
-                        />
-                        <input
-                          type="text"
-                          value={taskNoteInput}
-                          onChange={(e) => setTaskNoteInput(e.target.value)}
-                          placeholder="Note (optional)"
-                          className="w-1/2 px-2.5 py-1.5 rounded-lg bg-[#131822] border border-white/[0.08] text-xs text-slate-100"
-                        />
-                      </div>
-                      {activeProject === 'all' && (board?.projects?.length ?? 0) > 0 && (
-                        <div className="flex items-center justify-between gap-2 text-xs font-mono text-slate-400">
-                          <span>Target Project:</span>
-                          <select
-                            value={writeProject}
-                            onChange={(e) => setTargetProject(e.target.value)}
-                            aria-label="Select project for task"
-                            className="px-2 py-1 rounded-lg bg-[#131822] border border-white/[0.08] text-xs font-mono text-sky-300"
-                          >
-                            {(board?.projects ?? []).map((proj) => (
-                              <option key={proj} value={proj}>
-                                {proj}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      )}
+            {tasks.length > 0 && (
+              <details className="qp-card p-3.5 space-y-3">
+                <summary className="cursor-pointer text-xs font-mono text-slate-400">
+                  Legacy tasks (read-only) ({tasks.length})
+                </summary>
+                <div className="space-y-3">
+                  <div className="flex items-center gap-1 bg-[#0B0E14] p-1 rounded-xl border border-white/[0.06]">
+                    {(['all', 'active', 'open', 'done'] as const).map((f) => (
                       <button
-                        type="submit"
-                        className="w-full py-1.5 rounded-lg bg-sky-400 text-slate-950 font-bold text-xs hover:bg-sky-300 transition-colors"
+                        key={f}
+                        type="button"
+                        onClick={() => setTaskFilter(f)}
+                        className={`flex-1 py-1 rounded-lg text-[11px] font-mono font-semibold capitalize transition-colors ${
+                          taskFilter === f
+                            ? 'bg-white/[0.1] text-slate-100'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
                       >
-                        Claim Task in {writeProject || 'project'}
+                        {f}
                       </button>
-                    </form>
-                  )}
-
-                  {tasks.length > 0 && (
-                    <div className="flex items-center gap-1 bg-[#0B0E14] p-1 rounded-xl border border-white/[0.06]">
-                      {(['all', 'active', 'open', 'done'] as const).map((f) => (
-                        <button
-                          key={f}
-                          type="button"
-                          onClick={() => setTaskFilter(f)}
-                          className={`flex-1 py-1 rounded-lg text-[11px] font-mono font-semibold capitalize transition-colors ${
-                            taskFilter === f
-                              ? 'bg-white/[0.1] text-slate-100'
-                              : 'text-slate-400 hover:text-slate-200'
-                          }`}
-                        >
-                          {f}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                    ))}
+                  </div>
 
                   {filteredTasks.length === 0 ? (
                     <div className="p-4 rounded-xl bg-[#0B0E14]/60 border border-white/[0.04] text-center text-xs text-slate-500">
-                      No formal tasks claimed yet. Session titles appear automatically on the left.
+                      No legacy tasks match this filter.
                     </div>
                   ) : (
                     <div className="space-y-2">
@@ -1262,43 +1081,13 @@ export function Board() {
                               {task.note}
                             </div>
                           )}
-
-                          <div className="flex items-center gap-1.5 pt-1">
-                            {task.status !== 'done' && (
-                              <button
-                                type="button"
-                                onClick={() => handleQuickTaskStatus(task, 'done')}
-                                className="px-2 py-0.5 rounded bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 text-[10px] font-mono font-semibold"
-                              >
-                                Mark Done
-                              </button>
-                            )}
-                            {task.status !== 'review' && task.status !== 'done' && (
-                              <button
-                                type="button"
-                                onClick={() => handleQuickTaskStatus(task, 'review')}
-                                className="px-2 py-0.5 rounded bg-amber-400/15 hover:bg-amber-400/25 text-amber-300 text-[10px] font-mono font-semibold"
-                              >
-                                Review
-                              </button>
-                            )}
-                            {task.status !== 'blocked' && task.status !== 'done' && (
-                              <button
-                                type="button"
-                                onClick={() => handleQuickTaskStatus(task, 'blocked')}
-                                className="px-2 py-0.5 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 text-[10px] font-mono font-semibold"
-                              >
-                                Blocked
-                              </button>
-                            )}
-                          </div>
                         </div>
                       ))}
                     </div>
                   )}
-                </>
-              )}
-            </section>
+                </div>
+              </details>
+            )}
 
             {/* Team Messages & Handoffs Stream */}
             <section className="qp-card p-3.5 space-y-3">
