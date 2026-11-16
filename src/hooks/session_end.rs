@@ -27,6 +27,9 @@ pub async fn handle() -> Result<()> {
             return Ok(()); // Don't block session exit
         }
     };
+    if crate::board::identity::is_valid_board_workspace(&input.cwd) {
+        eprintln!("[daybook board] Handoff reminder: use daybook_board_handoff before ending with completed work, remaining work, and verification or blockers.");
+    }
     // Release auto-claimed board locks and mark agent idle on SessionEnd
 
     // Archive on all session end reasons to collect complete history

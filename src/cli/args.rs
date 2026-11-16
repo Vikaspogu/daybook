@@ -445,6 +445,10 @@ pub enum BoardAction {
         #[arg(long, default_value = "general")]
         channel: String,
 
+        /// Message kind: chat, question, discovery, pitfall, decision, or handoff
+        #[arg(long, default_value = "chat", value_parser = ["chat", "question", "discovery", "pitfall", "decision", "handoff"])]
+        kind: String,
+
         /// Parent message id for threaded replies
         #[arg(long)]
         reply_to: Option<i64>,
