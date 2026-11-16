@@ -174,7 +174,7 @@ async fn prepare_notice(
     let mut text = String::new();
     if startup {
         let _ = client.session_status(&session, "active").await;
-        text = format!("[daybook board] You are @{}. Use the board to warn, ask, share, and hand off. Messages are visible to the project. Pass session_id={} to daybook_board_post, daybook_board_inbox, and daybook_board_ack to use this session. Fetch by message_id, then explicitly acknowledge with daybook_board_ack.\n", session.handle, runtime_id);
+        text = format!("[daybook board] You are @{}. Use the board to warn, ask, share, and hand off. Messages are visible to the project. Pass session_id={} to daybook_board_post, daybook_board_handoff, daybook_board_inbox, and daybook_board_ack to use this session. Fetch by message_id, then explicitly acknowledge with daybook_board_ack. Share durable knowledge with kind=discovery, pitfall, or decision. Before ending, call daybook_board_handoff with completed work, remaining work, and verification or blockers.\n", session.handle, runtime_id);
         if let Ok(snap) = client
             .status(Some(&identity.project), Some(&identity.agent), None)
             .await
@@ -483,6 +483,9 @@ mod tests {
             .text
             .contains(&format!("You are @{}", receiver.handle)));
         assert!(notice.text.contains("Active sessions:"));
+        assert!(notice
+            .text
+            .contains("Before ending, call daybook_board_handoff"));
         assert!(notice.text.contains(&lock.lock.id));
         assert!(notice.text.contains("src/**"));
         assert!(notice.text.contains(&format!("#{}", legacy.id)));
@@ -779,9 +782,11 @@ mod tests {
             config.server.db_path = dir.join("board.db");
             let fixture: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(dir.join("notice.json")).unwrap()).unwrap();
+            let session: BoardSession = serde_json::from_value(fixture["session"].clone()).unwrap();
+            let credential = session.credential.clone();
             let notice = Notice {
                 text: "untrusted preview".into(),
-                session: serde_json::from_value(fixture["session"].clone()).unwrap(),
+                session,
                 ids: vec![fixture["id"].as_i64().unwrap()],
                 wake: false,
             };
@@ -795,6 +800,21 @@ mod tests {
                 &std::env::var("DAYBOOK_EMIT_TEST_EVENT").unwrap(),
             )
             .unwrap();
+            // Under suite load the 250 ms acceptance worker can outlive emit; keep the
+            // child alive until it lands so the parent's receipt assertion is stable.
+            if !crate::board::session::is_pi() {
+                let ledger = crate::ledger::Ledger::open(&config.server.db_path).unwrap();
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while std::time::Instant::now() < deadline
+                    && ledger
+                        .board_inbox(&credential, false)
+                        .unwrap()
+                        .iter()
+                        .all(|d| d.delivered_at.is_none())
+                {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
             return;
         }
         let tmp = tempfile::tempdir().unwrap();

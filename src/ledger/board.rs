@@ -646,8 +646,11 @@ pub(super) fn route_message_tx(
 ) -> Result<()> {
     let kind = req.kind.as_deref().unwrap_or("chat");
     anyhow::ensure!(
-        matches!(kind, "chat" | "question"),
-        "kind must be chat or question"
+        matches!(
+            kind,
+            "chat" | "question" | "discovery" | "pitfall" | "decision" | "handoff"
+        ),
+        "kind must be chat, question, discovery, pitfall, decision, or handoff"
     );
     let to = req
         .to
@@ -1055,6 +1058,58 @@ impl Ledger {
             blocked: !blocking_locks.is_empty(),
             blocking_locks,
         })
+    }
+
+    // Durable posts share the journal calendar used by session summaries.
+    pub fn board_archive_messages(&self, date: &str) -> Result<Vec<BoardMessageRow>> {
+        // Loose or invalid dates keep the old empty-day behavior instead of failing the summary.
+        // chrono accepts "2026-1-1"; session_briefs matches the exact string, so mirror that.
+        let Some(date) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .ok()
+            .filter(|d| d.format("%Y-%m-%d").to_string() == date)
+        else {
+            return Ok(Vec::new());
+        };
+        let midnight = date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
+             FROM board_messages
+             WHERE kind IN ('discovery', 'pitfall', 'decision', 'handoff')
+               AND created_epoch >= ?1 AND created_epoch < ?2
+             ORDER BY project, created_epoch, id",
+        )?;
+        // Include neighboring UTC dates before applying the journal timezone, including DST.
+        // ponytail: keep at most 1500 posts of the requested day (later projects drop first); paginate if one day exceeds it.
+        let rows = stmt.query_map(params![midnight - 86400, midnight + 2 * 86400], |r| {
+            Ok(BoardMessageRow {
+                id: r.get(0)?,
+                project: r.get(1)?,
+                channel: r.get(2)?,
+                agent: r.get(3)?,
+                machine: r.get(4)?,
+                body: r.get(5)?,
+                mentions: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or_default(),
+                parent_id: r.get(7)?,
+                created_utc: r.get(8)?,
+                created_epoch: r.get(9)?,
+                kind: r.get(10)?,
+                to: r.get(11)?,
+            })
+        })?;
+        let mut posts = Vec::new();
+        for row in rows {
+            let post = row?;
+            if chrono::DateTime::from_timestamp(post.created_epoch, 0)
+                .is_some_and(|utc| super::journal_date_at(utc) == date)
+            {
+                posts.push(post);
+                if posts.len() == 1500 {
+                    break;
+                }
+            }
+        }
+        Ok(posts)
     }
 
     /// Pure read-only message query with optional channel, mention, and `since_id` filters.
@@ -1986,6 +2041,74 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn board_archive_uses_journal_dates_at_utc_and_dst_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&dir.path().join("board.db")).unwrap();
+        let mut expected = std::collections::BTreeMap::<String, Vec<i64>>::new();
+        for timestamp in [
+            "2026-03-08T00:00:00Z",
+            "2026-03-08T04:59:59Z",
+            "2026-03-08T05:00:00Z",
+            "2026-03-08T07:00:00Z",
+            "2026-03-09T03:59:59Z",
+            "2026-03-09T04:00:00Z",
+            "2026-11-01T03:59:59Z",
+            "2026-11-01T04:00:00Z",
+            "2026-11-02T04:59:59Z",
+            "2026-11-02T05:00:00Z",
+        ] {
+            let utc = chrono::DateTime::parse_from_rfc3339(timestamp)
+                .unwrap()
+                .to_utc();
+            let conn = ledger.conn.lock().unwrap();
+            conn.execute("INSERT INTO board_messages(project,agent,machine,body,created_utc,created_epoch,kind) VALUES ('repo','agent','machine','evidence',?1,?2,'discovery')", params![timestamp, utc.timestamp()]).unwrap();
+            expected
+                .entry(super::super::journal_date_at(utc).to_string())
+                .or_default()
+                .push(conn.last_insert_rowid());
+        }
+        for (date, ids) in expected {
+            let posts = ledger.board_archive_messages(&date).unwrap();
+            assert_eq!(
+                posts.iter().map(|post| post.id).collect::<Vec<_>>(),
+                ids,
+                "{date}"
+            );
+        }
+        assert!(ledger.board_archive_messages("invalid").unwrap().is_empty());
+        // Matches session_briefs' exact string: a loose spelling of a day with posts is empty.
+        assert!(ledger
+            .board_archive_messages("2026-3-8")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn board_archive_caps_requested_day_at_1500_posts() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&dir.path().join("board.db")).unwrap();
+        let utc = chrono::DateTime::parse_from_rfc3339("2026-03-10T16:00:00Z")
+            .unwrap()
+            .to_utc();
+        {
+            let conn = ledger.conn.lock().unwrap();
+            // Neighbor-day rows must not consume the cap.
+            for (project, epoch, n) in [
+                ("a", utc.timestamp() - 86400, 10),
+                ("a", utc.timestamp(), 1000),
+                ("b", utc.timestamp(), 501),
+            ] {
+                for _ in 0..n {
+                    conn.execute("INSERT INTO board_messages(project,agent,machine,body,created_utc,created_epoch,kind) VALUES (?1,'agent','machine','x','t',?2,'decision')", params![project, epoch]).unwrap();
+                }
+            }
+        }
+        let posts = ledger.board_archive_messages("2026-03-10").unwrap();
+        assert_eq!(posts.len(), 1500);
+        assert_eq!(posts.iter().filter(|p| p.project == "b").count(), 500);
+    }
 
     #[test]
     fn board_message_row_without_kind_defaults_to_chat() {

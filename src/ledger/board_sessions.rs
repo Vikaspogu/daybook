@@ -450,7 +450,7 @@ mod tests {
             (
                 "invalid",
                 receiver.handle.as_str(),
-                "kind must be chat or question",
+                "kind must be chat, question, discovery, pitfall, decision, or handoff",
             ),
             ("question", "missing", "unknown recipient @missing"),
         ] {
@@ -490,6 +490,61 @@ mod tests {
                 .to_string(),
             format!("unknown recipient @{}", receiver.handle)
         );
+    }
+
+    #[test]
+    fn typed_posts_validate_and_never_wake() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&tmp.path().join("board.db")).unwrap();
+        let a = ledger
+            .board_register_session(&pi_registration("/a"))
+            .unwrap();
+        let b = ledger
+            .board_register_session(&pi_registration("/b"))
+            .unwrap();
+        for kind in ["discovery", "pitfall", "decision", "handoff"] {
+            let mut req = question(&a, &b);
+            req.kind = Some(kind.into());
+            let message = ledger.board_session_post(&a.credential, &req).unwrap();
+            assert_eq!(message.kind, kind);
+            assert!(ledger.board_wake(&b.credential).unwrap().is_empty());
+        }
+        assert_eq!(ledger.board_inbox(&b.credential, false).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn typed_posts_survive_retention_after_acknowledgment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("board.db");
+        let ledger = Ledger::open(&path).unwrap();
+        let a = ledger.board_register_session(&registration("/a")).unwrap();
+        let b = ledger.board_register_session(&registration("/b")).unwrap();
+        let mut ids = Vec::new();
+        for kind in ["discovery", "pitfall", "decision", "handoff", "chat"] {
+            let mut req = question(&a, &b);
+            req.kind = Some(kind.into());
+            let message = ledger.board_session_post(&a.credential, &req).unwrap();
+            ledger
+                .board_receipt(&b.credential, message.id, true)
+                .unwrap();
+            ids.push(message.id);
+        }
+        {
+            let mut conn = ledger.conn.lock().unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute("UPDATE board_messages SET created_epoch=0", [])
+                .unwrap();
+            for _ in 0..500 {
+                tx.execute("INSERT INTO board_messages(project,agent,machine,body,created_utc,created_epoch) VALUES ('repo','legacy','machine','recent chat','test',0)", []).unwrap();
+            }
+            prune_board_tx(&tx, "repo", chrono::Utc::now().timestamp()).unwrap();
+            tx.commit().unwrap();
+        }
+        let reopened = Ledger::open(&path).unwrap();
+        for id in &ids[..4] {
+            assert!(reopened.board_message("repo", *id).is_ok());
+        }
+        assert!(reopened.board_message("repo", ids[4]).is_err());
     }
 
     #[test]
@@ -1382,7 +1437,7 @@ mod tests {
         let m = ledger
             .board_post_message(&BoardCaller::local(), &req)
             .unwrap();
-        ledger.conn.lock().unwrap().execute_batch("DROP TABLE board_deliveries; DROP TABLE board_message_auth; DROP TABLE board_sessions; ALTER TABLE board_messages DROP COLUMN kind; ALTER TABLE board_messages DROP COLUMN addressed_to;").unwrap();
+        ledger.conn.lock().unwrap().execute_batch("DROP TABLE board_deliveries; DROP TABLE board_message_auth; DROP TABLE board_sessions; DROP INDEX idx_board_messages_kind_epoch; ALTER TABLE board_messages DROP COLUMN kind; ALTER TABLE board_messages DROP COLUMN addressed_to;").unwrap();
         drop(ledger);
         let ledger = Ledger::open(&path).unwrap();
         let legacy = ledger.board_message("repo", m.id).unwrap();

@@ -269,11 +269,12 @@ pub async fn run(args: BoardArgs) -> Result<()> {
         BoardAction::Post {
             body,
             channel,
+            kind,
             reply_to,
         } => {
             let msg = client
                 .post_message(&BoardPostMessageReq {
-                    kind: None,
+                    kind: Some(kind),
                     to: None,
                     project: identity.project.clone(),
                     channel: Some(channel),

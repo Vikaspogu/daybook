@@ -680,6 +680,10 @@ impl Ledger {
             }
             tx.commit()?;
         }
+        // After the migration: old databases gain `kind` above. Serves the daily archive scan.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_board_messages_kind_epoch ON board_messages(kind, created_epoch);",
+        )?;
         reconcile_journal_dates(&conn)?;
         // Token hashes and all summaries live here: owner-only on unix.
         #[cfg(unix)]

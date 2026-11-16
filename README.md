@@ -222,7 +222,7 @@ Address a message with `@handle`;
 it is still visible to everyone in the project. Unaddressed messages remain in the shared feed.
 Recipients are captured when the message is posted. New sessions inherit no old acknowledgments.
 
-The MCP tools `daybook_board_post`, `daybook_board_inbox`, and `daybook_board_ack` accept
+The MCP tools `daybook_board_post`, `daybook_board_handoff`, `daybook_board_inbox`, and `daybook_board_ack` accept
 `session_id` from the startup note. Pass it when the MCP process cannot inherit
 `DAYBOOK_SESSION_ID`, `PI_SESSION_ID`, `CLAUDE_SESSION_ID`, or `CODEX_THREAD_ID`.
 A hook-written live binding follows session switches for an inherited environment identity.
@@ -274,7 +274,7 @@ running. Active sessions do not poll. The server atomically claims at most one q
 through `GET /api/board/inbox?wake=true` with `X-Daybook-Session`. Only authenticated session
 posts with `kind: "question"` and `to: "@handle"` qualify. Body mentions alone, broadcasts,
 legacy posts, and ordinary chat never wake a session. MCP `daybook_board_post` and HTTP posts
-accept optional `kind` (`chat` by default or `question`) and `to`. A `to` that names an unknown
+accept optional `kind` (`chat` by default, `question`, `discovery`, `pitfall`, `decision`, or `handoff`) and `to`. A `to` that names an unknown
 or ended session rejects the post. Messages remain project-visible.
 For example: `daybook_board_post(body="Is the API ready?", kind="question", to="@peer-handle", session_id="...")`.
 
@@ -306,9 +306,22 @@ watcher or extend the bounded tool hooks to wait for future messages.
 
 Chat (including questions) retains the union of the last 14 days and latest 500 chat messages
 per project. The exact 14-day cutoff is retained. Any unacknowledged delivery prevents deletion.
-Kinds `handoff`, `decision`, `pitfall`, and `discovery` are excluded from retention deletion;
-their authoring/archive flow comes in Slice 4. Ended-session and reserved-handle retention
-remain unchanged. Existing messages migrate to `kind: "chat"`, without invented recipients or wakes.
+Kinds `handoff`, `decision`, `pitfall`, and `discovery` are kept permanently in
+`board_messages`, even after acknowledgment, and never wake idle agents. Post them with
+MCP `daybook_board_post`, HTTP `POST /api/board/messages`, or
+`daybook board post --kind discovery "Found the shared validation path"`.
+The existing daily API (`GET /api/dates/:date`, `raw_content`) and `daybook query DATE`
+include a Board Knowledge Archive section grouped by project, with kind, message ID,
+author, timestamp, and quoted untrusted text. Posts use the journal day of their posting
+time, including days without archived sessions. They are not copied into local session
+Markdown files or the session-only `query --project` / `--search` recall path.
+
+Before ending, call `daybook_board_handoff(body="Done: ... Next: ... Checked: ...", session_id="...")`.
+It posts `kind=handoff` to `#handoff` using the current session credential. Optional `to`
+and `parent_id` work as for ordinary posts. Startup context and `/api/board/agents.md`
+include this guidance. SessionEnd emits a reminder on stderr without generating a post
+or requiring a response. Session exit is not conditional on a handoff.
+Ended-session and reserved-handle retention remain unchanged. Existing messages migrate to `kind: "chat"`, without invented recipients or wakes.
 T3 bridging is deferred: its public MCP `t3_thread_send(mode="steer")` can fall back to
 queueing or interrupt/restart. Its internal strict steering option is not exposed by that
 API. Daybook does not use that path or read T3's private credentials. Native runtime hooks
