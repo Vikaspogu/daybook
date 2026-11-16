@@ -463,12 +463,6 @@ export interface BoardClaimLocksResponse {
   conflicts: BoardLock[]
 }
 
-export interface BoardClaimTaskResponse {
-  ok: boolean
-  held_by?: string | null
-  task: BoardTask
-}
-
 interface ApiResponse<T> {
   success: boolean
   data?: T
@@ -633,42 +627,6 @@ export function useApi() {
     [request]
   )
 
-  const claimBoardTask = useCallback(
-    (payload: {
-      project: string
-      task_id: string
-      title?: string
-      priority?: string
-      agent: string
-      branch?: string
-      note?: string
-      force?: boolean
-    }) =>
-      request<BoardClaimTaskResponse>('/board/tasks/claim', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
-    [request]
-  )
-
-  const updateBoardTask = useCallback(
-    (payload: {
-      project: string
-      task_id: string
-      agent: string
-      status: string
-      note?: string
-      pr_url?: string
-      release_locks?: boolean
-      force?: boolean
-    }) =>
-      request<BoardTask>('/board/tasks/update', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
-    [request]
-  )
-
   return {
     loading,
     error,
@@ -688,7 +646,5 @@ export function useApi() {
     postBoardMessage,
     claimBoardLocks,
     releaseBoardLocks,
-    claimBoardTask,
-    updateBoardTask,
   }
 }

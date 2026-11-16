@@ -512,7 +512,7 @@ fn mcp_tool_definitions() -> Value {
         },
         {
             "name": "daybook_board_status",
-            "description": "Read active agents, file locks, tasks, messages, and unread @mentions across worktrees on this project.",
+            "description": "Read active agents, file locks, messages, and unread @mentions across worktrees on this project.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -582,7 +582,7 @@ fn mcp_tool_definitions() -> Value {
         },
         {
             "name": "daybook_board_claim_task",
-            "description": "Create or claim a shared task on the project coordination board.",
+            "description": "Deprecated: use daybook_board_post or daybook_board_handoff to coordinate work. Create or claim a legacy task for compatibility.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -597,7 +597,7 @@ fn mcp_tool_definitions() -> Value {
         },
         {
             "name": "daybook_board_update_task",
-            "description": "Update task status (open, claimed, review, blocked, done), PR link, and optionally release locks.",
+            "description": "Deprecated: use daybook_board_post or daybook_board_handoff to share progress. Update a legacy task status, PR link, or release locks for compatibility.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -639,6 +639,55 @@ mod tests {
         args: Value,
     ) -> Value {
         handle_rpc_message(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}}), client, identity, runtime_id, config).await.unwrap()["result"].clone()
+    }
+
+    #[tokio::test]
+    async fn deprecated_mcp_task_tools_remain_listed_and_callable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = crate::config::Config::default();
+        let client = BoardClient::Local {
+            ledger: Ledger::open(&tmp.path().join("board.db")).unwrap(),
+            caller: BoardCaller::local(),
+        };
+        let identity = resolve_board_identity(tmp.path(), Some("slice7"), Some("legacy-agent"));
+        let listed = handle_rpc_message(
+            &json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+            &client,
+            &identity,
+            "",
+            &config,
+        )
+        .await
+        .unwrap();
+        for (name, args) in [
+            (
+                "daybook_board_claim_task",
+                json!({"task_id":"OLD-1","title":"Existing client"}),
+            ),
+            (
+                "daybook_board_update_task",
+                json!({"task_id":"OLD-1","status":"done"}),
+            ),
+        ] {
+            let description = listed["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap()["description"]
+                .as_str()
+                .unwrap();
+            assert!(description.starts_with("Deprecated:"), "{description}");
+            assert!(description.contains("daybook_board_post"));
+            assert!(description.contains("daybook_board_handoff"));
+            let result = call_session_tool(&client, &identity, &config, "", name, args).await;
+            assert_eq!(result["isError"], false, "{result}");
+        }
+        let status = client.status(Some("slice7"), None, None).await.unwrap();
+        assert_eq!(status.tasks.len(), 1);
+        assert_eq!(status.tasks[0].task_id, "OLD-1");
+        assert_eq!(status.tasks[0].title, "Existing client");
+        assert_eq!(status.tasks[0].status, "done");
     }
 
     #[tokio::test]

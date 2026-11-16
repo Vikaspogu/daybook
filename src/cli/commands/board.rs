@@ -20,6 +20,9 @@ pub async fn run(args: BoardArgs) -> Result<()> {
     let action = args
         .action
         .unwrap_or(BoardAction::Status { since_id: None });
+    if matches!(action, BoardAction::Task { .. }) {
+        eprintln!("[daybook board] Deprecated: task commands are kept for compatibility. Use board posts or daybook_board_handoff instead.");
+    }
     if let Some(ref explicit_proj) = args.project {
         let p = explicit_proj.trim();
         if p.eq_ignore_ascii_case("agent") {
