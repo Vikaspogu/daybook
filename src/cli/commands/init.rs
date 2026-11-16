@@ -74,6 +74,7 @@ pub async fn run(
     if configure_board {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         configure_board_mcp_and_hooks(&cwd, &home)?;
+        super::codex_hooks::configure(&home)?;
     }
 
     println!();

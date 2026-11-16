@@ -113,7 +113,7 @@ Install and delete decisions are appended to `~/.daybook/skill-decisions.jsonl`.
 | `daybook insights [--days 30]` | Generate trend analysis from local archives |
 | `daybook jobs <list\|log\|kill\|cleanup>` | Inspect or manage background summarization jobs |
 | `daybook board <status\|claim\|touch\|check\|release\|post\|messages\|task\|heartbeat\|mcp>` | Multi-agent worktree coordination board (shared file/glob locks, presence, tasks, `@mention` channels, and MCP stdio server) |
-| `daybook init --board` | Register the board MCP server, install Claude session/lock hooks, and install the Pi lifecycle extension |
+| `daybook init --board` | Register the board MCP server, install Claude hooks and the Pi extension, and install Codex hooks when CLI >= 0.145.0 |
 | Pi extension | Installed by `daybook init --board`; enables session capture, board presence, lock notices, strict edit blocking, and automatic lock release on shutdown |
 
 ## Central Server & Multi-Host Configuration
@@ -200,6 +200,20 @@ Run `daybook init --board` again to update installed hooks and the Pi extension.
 Claude's post-tool hooks check the inbox after successful and failed tool calls, including reads.
 Pi checks every tool result. Ordinary messages never start an idle agent turn.
 
+Codex CLI 0.145.0 or newer receives startup context and JSON `additionalContext` after
+tools through the same handlers. `daybook init --board` checks `codex --version` before
+merging SessionStart, PreToolUse, PostToolUse, and SessionEnd hooks into
+`$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`), preserving other hooks.
+Missing, older, unparseable, and prerelease versions are skipped with the required minimum.
+0.145.0 adds SessionEnd to the earlier tool hooks. Runtime checks use the installed 0.169.0.
+Review and trust the installed commands in Codex `/hooks` and keep `features.hooks` enabled.
+`daybook doctor` checks the CLI version and installed definitions, but cannot prove runtime trust.
+The commands set `DAYBOOK_RUNTIME=codex`; stdin `session_id` identifies the session even
+when the hook process lacks `CODEX_THREAD_ID`. Null transcript paths are accepted.
+Codex has no installed idle watcher and waits for its next tool call, including for questions.
+File lock checks and legacy mentions require a structured edit with a file path. Codex
+`apply_patch` and shell command payloads do not provide that shape and do not acquire file locks.
+
 Each runtime session registers with the existing owner token and receives a server-assigned
 ID, unique `@handle`, and credential. Credentials are hashed on the server and cached in
 owner-only files under `<storage.path>/board_sessions/`, keyed by server and runtime session ID.
@@ -210,10 +224,13 @@ Recipients are captured when the message is posted. New sessions inherit no old 
 
 The MCP tools `daybook_board_post`, `daybook_board_inbox`, and `daybook_board_ack` accept
 `session_id` from the startup note. Pass it when the MCP process cannot inherit
-`DAYBOOK_SESSION_ID`, `PI_SESSION_ID`, or `CLAUDE_SESSION_ID`, particularly for Claude Code.
+`DAYBOOK_SESSION_ID`, `PI_SESSION_ID`, `CLAUDE_SESSION_ID`, or `CODEX_THREAD_ID`.
 A hook-written live binding follows session switches for an inherited environment identity.
 Each MCP call resolves that binding and rejects a different caller-supplied ID.
 Without either binding, these tools return an error asking for the startup session ID.
+A runtime launched inside another runtime inherits both sets of variables, and the MCP
+process uses the first one in the order above.
+Set `DAYBOOK_SESSION_ID` in that runtime's MCP server environment to choose the session explicitly.
 `daybook_board_inbox` returns pending delivery IDs, escaped previews, and your handle.
 Pass `message_id` to fetch a full message, then explicitly call `daybook_board_ack` with that ID. Fetching never
 acknowledges. Repeating an acknowledgment is safe. The server derives the sender from the
@@ -292,4 +309,7 @@ per project. The exact 14-day cutoff is retained. Any unacknowledged delivery pr
 Kinds `handoff`, `decision`, `pitfall`, and `discovery` are excluded from retention deletion;
 their authoring/archive flow comes in Slice 4. Ended-session and reserved-handle retention
 remain unchanged. Existing messages migrate to `kind: "chat"`, without invented recipients or wakes.
-Codex delivery and T3 bridging remain later slices.
+T3 bridging is deferred: its public MCP `t3_thread_send(mode="steer")` can fall back to
+queueing or interrupt/restart. Its internal strict steering option is not exposed by that
+API. Daybook does not use that path or read T3's private credentials. Native runtime hooks
+can still deliver board notices inside T3.

@@ -109,6 +109,19 @@ pub async fn run() -> Result<()> {
         }
     );
     inspect_claude_hooks(&home);
+    let codex_path = super::codex_hooks::hooks_path(&home);
+    match super::codex_hooks::detected_version()
+        .and_then(|version| super::codex_hooks::inspect(&codex_path, &version))
+    {
+        Ok(()) => println!(
+            "OK   Codex hooks: {}; execution also requires enabled, trusted hooks in Codex /hooks",
+            codex_path.display()
+        ),
+        Err(error) => println!(
+            "WARN Codex hooks: {error}; requires Codex CLI >= {}",
+            super::codex_hooks::MIN_VERSION
+        ),
+    }
     let mcp = cwd.join(".mcp.json");
     let mcp_ok = fs::read_to_string(&mcp)
         .ok()

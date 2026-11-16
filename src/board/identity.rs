@@ -165,6 +165,9 @@ pub fn resolve_agent_runtime(explicit: Option<&str>) -> String {
     if let Some(exp) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
         return sanitize_agent_handle(exp);
     }
+    if std::env::var("DAYBOOK_RUNTIME").ok().as_deref() == Some("codex") {
+        return "codex".to_string();
+    }
     if std::env::var_os("PI_SESSION_ID").is_some() || std::env::var_os("PI_AGENT").is_some() {
         return "pi".to_string();
     }
