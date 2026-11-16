@@ -8,6 +8,8 @@ use std::path::PathBuf;
 #[allow(dead_code)]
 pub struct HookInput {
     #[serde(default)]
+    pub board_idle: bool,
+    #[serde(default)]
     pub session_id: String,
     #[serde(default)]
     pub board_delivered: Option<Vec<i64>>,

@@ -85,8 +85,16 @@ pub struct BoardTaskRow {
     pub updated_epoch: i64,
 }
 
+fn default_message_kind() -> String {
+    "chat".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoardMessageRow {
+    // Older servers omit kind; treat their rows as chat.
+    #[serde(default = "default_message_kind")]
+    pub kind: String,
+    pub to: Option<String>,
     pub id: i64,
     pub project: String,
     pub channel: String,
@@ -230,6 +238,10 @@ pub struct BoardUpdateTaskReq {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoardPostMessageReq {
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
     pub project: String,
     #[serde(default)]
     pub channel: Option<String>,
@@ -404,18 +416,17 @@ pub(super) fn prune_board_tx(tx: &Transaction<'_>, project: &str, now_epoch: i64
         )?;
     }
 
-    // Growth is bounded only by unacked deliveries; S2 adds the full retention policy.
-    // 5. Retain only the newest MAX_BOARD_MESSAGES (500) messages per project
+    // 5. Keep the union of 14 days, the latest 500 chats, durable kinds, #handoff posts, and pending deliveries.
     tx.execute(
         "DELETE FROM board_messages
-         WHERE project = ?1 AND id <= COALESCE(
-             (SELECT id FROM board_messages WHERE project = ?1 ORDER BY id DESC LIMIT 1 OFFSET ?2),
+         WHERE project = ?1 AND kind IN ('chat', 'question') AND channel != 'handoff' AND created_epoch < ?3 AND id <= COALESCE(
+             (SELECT id FROM board_messages WHERE project = ?1 AND kind IN ('chat', 'question') AND channel != 'handoff' ORDER BY id DESC LIMIT 1 OFFSET ?2),
              0
          ) AND NOT EXISTS (
              SELECT 1 FROM board_deliveries d
              WHERE d.message_id = board_messages.id AND d.acked_at IS NULL
          )",
-        params![project, MAX_BOARD_MESSAGES],
+        params![project, MAX_BOARD_MESSAGES, now_epoch - 14 * 86_400],
     )?;
 
     // Keep sender IDs on retained messages even after the session credential is removed.
@@ -623,7 +634,48 @@ pub(super) fn post_message_in_tx(
         parent_id,
         created_utc: now_utc.to_string(),
         created_epoch: now_epoch,
+        kind: "chat".into(),
+        to: None,
     })
+}
+
+pub(super) fn route_message_tx(
+    tx: &Transaction<'_>,
+    msg: &mut BoardMessageRow,
+    req: &BoardPostMessageReq,
+) -> Result<()> {
+    let kind = req.kind.as_deref().unwrap_or("chat");
+    anyhow::ensure!(
+        matches!(kind, "chat" | "question"),
+        "kind must be chat or question"
+    );
+    let to = req
+        .to
+        .as_deref()
+        .map(|raw| {
+            crate::board::identity::validate_agent_handle(raw.strip_prefix('@').unwrap_or(raw))
+        })
+        .transpose()?;
+    if let Some(handle) = &to {
+        let recipient: Option<String> = tx
+            .query_row(
+                "SELECT id FROM board_sessions WHERE project=?1 AND handle=?2 AND ended_epoch IS NULL",
+                params![msg.project, handle],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let recipient = recipient.ok_or_else(|| anyhow::anyhow!("unknown recipient @{handle}"))?;
+        if handle != &msg.agent {
+            tx.execute("INSERT OR IGNORE INTO board_deliveries (message_id,recipient_session_id) VALUES (?1,?2)", params![msg.id, recipient])?;
+        }
+    }
+    tx.execute(
+        "UPDATE board_messages SET kind=?1,addressed_to=?2 WHERE id=?3",
+        params![kind, to, msg.id],
+    )?;
+    msg.kind = kind.into();
+    msg.to = to;
+    Ok(())
 }
 
 fn query_active_locks_conn(
@@ -858,17 +910,19 @@ impl Ledger {
                 parent_id: r.get(7)?,
                 created_utc: r.get(8)?,
                 created_epoch: r.get(9)?,
+                kind: r.get(10)?,
+                to: r.get(11)?,
             })
         };
         let mut messages = if is_all_projects {
             let sql = if floor_id > 0 {
-                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
+                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
                  FROM board_messages
                  WHERE LOWER(project) NOT IN ('agent', 'all') AND id > ?1
                  ORDER BY id ASC
                  LIMIT 50"
             } else {
-                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
+                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
                  FROM board_messages
                  WHERE LOWER(project) NOT IN ('agent', 'all') AND id > ?1
                  ORDER BY id DESC
@@ -881,13 +935,13 @@ impl Ledger {
             rows
         } else {
             let sql = if floor_id > 0 {
-                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
+                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
                  FROM board_messages
                  WHERE project = ?1 AND id > ?2
                  ORDER BY id ASC
                  LIMIT 50"
             } else {
-                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
+                "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
                  FROM board_messages
                  WHERE project = ?1 AND id > ?2
                  ORDER BY id DESC
@@ -928,7 +982,7 @@ impl Ledger {
             let like_pat = format!("%\"{needle}\"%");
             let rows: Vec<BoardMessageRow> = if is_all_projects {
                 let mut stmt = conn.prepare(
-                    "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
+                    "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
                      FROM board_messages
                      WHERE LOWER(project) NOT IN ('agent', 'all') AND id > ?1 AND agent != ?2 AND mentions_json LIKE ?3
                      ORDER BY id ASC",
@@ -939,7 +993,7 @@ impl Ledger {
                 collected
             } else {
                 let mut stmt = conn.prepare(
-                    "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
+                    "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
                      FROM board_messages
                      WHERE project = ?1 AND id > ?2 AND agent != ?3 AND mentions_json LIKE ?4
                      ORDER BY id ASC",
@@ -1030,7 +1084,7 @@ impl Ledger {
         let conn = self.conn.lock().unwrap();
         let mention_like = mention.as_ref().map(|m| format!("%\"{m}\"%"));
         let sql = if floor_id > 0 {
-            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
+            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
              FROM board_messages
              WHERE project = ?1
                AND id > ?2
@@ -1039,7 +1093,7 @@ impl Ledger {
              ORDER BY id ASC
              LIMIT ?5"
         } else {
-            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
+            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
              FROM board_messages
              WHERE project = ?1
                AND id > ?2
@@ -1067,6 +1121,8 @@ impl Ledger {
                         parent_id: r.get(7)?,
                         created_utc: r.get(8)?,
                         created_epoch: r.get(9)?,
+                        kind: r.get(10)?,
+                        to: r.get(11)?,
                     })
                 },
             )?
@@ -1444,7 +1500,7 @@ impl Ledger {
         let recent_cutoff = now_epoch - 900; // last 15 minutes when since_id is 0
         let like_pat = format!("%\"{agent}\"%");
         let mut msg_stmt = tx.prepare(
-            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch
+            "SELECT id, project, channel, agent, machine, body, mentions_json, parent_id, created_utc, created_epoch, kind, addressed_to
              FROM board_messages
              WHERE project = ?1
                AND id > ?2
@@ -1471,6 +1527,8 @@ impl Ledger {
                         parent_id: r.get(7)?,
                         created_utc: r.get(8)?,
                         created_epoch: r.get(9)?,
+                        kind: r.get(10)?,
+                        to: r.get(11)?,
                     })
                 },
             )?
@@ -1908,7 +1966,7 @@ impl Ledger {
         prune_board_tx(&tx, &proj, now_epoch)?;
         ensure_and_touch_agent_tx(&tx, caller, &proj, &agent, &now_utc, now_epoch)?;
 
-        let msg = post_message_in_tx(
+        let mut msg = post_message_in_tx(
             &tx,
             &proj,
             &channel,
@@ -1919,6 +1977,7 @@ impl Ledger {
             &now_utc,
             now_epoch,
         )?;
+        route_message_tx(&tx, &mut msg, req)?;
         tx.commit()?;
         Ok(msg)
     }
@@ -1927,6 +1986,17 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn board_message_row_without_kind_defaults_to_chat() {
+        let row: BoardMessageRow = serde_json::from_value(serde_json::json!({
+            "id": 1, "project": "p", "channel": "general", "agent": "a", "machine": "m",
+            "body": "b", "mentions": [], "parent_id": null, "created_utc": "t", "created_epoch": 0
+        }))
+        .unwrap();
+        assert_eq!(row.kind, "chat");
+        assert_eq!(row.to, None);
+    }
 
     #[test]
     fn board_locks_detect_conflicts_and_check_path() {
@@ -2031,6 +2101,8 @@ mod tests {
         let spoof = ledger.board_post_message(
             &vm2,
             &BoardPostMessageReq {
+                kind: None,
+                to: None,
                 project: "daybook".into(),
                 channel: Some("general".into()),
                 agent: "t3-api".into(),
@@ -2089,6 +2161,8 @@ mod tests {
             .board_post_message(
                 &vm1,
                 &BoardPostMessageReq {
+                    kind: None,
+                    to: None,
                     project: "daybook".into(),
                     channel: Some("handoff".into()),
                     agent: "agent-b".into(),
@@ -2210,6 +2284,8 @@ mod tests {
             .board_post_message(
                 &vm2,
                 &BoardPostMessageReq {
+                    kind: None,
+                    to: None,
                     project: "daybook".into(),
                     channel: Some("general".into()),
                     agent: "agent-b".into(),
@@ -2356,6 +2432,8 @@ mod tests {
                 .board_post_message(
                     &vm1,
                     &BoardPostMessageReq {
+                        kind: None,
+                        to: None,
                         project: reserved.into(),
                         channel: Some("general".into()),
                         agent: "agent-a".into(),
@@ -2385,6 +2463,8 @@ mod tests {
             .board_post_message(
                 &vm1,
                 &BoardPostMessageReq {
+                    kind: None,
+                    to: None,
                     project: "other-repo".into(),
                     channel: Some("handoff".into()),
                     agent: "agent-a".into(),

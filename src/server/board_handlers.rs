@@ -234,6 +234,8 @@ pub async fn post_board_messages(
 #[derive(serde::Deserialize)]
 pub struct InboxQuery {
     #[serde(default)]
+    wake: bool,
+    #[serde(default)]
     notices: bool,
 }
 
@@ -263,7 +265,13 @@ pub async fn inbox(
     headers: axum::http::HeaderMap,
     Query(q): Query<InboxQuery>,
 ) -> Response {
-    match session_credential(&headers).and_then(|c| state.ledger.board_inbox(c, q.notices)) {
+    match session_credential(&headers).and_then(|c| {
+        if q.wake {
+            state.ledger.board_wake(c)
+        } else {
+            state.ledger.board_inbox(c, q.notices)
+        }
+    }) {
         Ok(rows) => Json(ApiResponse::success(rows)).into_response(),
         Err(e) => board_err_response(e),
     }
