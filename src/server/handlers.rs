@@ -2348,6 +2348,7 @@ fn build_daily_actions(
     actions.truncate(8);
     actions
 }
+#[allow(clippy::too_many_arguments)]
 fn render_daily_markdown(
     session_count: usize,
     work_count: usize,

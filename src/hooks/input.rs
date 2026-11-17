@@ -31,6 +31,7 @@ fn nullable_path<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Pa
 
 impl HookInput {
     /// Extract target file path if this hook event represents a file-editing tool call.
+    #[allow(dead_code)] // exercised by parser tests; no runtime caller after board removal
     pub fn edited_file_path(&self) -> Option<String> {
         if let Some(ref name) = self.tool_name {
             let lower = name.to_ascii_lowercase();
