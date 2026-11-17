@@ -70,7 +70,7 @@ pub fn machine_label(config: &Config) -> String {
 
 /// Shared push client: one connection pool for the whole process, with a
 /// timeout so a dead server cannot hang `scan`.
-fn client() -> &'static reqwest::Client {
+pub(crate) fn client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()

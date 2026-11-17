@@ -41,6 +41,21 @@ pub struct AggregatesRecord {
     pub cache_hit_rate: Option<f64>,
 }
 
+/// Structured fact captured hourly on a client machine (merged PRs, worktree
+/// state, corrections, grouped tool errors, session handoffs). `key` is a
+/// stable dedup key chosen by the collector; `content_hash` skips no-op writes.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CaptureRecord {
+    pub machine: String,
+    #[serde(default)]
+    pub project: String,
+    pub kind: String,
+    pub key: String,
+    pub payload_json: String,
+    pub content_hash: String,
+    pub captured_utc: String,
+}
+
 /// Record pushed by a client machine. `version` is an archive revision in
 /// epoch seconds; archive writes keep it strictly increasing.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -305,6 +320,18 @@ CREATE TABLE IF NOT EXISTS tokens (
     last_used_at TEXT,
     revoked INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS captures (
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    machine TEXT NOT NULL,
+    project TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    captured_utc TEXT NOT NULL,
+    pushed_at TEXT NOT NULL,
+    PRIMARY KEY (kind, key, machine)
+);
+CREATE INDEX IF NOT EXISTS idx_captures_kind_time ON captures(kind, captured_utc DESC);
 ";
 
 /// US Eastern (America/New_York) offset in seconds at `utc`:
@@ -629,6 +656,75 @@ impl Ledger {
             ],
         )?;
         Ok(outcome)
+    }
+
+    /// Batch upsert of capture records; returns the number of rows written.
+    /// Identical content hashes are skipped so hourly runs stay cheap.
+    pub fn upsert_captures(&self, records: &[CaptureRecord]) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut written = 0;
+        for r in records {
+            let existing: Option<String> = conn
+                .query_row(
+                    "SELECT content_hash FROM captures WHERE kind = ?1 AND key = ?2 AND machine = ?3",
+                    [&r.kind, &r.key, &r.machine],
+                    |row| row.get(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    e => Err(e),
+                })?;
+            if existing.as_deref() == Some(&r.content_hash) {
+                // Unchanged payload: refresh the observation time so
+                // captures_since windows keep seeing this record.
+                conn.execute(
+                    "UPDATE captures SET captured_utc = ?4 WHERE kind = ?1 AND key = ?2 AND machine = ?3",
+                    rusqlite::params![r.kind, r.key, r.machine, r.captured_utc],
+                )?;
+                continue;
+            }
+            conn.execute(
+                "INSERT INTO captures (kind, key, machine, project, payload_json, content_hash, captured_utc, pushed_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+                 ON CONFLICT(kind, key, machine) DO UPDATE SET
+                    project=excluded.project, payload_json=excluded.payload_json,
+                    content_hash=excluded.content_hash, captured_utc=excluded.captured_utc,
+                    pushed_at=excluded.pushed_at",
+                rusqlite::params![r.kind, r.key, r.machine, r.project, r.payload_json, r.content_hash, r.captured_utc, now],
+            )?;
+            written += 1;
+        }
+        Ok(written)
+    }
+
+    /// Capture rows of one kind captured at or after `since_utc` (RFC3339),
+    /// newest first. Used by the morning brief and weekly sync.
+    pub fn captures_since(
+        &self,
+        kind: &str,
+        since_utc: &str,
+        limit: usize,
+    ) -> Result<Vec<CaptureRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT kind, key, machine, project, payload_json, content_hash, captured_utc
+             FROM captures WHERE kind = ?1 AND captured_utc >= ?2
+             ORDER BY captured_utc DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![kind, since_utc, limit as i64], |row| {
+            Ok(CaptureRecord {
+                kind: row.get(0)?,
+                key: row.get(1)?,
+                machine: row.get(2)?,
+                project: row.get(3)?,
+                payload_json: row.get(4)?,
+                content_hash: row.get(5)?,
+                captured_utc: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Date list for the dashboard: one GROUP BY, no N+1.

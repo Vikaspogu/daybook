@@ -35,6 +35,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/tokens/revoke", post(handlers::revoke_token_api))
         .route("/ingest", post(handlers::ingest))
+        .route(
+            "/captures",
+            get(handlers::list_captures).post(handlers::ingest_captures),
+        )
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),
