@@ -450,4 +450,3 @@ pub struct UsageSummaryDto {
     pub model_distribution: Vec<ModelUsageCountDto>,
     pub daily_usage: Vec<DailyUsageDto>,
 }
-

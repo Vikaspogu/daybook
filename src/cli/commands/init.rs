@@ -9,11 +9,7 @@ use crate::archive::ArchiveManager;
 use crate::config::{get_config_path, load_config, save_config, Config};
 
 /// Initialize the daily archive system
-pub async fn run(
-    storage_path: Option<PathBuf>,
-    interactive: bool,
-    use_haiku: bool,
-) -> Result<()> {
+pub async fn run(storage_path: Option<PathBuf>, interactive: bool, use_haiku: bool) -> Result<()> {
     println!("[daybook] Initializing Daily Context Archive System...");
 
     // Load or create config

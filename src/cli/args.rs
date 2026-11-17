@@ -254,7 +254,6 @@ pub enum Commands {
         /// Use haiku model for summarization (default: sonnet)
         #[arg(long)]
         haiku: bool,
-
     },
 
     /// Inspect archive, ledger, queue, and runtime integration health

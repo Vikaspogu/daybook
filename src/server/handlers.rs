@@ -544,10 +544,7 @@ pub async fn get_daily_summary(
     State(state): State<Arc<AppState>>,
     Path(date): Path<String>,
 ) -> impl IntoResponse {
-    match state
-        .ledger
-        .session_briefs(&date)
-    {
+    match state.ledger.session_briefs(&date) {
         Ok(rows) => {
             let session_count = rows.len();
             let sessions: Vec<String> = rows.iter().map(session_name).collect();
