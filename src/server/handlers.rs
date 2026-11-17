@@ -884,7 +884,7 @@ pub async fn get_daily_summary(
             attach_rule_history(&state.ledger, &date, &mut consolidated_rules);
             let actions =
                 build_daily_actions(&consolidated_rules, &learnings_by_project, &next_steps);
-            let mut raw_content = render_daily_markdown(
+            let raw_content = render_daily_markdown(
                 session_count,
                 work_count,
                 review_count,

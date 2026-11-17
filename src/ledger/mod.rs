@@ -530,7 +530,7 @@ impl Ledger {
                 let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
             }
         }
-        let mut conn =
+        let conn =
             Connection::open(path).with_context(|| format!("open ledger {}", path.display()))?;
         // WAL: readers don't block the ingest writer.
         let _: String = conn

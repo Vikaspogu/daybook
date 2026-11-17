@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use super::init::CLAUDE_EDIT_MATCHER;
@@ -28,7 +28,6 @@ pub async fn run() -> Result<()> {
         Config::default()
     };
     let home = dirs::home_dir().context("Could not determine home directory for runtime checks")?;
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     println!("Daybook doctor (read-only)\n");
     if let Some(error) = config_warning {
         println!(

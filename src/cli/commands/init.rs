@@ -154,7 +154,7 @@ fn install_runtime_file(path: &Path, expected: &str, label: &str) -> Result<()> 
     Ok(())
 }
 
-fn install_claude_hooks(home: &Path) -> Result<()> {
+fn configure_agent_hooks(home: &Path) -> Result<()> {
     let settings_path = home.join(".claude/settings.json");
     let mut settings: serde_json::Value = if settings_path.exists() {
         serde_json::from_str(&fs::read_to_string(&settings_path)?)
