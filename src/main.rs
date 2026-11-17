@@ -52,6 +52,9 @@ async fn main() -> Result<()> {
             foreground,
             job_id,
         } => cli::commands::summarize::run(transcript, task_name, cwd, foreground, job_id).await,
+        Commands::Captures { kind, hours, limit } => {
+            cli::commands::captures::run((kind != "all").then_some(kind), hours, limit).await
+        }
         Commands::Scan { no_llm, local, day } => cli::commands::scan::run(day, no_llm, local).await,
         Commands::Stats { week, days, month } => cli::commands::stats::run(week, days, month).await,
         Commands::Query {

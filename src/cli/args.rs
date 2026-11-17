@@ -146,6 +146,21 @@ pub enum Commands {
         #[arg(long, default_value_t = 5)]
         limit: usize,
     },
+    /// Print recent structured captures (brief and weekly sync input)
+    Captures {
+        /// Capture kind: merged_pr, worktree, correction, tool_error, handoff, all
+        #[arg(long, default_value = "all")]
+        kind: String,
+
+        /// Look back this many hours (default 24, use 168 for a week)
+        #[arg(long, default_value_t = 24)]
+        hours: u32,
+
+        /// Maximum records (1-500)
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+    },
+
     /// Discover sessions from all agent runtimes and list them (no archiving)
     Scan {
         /// Accepted for gate compatibility; S2 scans are always non-LLM
