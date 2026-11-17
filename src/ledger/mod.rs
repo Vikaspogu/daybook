@@ -710,7 +710,7 @@ impl Ledger {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT kind, key, machine, project, payload_json, content_hash, captured_utc
-             FROM captures WHERE kind = ?1 AND captured_utc >= ?2
+             FROM captures WHERE (?1 = 'all' OR kind = ?1) AND captured_utc >= ?2
              ORDER BY captured_utc DESC LIMIT ?3",
         )?;
         let rows = stmt.query_map(rusqlite::params![kind, since_utc, limit as i64], |row| {

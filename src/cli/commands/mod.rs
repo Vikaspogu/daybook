@@ -1,3 +1,4 @@
+pub mod captures;
 mod codex_hooks;
 pub mod config;
 pub mod digest;

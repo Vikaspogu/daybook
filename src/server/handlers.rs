@@ -295,7 +295,7 @@ pub async fn list_captures(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(q): axum::extract::Query<CapturesQuery>,
 ) -> Response {
-    let kind = q.kind.unwrap_or_else(|| "handoff".to_string());
+    let kind = q.kind.unwrap_or_else(|| "all".to_string());
     let since = q
         .since
         .unwrap_or_else(|| (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339());
