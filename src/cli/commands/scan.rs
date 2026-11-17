@@ -267,6 +267,17 @@ pub async fn run(day: Option<String>, no_llm: bool, local: bool) -> Result<()> {
         }
         eprintln!("[daybook] Summarized {} session(s) into the archive", ok);
     }
+    // P2: hourly structured capture (PRs, worktrees, corrections, tool
+    // errors, handoffs). Best-effort: a capture failure never fails scan.
+    // --local scans never push anything off-machine.
+    if !local {
+        let config = crate::config::load_config()?;
+        match crate::capture::run(&config).await {
+            Ok(n) if n > 0 => eprintln!("[daybook] Captured {n} structured record(s)"),
+            Ok(_) => {}
+            Err(e) => eprintln!("[daybook] capture failed: {e:#}"),
+        }
+    }
     Ok(())
 }
 

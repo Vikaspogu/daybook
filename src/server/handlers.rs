@@ -225,6 +225,93 @@ pub async fn ingest(
     }
 }
 
+// ---- Hourly structured captures (merged PRs, worktrees, corrections, tool errors, handoffs) ----
+
+pub async fn ingest_captures(
+    State(state): State<Arc<AppState>>,
+    Extension(authed): Extension<Authed>,
+    Json(records): Json<Vec<crate::ledger::CaptureRecord>>,
+) -> Response {
+    if records.len() > 500 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<&str>::error(
+                "too many capture records (max 500)",
+            )),
+        )
+            .into_response();
+    }
+    for r in &records {
+        if r.machine.trim().is_empty()
+            || r.kind.len() > 32
+            || r.key.len() > 512
+            || r.payload_json.len() > 64 * 1024
+            || r.content_hash.len() > 128
+            || r.captured_utc.len() > 40
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::<&str>::error("invalid capture record")),
+            )
+                .into_response();
+        }
+        if !authed.admin && authed.label != r.machine {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ApiResponse::<&str>::error(
+                    "token label does not match record.machine",
+                )),
+            )
+                .into_response();
+        }
+    }
+    match state.ledger.upsert_captures(&records) {
+        Ok(written) => (
+            StatusCode::OK,
+            Json(ApiResponse::success(
+                serde_json::json!({ "written": written }),
+            )),
+        )
+            .into_response(),
+        Err(e) => {
+            eprintln!("[daybook] capture ingest failed: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<&str>::error("internal server error")),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct CapturesQuery {
+    pub kind: Option<String>,
+    pub since: Option<String>,
+    pub limit: Option<usize>,
+}
+
+pub async fn list_captures(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<CapturesQuery>,
+) -> Response {
+    let kind = q.kind.unwrap_or_else(|| "handoff".to_string());
+    let since = q
+        .since
+        .unwrap_or_else(|| (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339());
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    match state.ledger.captures_since(&kind, &since, limit) {
+        Ok(rows) => (StatusCode::OK, Json(ApiResponse::success(rows))).into_response(),
+        Err(e) => {
+            eprintln!("[daybook] capture query failed: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<&str>::error("internal server error")),
+            )
+                .into_response()
+        }
+    }
+}
 // ---- Token management (admin only) ----
 
 #[derive(serde::Serialize)]
