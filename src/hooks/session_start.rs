@@ -27,11 +27,6 @@ pub async fn handle() -> Result<()> {
         .unwrap_or_else(|| {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
         });
-    let session_id = input
-        .as_ref()
-        .map(|input| input.session_id.as_str())
-        .unwrap_or("");
-    sync_board_session_start(&config, &cwd, session_id).await;
     deliver_recall(&config, &cwd).await;
     let today = Local::now().format("%Y-%m-%d").to_string();
     let daily_dir = config.today_dir();
@@ -95,9 +90,6 @@ _No sessions archived yet._
 /// SessionStart stdout is added to the agent's context. Keep this best-effort:
 /// recall must never block or fail a coding session.
 async fn deliver_recall(config: &crate::config::Config, cwd: &std::path::Path) {
-    if !crate::board::identity::is_valid_board_workspace(cwd) {
-        return;
-    }
     let Some(project) = crate::transcript::adapters::project_for_cwd(cwd) else {
         return;
     };
@@ -142,24 +134,6 @@ fn recall_excerpt(summary: &str) -> String {
         .unwrap_or(summary)
         .trim();
     body.chars().take(1200).collect()
-}
-
-async fn sync_board_session_start(
-    config: &crate::config::Config,
-    cwd: &std::path::Path,
-    session_id: &str,
-) {
-    if let Some(notice) = crate::hooks::board_notice::prepare(config, cwd, session_id, true) {
-        // SessionStart also prints recall as plain stdout context.
-        use std::io::Write;
-        let mut stdout = std::io::stdout().lock();
-        if writeln!(stdout, "{}", notice.text)
-            .and_then(|_| stdout.flush())
-            .is_ok()
-        {
-            crate::hooks::board_notice::accepted(config, notice);
-        }
-    }
 }
 
 /// Check if we should auto-digest yesterday's sessions

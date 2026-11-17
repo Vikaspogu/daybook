@@ -103,7 +103,7 @@ pub async fn run() -> Result<()> {
         },
         extension_status,
         if extension_status == "missing" {
-            "; run `daybook init --board`"
+            "; run `daybook init`"
         } else {
             ""
         }
@@ -122,22 +122,6 @@ pub async fn run() -> Result<()> {
             super::codex_hooks::MIN_VERSION
         ),
     }
-    let mcp = cwd.join(".mcp.json");
-    let mcp_ok = fs::read_to_string(&mcp)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .is_some_and(|root| root["mcpServers"]["daybook-board"]["command"] == "daybook");
-    println!(
-        "{} Project board MCP: {}{}",
-        if mcp_ok { "OK  " } else { "WARN" },
-        mcp.display(),
-        if mcp_ok {
-            ""
-        } else {
-            "; run `daybook init --board` in this project"
-        }
-    );
-
     if let Some(url) = config.push.url.as_deref() {
         let health_url = format!("{}/api/health", url.trim_end_matches('/'));
         let display_url = redacted_url(&health_url);
@@ -267,7 +251,7 @@ fn inspect_claude_hooks(home: &Path) {
             if installed {
                 ""
             } else {
-                "; run `daybook init --board`"
+                "; run `daybook init`"
             }
         );
     }
@@ -363,17 +347,6 @@ fn inspect_ledger(config: &Config, archive_ids: Option<&BTreeSet<String>>) {
                 missing.len()
             );
         }
-    }
-    match conn.query_row(
-        "SELECT last_seen_utc, status FROM board_agents WHERE runtime = 'pi' ORDER BY last_seen_epoch DESC LIMIT 1",
-        [],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-    ) {
-        Ok((seen, status)) => println!("OK   Pi board lifecycle: last {status} event at {seen}"),
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
-            println!("INFO Pi board lifecycle: no Pi presence recorded in this ledger")
-        }
-        Err(error) => println!("WARN Pi board lifecycle: cannot inspect presence: {error}"),
     }
 }
 

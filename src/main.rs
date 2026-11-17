@@ -1,6 +1,5 @@
 mod archive;
 mod auto_summarize;
-mod board;
 mod cli;
 mod config;
 mod hooks;
@@ -27,9 +26,7 @@ async fn main() -> Result<()> {
             storage_path,
             yes,
             haiku,
-            board,
-        } => cli::commands::init::run(storage_path, !yes, haiku, board).await,
-        Commands::Board(args) => cli::commands::board::run(args).await,
+        } => cli::commands::init::run(storage_path, !yes, haiku).await,
         Commands::Hook { hook_type } => match hook_type {
             HookType::SessionStart => hooks::session_start::handle().await,
             HookType::SessionEnd => hooks::session_end::handle().await,

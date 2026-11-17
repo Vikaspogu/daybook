@@ -27,10 +27,6 @@ pub async fn handle() -> Result<()> {
             return Ok(()); // Don't block session exit
         }
     };
-    if crate::board::identity::is_valid_board_workspace(&input.cwd) {
-        eprintln!("[daybook board] Handoff reminder: use daybook_board_handoff before ending with completed work, remaining work, and verification or blockers.");
-    }
-    // Release auto-claimed board locks and mark agent idle on SessionEnd
 
     // Archive on all session end reasons to collect complete history
     // Reasons: "prompt_input_exit" (Ctrl+D), "logout", "clear", "other"
@@ -43,7 +39,6 @@ pub async fn handle() -> Result<()> {
     // This avoids creating useless 0s jobs for sessions with no user input
     if is_transcript_empty(&input.transcript_path) {
         eprintln!("[daybook] Empty session (no user input), skipping archive");
-        release_board_session(&config, &input).await;
         return Ok(());
     }
 
@@ -125,51 +120,10 @@ pub async fn handle() -> Result<()> {
             eprintln!("[daybook] Failed to spawn summarization process: {}", e);
         }
     }
-    // Archive first: remote board cleanup must not consume the hook deadline.
-    release_board_session(&config, &input).await;
 
     Ok(())
 }
 
-async fn release_board_session(config: &crate::config::Config, input: &super::input::HookInput) {
-    crate::hooks::board_notice::session_end(config, &input.cwd, &input.session_id);
-    if let Ok(client) = crate::board::client::BoardClient::from_config(config, false) {
-        let cwd = if input.cwd.as_os_str().is_empty() {
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-        } else {
-            input.cwd.clone()
-        };
-        let identity =
-            crate::board::identity::resolve_board_identity_for_hook(&cwd, &input.session_id);
-        if !identity.project.eq_ignore_ascii_case("agent")
-            && !identity.project.eq_ignore_ascii_case("all")
-        {
-            let _ = client
-                .release_locks(&crate::ledger::BoardReleaseLocksReq {
-                    project: identity.project.clone(),
-                    agent: identity.agent.clone(),
-                    lock_id: None,
-                    all: true,
-                    auto_only: true,
-                    force: false,
-                })
-                .await;
-            if crate::board::identity::is_valid_board_workspace(&cwd) {
-                let _ = client
-                    .heartbeat(&crate::ledger::BoardHeartbeatReq {
-                        project: identity.project,
-                        agent: identity.agent,
-                        runtime: identity.runtime,
-                        branch: identity.branch,
-                        cwd: identity.worktree_root.to_string_lossy().to_string(),
-                        status: Some("idle".to_string()),
-                        current_task: None,
-                    })
-                    .await;
-            }
-        }
-    }
-}
 /// Check if the transcript file is empty or contains no user messages
 fn is_transcript_empty(transcript_path: &std::path::Path) -> bool {
     // If file doesn't exist, consider it empty

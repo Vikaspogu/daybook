@@ -11,10 +11,6 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
 
-pub mod board;
-pub mod board_sessions;
-pub use board::*;
-pub use board_sessions::*;
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct UsageRecord {
     #[serde(default)]
@@ -309,112 +305,6 @@ CREATE TABLE IF NOT EXISTS tokens (
     last_used_at TEXT,
     revoked INTEGER NOT NULL DEFAULT 0
 );
-CREATE TABLE IF NOT EXISTS board_agents (
-    project TEXT NOT NULL,
-    agent TEXT NOT NULL,
-    machine TEXT NOT NULL,
-    runtime TEXT NOT NULL,
-    cwd TEXT NOT NULL DEFAULT '',
-    branch TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'active',
-    current_task TEXT,
-    last_seen_utc TEXT NOT NULL,
-    last_seen_epoch INTEGER NOT NULL,
-    PRIMARY KEY (project, agent)
-);
-CREATE INDEX IF NOT EXISTS idx_board_agents_project_seen
-    ON board_agents(project, last_seen_epoch DESC);
-CREATE TABLE IF NOT EXISTS board_locks (
-    id TEXT PRIMARY KEY,
-    project TEXT NOT NULL,
-    agent TEXT NOT NULL,
-    machine TEXT NOT NULL,
-    paths_json TEXT NOT NULL,
-    note TEXT NOT NULL DEFAULT '',
-    auto INTEGER NOT NULL DEFAULT 0,
-    claimed_utc TEXT NOT NULL,
-    expires_utc TEXT NOT NULL,
-    expires_epoch INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_board_locks_project_expires
-    ON board_locks(project, expires_epoch);
-CREATE INDEX IF NOT EXISTS idx_board_locks_expires
-    ON board_locks(expires_epoch);
-CREATE INDEX IF NOT EXISTS idx_board_locks_project_agent_auto
-    ON board_locks(project, agent, auto);
-CREATE TABLE IF NOT EXISTS board_tasks (
-    project TEXT NOT NULL,
-    task_id TEXT NOT NULL,
-    title TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open',
-    priority TEXT NOT NULL DEFAULT 'medium',
-    agent TEXT,
-    machine TEXT,
-    branch TEXT,
-    note TEXT NOT NULL DEFAULT '',
-    pr_url TEXT,
-    created_utc TEXT NOT NULL,
-    updated_utc TEXT NOT NULL,
-    updated_epoch INTEGER NOT NULL,
-    PRIMARY KEY (project, task_id)
-);
-CREATE INDEX IF NOT EXISTS idx_board_tasks_project_status
-    ON board_tasks(project, status, updated_epoch DESC);
-CREATE TABLE IF NOT EXISTS board_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project TEXT NOT NULL,
-    channel TEXT NOT NULL DEFAULT 'general',
-    agent TEXT NOT NULL,
-    machine TEXT NOT NULL,
-    body TEXT NOT NULL,
-    mentions_json TEXT NOT NULL DEFAULT '[]',
-    parent_id INTEGER,
-    created_utc TEXT NOT NULL,
-    created_epoch INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_board_messages_project_id
-    ON board_messages(project, id DESC);
-CREATE INDEX IF NOT EXISTS idx_board_messages_project_channel_id
-    ON board_messages(project, channel, id DESC);
-CREATE INDEX IF NOT EXISTS idx_board_messages_project_parent
-    ON board_messages(project, parent_id);
-CREATE TABLE IF NOT EXISTS board_sessions (
-    id TEXT PRIMARY KEY,
-    project TEXT NOT NULL,
-    handle TEXT NOT NULL,
-    credential_hash TEXT NOT NULL UNIQUE,
-    machine TEXT NOT NULL,
-    ended_epoch INTEGER,
-    UNIQUE(project, handle)
-);
-CREATE TABLE IF NOT EXISTS board_session_handles (
-    project TEXT NOT NULL,
-    handle TEXT NOT NULL,
-    PRIMARY KEY (project, handle)
-);
-INSERT OR IGNORE INTO board_session_handles SELECT project, handle FROM board_sessions;
-CREATE TABLE IF NOT EXISTS board_message_auth (
-    message_id INTEGER PRIMARY KEY REFERENCES board_messages(id) ON DELETE CASCADE,
-    sender_session_id TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS board_deliveries (
-    message_id INTEGER NOT NULL REFERENCES board_messages(id) ON DELETE CASCADE,
-    recipient_session_id TEXT NOT NULL REFERENCES board_sessions(id) ON DELETE CASCADE,
-    delivered_at TEXT,
-    acked_at TEXT,
-    attempts INTEGER NOT NULL DEFAULT 0,
-    attempted_epoch INTEGER,
-    UNIQUE(message_id, recipient_session_id)
-);
-CREATE TABLE IF NOT EXISTS board_wake_attempts (
-    project TEXT NOT NULL,
-    sender_session_id TEXT NOT NULL,
-    recipient_session_id TEXT NOT NULL,
-    attempted_epoch INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_board_wake_project_epoch ON board_wake_attempts(project, attempted_epoch);
-CREATE INDEX IF NOT EXISTS idx_board_deliveries_inbox
-    ON board_deliveries(recipient_session_id, acked_at, message_id);
 ";
 
 /// US Eastern (America/New_York) offset in seconds at `utc`:
@@ -648,45 +538,6 @@ impl Ledger {
             .with_context(|| "set WAL")?;
         conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(SCHEMA)?;
-        // Additive migration preserves old message identities and receipt state.
-        const COLUMNS: [(&str, &str, &str); 5] = [
-            ("board_messages", "kind", "TEXT NOT NULL DEFAULT 'chat'"),
-            ("board_messages", "addressed_to", "TEXT"),
-            ("board_messages", "refs_json", "TEXT NOT NULL DEFAULT '[]'"),
-            ("board_deliveries", "wake_attempted_epoch", "INTEGER"),
-            (
-                "board_deliveries",
-                "wake_suppressed",
-                "INTEGER NOT NULL DEFAULT 0",
-            ),
-        ];
-        let column_exists = |c: &Connection, table: &str, column: &str| -> Result<bool> {
-            Ok(c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
-                [table, column],
-                |r| r.get(0),
-            )?)
-        };
-        // Read-only probe first so steady-state opens never take the write lock.
-        let mut missing = false;
-        for (table, column, _) in COLUMNS {
-            missing |= !column_exists(&conn, table, column)?;
-        }
-        if missing {
-            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            for (table, column, definition) in COLUMNS {
-                if !column_exists(&tx, table, column)? {
-                    tx.execute_batch(&format!(
-                        "ALTER TABLE {table} ADD COLUMN {column} {definition}"
-                    ))?;
-                }
-            }
-            tx.commit()?;
-        }
-        // After the migration: old databases gain `kind` above. Serves the daily archive scan.
-        conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_board_messages_kind_epoch ON board_messages(kind, created_epoch);",
-        )?;
         reconcile_journal_dates(&conn)?;
         // Token hashes and all summaries live here: owner-only on unix.
         #[cfg(unix)]
@@ -1173,49 +1024,6 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn concurrent_opens_migrate_legacy_board_columns() {
-        let dir = tempfile::tempdir().unwrap();
-        for attempt in 0..3 {
-            let path = dir.path().join(format!("legacy-{attempt}.db"));
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(SCHEMA).unwrap();
-            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA user_version=2;")
-                .unwrap();
-            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-            let workers: Vec<_> = (0..2)
-                .map(|_| {
-                    let path = path.clone();
-                    let barrier = barrier.clone();
-                    std::thread::spawn(move || {
-                        barrier.wait();
-                        Ledger::open(&path)
-                    })
-                })
-                .collect();
-            for worker in workers {
-                let ledger = worker.join().unwrap().unwrap();
-                let conn = ledger.conn.lock().unwrap();
-                for (table, column) in [
-                    ("board_messages", "kind"),
-                    ("board_messages", "addressed_to"),
-                    ("board_messages", "refs_json"),
-                    ("board_deliveries", "wake_attempted_epoch"),
-                    ("board_deliveries", "wake_suppressed"),
-                ] {
-                    let count: i64 = conn
-                        .query_row(
-                            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name=?2",
-                            [table, column],
-                            |r| r.get(0),
-                        )
-                        .unwrap();
-                    assert_eq!(count, 1, "{table}.{column}");
-                }
-            }
-        }
-    }
 
     fn record(session_id: &str, version: i64, hash: &str) -> SessionRecord {
         record_md(session_id, version, hash, "# md")

@@ -88,19 +88,6 @@ export function Layout() {
               {t('nav.insights')}
             </NavLink>
             <NavLink
-              to="/board"
-              className={({ isActive }) =>
-                cn(
-                  'px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all',
-                  isActive
-                    ? 'qp-surface-amber text-[#FBBF24]'
-                    : 'text-[#94A3B8] hover:text-[#F8FAFC]'
-                )
-              }
-            >
-              {t('nav.board')}
-            </NavLink>
-            <NavLink
               to="/settings"
               className={({ isActive }) =>
                 cn(
@@ -180,22 +167,6 @@ export function Layout() {
         >
           <span className="font-mono text-xs leading-none">◫</span>
           <span>{t('nav.insights')}</span>
-        </NavLink>
-
-        <NavLink
-          to="/board"
-          onClick={() => setDrawerOpen(false)}
-          className={({ isActive }) =>
-            cn(
-              'rounded-[16px] flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-all',
-              isActive
-                ? 'qp-surface-amber text-[#FBBF24]'
-                : 'text-[#64748B] hover:text-[#94A3B8]'
-            )
-          }
-        >
-          <span className="font-mono text-xs leading-none">⊞</span>
-          <span>{t('nav.board')}</span>
         </NavLink>
 
         <NavLink

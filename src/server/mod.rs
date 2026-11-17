@@ -1,4 +1,3 @@
-pub mod board_handlers;
 pub mod dto;
 pub mod handlers;
 pub mod router;

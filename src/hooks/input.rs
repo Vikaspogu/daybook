@@ -8,13 +8,10 @@ use std::path::PathBuf;
 #[allow(dead_code)]
 pub struct HookInput {
     #[serde(default)]
-    pub board_idle: bool,
     #[serde(default)]
     pub session_id: String,
     #[serde(default)]
-    pub board_delivered: Option<Vec<i64>>,
     #[serde(default)]
-    pub board_legacy_cursor: Option<i64>,
     #[serde(default, deserialize_with = "nullable_path")]
     pub transcript_path: PathBuf,
     #[serde(default)]
