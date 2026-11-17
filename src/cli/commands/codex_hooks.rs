@@ -123,7 +123,7 @@ pub fn inspect(path: &Path, version: &str) -> Result<()> {
             root["hooks"][event]
                 .as_array()
                 .is_some_and(|groups| has_hook(groups, hook)),
-            "missing or customized Codex {event} hook; run `daybook init --board`"
+            "missing or customized Codex {event} hook; run `daybook init`"
         );
     }
     Ok(())

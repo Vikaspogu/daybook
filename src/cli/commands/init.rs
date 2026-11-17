@@ -9,12 +9,7 @@ use crate::archive::ArchiveManager;
 use crate::config::{get_config_path, load_config, save_config, Config};
 
 /// Initialize the daily archive system
-pub async fn run(
-    storage_path: Option<PathBuf>,
-    interactive: bool,
-    use_haiku: bool,
-    configure_board: bool,
-) -> Result<()> {
+pub async fn run(storage_path: Option<PathBuf>, interactive: bool, use_haiku: bool) -> Result<()> {
     println!("[daybook] Initializing Daily Context Archive System...");
 
     // Load or create config
@@ -32,7 +27,7 @@ pub async fn run(
     let final_path = if let Some(path) = storage_path {
         // Direct path specified
         Some(expand_path(&path))
-    } else if interactive && !configure_board {
+    } else if interactive {
         // Interactive mode with fuzzy search
         select_directory_interactive()?
     } else {
@@ -46,7 +41,7 @@ pub async fn run(
     }
 
     // Configure language and digest settings in interactive mode
-    if interactive && !configure_board {
+    if interactive {
         configure_language_interactive(&mut config)?;
         configure_digest_interactive(&mut config)?;
     }
@@ -71,11 +66,8 @@ pub async fn run(
     let home = dirs::home_dir().context("Could not determine home directory")?;
     install_recall_skills(&home)?;
 
-    if configure_board {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        configure_board_mcp_and_hooks(&cwd, &home)?;
-        super::codex_hooks::configure(&home)?;
-    }
+    configure_agent_hooks(&home)?;
+    super::codex_hooks::configure(&home)?;
 
     println!();
     println!("[daybook] Initialization complete!");
@@ -162,33 +154,7 @@ fn install_runtime_file(path: &Path, expected: &str, label: &str) -> Result<()> 
     Ok(())
 }
 
-fn configure_board_mcp_and_hooks(cwd: &Path, home: &Path) -> Result<()> {
-    let mcp_path = cwd.join(".mcp.json");
-    let mut root: serde_json::Value = if mcp_path.exists() {
-        let raw = fs::read_to_string(&mcp_path)?;
-        serde_json::from_str(&raw).context("Cannot update invalid .mcp.json")?
-    } else {
-        serde_json::json!({})
-    };
-    let root_object = root
-        .as_object_mut()
-        .context(".mcp.json root must be an object")?;
-    let servers = root_object
-        .entry("mcpServers")
-        .or_insert_with(|| serde_json::json!({}));
-    let map = servers
-        .as_object_mut()
-        .context(".mcp.json mcpServers must be an object")?;
-    map.insert(
-        "daybook-board".to_string(),
-        serde_json::json!({"command": "daybook", "args": ["board", "mcp"]}),
-    );
-    atomic_write(&mcp_path, &(serde_json::to_string_pretty(&root)? + "\n"))?;
-    println!(
-        "[daybook] Registered daybook-board MCP server in {}",
-        mcp_path.display()
-    );
-
+fn configure_agent_hooks(home: &Path) -> Result<()> {
     let settings_path = home.join(".claude/settings.json");
     let mut settings: serde_json::Value = if settings_path.exists() {
         serde_json::from_str(&fs::read_to_string(&settings_path)?)
@@ -517,11 +483,9 @@ mod tests {
     }
 
     #[test]
-    fn installs_recall_and_board_integrations_idempotently() {
+    fn installs_recall_and_agent_hooks_idempotently() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
         fs::create_dir_all(home.join(".claude")).unwrap();
         fs::write(
             home.join(".claude/settings.json"),
@@ -530,8 +494,8 @@ mod tests {
         .unwrap();
 
         install_recall_skills(&home).unwrap();
-        configure_board_mcp_and_hooks(&project, &home).unwrap();
-        configure_board_mcp_and_hooks(&project, &home).unwrap();
+        configure_agent_hooks(&home).unwrap();
+        configure_agent_hooks(&home).unwrap();
 
         assert_eq!(
             fs::read_to_string(home.join(".agents/skills/daybook-recall/SKILL.md")).unwrap(),
@@ -557,11 +521,8 @@ mod tests {
         ] {
             assert_eq!(settings["hooks"][event].as_array().unwrap().len(), 1);
         }
-        let mcp: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
         for event in ["PostToolUse", "PostToolUseFailure"] {
             assert!(settings["hooks"][event][0].get("matcher").is_none());
         }
-        assert_eq!(mcp["mcpServers"]["daybook-board"]["command"], "daybook");
     }
 }

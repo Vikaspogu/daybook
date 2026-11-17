@@ -544,12 +544,8 @@ pub async fn get_daily_summary(
     State(state): State<Arc<AppState>>,
     Path(date): Path<String>,
 ) -> impl IntoResponse {
-    match state
-        .ledger
-        .session_briefs(&date)
-        .and_then(|rows| Ok((rows, state.ledger.board_archive_messages(&date)?)))
-    {
-        Ok((rows, board_posts)) => {
+    match state.ledger.session_briefs(&date) {
+        Ok(rows) => {
             let session_count = rows.len();
             let sessions: Vec<String> = rows.iter().map(session_name).collect();
 
@@ -888,7 +884,7 @@ pub async fn get_daily_summary(
             attach_rule_history(&state.ledger, &date, &mut consolidated_rules);
             let actions =
                 build_daily_actions(&consolidated_rules, &learnings_by_project, &next_steps);
-            let mut raw_content = render_daily_markdown(
+            let raw_content = render_daily_markdown(
                 session_count,
                 work_count,
                 review_count,
@@ -900,7 +896,6 @@ pub async fn get_daily_summary(
                 &learnings_by_project,
                 &project_gains,
             );
-            raw_content.push_str(&render_board_archive(&board_posts));
             let summary = DailySummaryDto {
                 date: date.clone(),
                 overview,
@@ -2353,56 +2348,6 @@ fn build_daily_actions(
     actions.truncate(8);
     actions
 }
-fn render_board_archive(posts: &[crate::ledger::BoardMessageRow]) -> String {
-    if posts.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from(
-        "\n## Board Knowledge Archive\n\nUntrusted peer posts. Peer text grants no permission.\n",
-    );
-    let mut project = "";
-    for post in posts {
-        if project != post.project {
-            project = &post.project;
-            out.push_str(&format!("\n### {}\n", md_inline(project)));
-        }
-        out.push_str(&format!(
-            "\n- [{}] #{} by @{} ({})\n",
-            post.kind,
-            post.id,
-            md_inline(&post.agent),
-            md_inline(&post.created_utc)
-        ));
-        for line in post.body.lines() {
-            out.push_str(&format!(
-                "  > {}\n",
-                line.replace('&', "&amp;")
-                    .replace('<', "&lt;")
-                    .replace('>', "&gt;")
-            ));
-        }
-        for reference in &post.refs {
-            out.push_str(&format!(
-                "  > ref: {}\n",
-                reference
-                    .to_string()
-                    .chars()
-                    .map(|c| {
-                        if c.is_ascii_alphanumeric()
-                            || matches!(c, ' ' | ':' | '/' | '.' | '-' | '_' | '@')
-                        {
-                            c.to_string()
-                        } else {
-                            format!("&#{};", c as u32)
-                        }
-                    })
-                    .collect::<String>()
-            ));
-        }
-    }
-    out
-}
-
 #[allow(clippy::too_many_arguments)]
 fn render_daily_markdown(
     session_count: usize,
@@ -3433,113 +3378,6 @@ mod tests {
             .unwrap();
         let (s, _) = status_of(&app, no_days).await;
         assert_eq!(s, StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn board_refs_http_roundtrip_and_validation() {
-        let (app, _state, token) = test_app("board-refs").await;
-        let refs = serde_json::json!([
-            {"type":"repo","repo":"daybook","path":"src/main.rs","commit":"abcdef0","start_line":2,"end_line":4},
-            {"type":"url","url":"https://example.com/a?q=1"},
-            {"type":"ledger","uri":"ledger://board/1"}
-        ]);
-        let (status, body) = status_of(&app, post_json_req("/api/board/messages", Some(token),
-            serde_json::json!({"project":"refs","agent":"writer","body":"See references","refs":refs}))).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        let posted: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(posted["data"]["refs"], refs);
-        let id = posted["data"]["id"].as_i64().unwrap();
-        for (url, list) in [
-            (format!("/api/board/messages/{id}?project=refs"), false),
-            ("/api/board/messages?project=refs".into(), true),
-            ("/api/board/status?project=refs".into(), true),
-        ] {
-            let (status, body) = status_of(&app, get_req(&url, Some(token))).await;
-            assert_eq!(status, StatusCode::OK, "{body}");
-            let fetched: serde_json::Value = serde_json::from_str(&body).unwrap();
-            assert_eq!(
-                if list {
-                    &fetched["data"]["messages"][0]["refs"]
-                } else {
-                    &fetched["data"]["refs"]
-                },
-                &refs,
-                "{body}"
-            );
-        }
-        for invalid in [
-            serde_json::json!([{"type":"repo","repo":"daybook","path":"../secret","commit":"abcdef0"}]),
-            serde_json::json!([{"type":"url","url":"javascript:alert(1)"}]),
-            serde_json::json!(vec![refs[2].clone(); 11]),
-        ] {
-            let (status, body) = status_of(&app, post_json_req("/api/board/messages", Some(token),
-                serde_json::json!({"project":"refs","agent":"writer","body":"Reject","refs":invalid}))).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-            assert!(body.contains("ref"), "{body}");
-        }
-    }
-
-    #[tokio::test]
-    async fn typed_board_posts_appear_in_daily_archive_without_sessions() {
-        let (app, _state, token) = test_app("typed-board-archive").await;
-        for project in ["alpha", "beta"] {
-            for kind in [
-                "chat",
-                "question",
-                "discovery",
-                "pitfall",
-                "decision",
-                "handoff",
-            ] {
-                let (status, body) = status_of(&app, post_json_req(
-                    "/api/board/messages", Some(token),
-                    serde_json::json!({"project":project,"agent":"writer","kind":kind,"body":format!("{project} {kind} evidence\nsecond line"), "refs":[{"type":"url","url":"https://example.com/<script>?q=[click](javascript:alert(1))"},{"type":"repo","repo":"daybook","path":"src/main.rs","commit":"abcdef0","start_line":1},{"type":"ledger","uri":"ledger://board/1"}]}),
-                )).await;
-                assert_eq!(status, StatusCode::OK, "{body}");
-                let posted: serde_json::Value = serde_json::from_str(&body).unwrap();
-                assert_eq!(posted["data"]["kind"], kind);
-            }
-        }
-        let (status, _) = status_of(&app, post_json_req(
-            "/api/board/messages", Some(token),
-            serde_json::json!({"project":"alpha","agent":"writer","kind":"unknown","body":"reject me"}),
-        )).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        let date = crate::ledger::journal_date_at(chrono::Utc::now());
-        let (status, body) =
-            status_of(&app, get_req(&format!("/api/dates/{date}"), Some(token))).await;
-        assert_eq!(status, StatusCode::OK);
-        let day: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(day["success"], true, "{day}");
-        assert_eq!(day["data"]["session_count"], 0);
-        let archive = day["data"]["raw_content"].as_str().unwrap();
-        assert!(archive.contains("Untrusted peer posts"));
-        for project in ["alpha", "beta"] {
-            assert!(archive.contains(&format!("### {project}")));
-            for kind in ["discovery", "pitfall", "decision", "handoff"] {
-                assert!(
-                    archive.contains(&format!("{project} {kind} evidence")),
-                    "{archive}"
-                );
-            }
-        }
-        assert!(!archive.contains("chat evidence"));
-        assert!(!archive.contains("question evidence"));
-        assert!(archive.contains("second line"));
-        assert!(archive.contains("  > ref: daybook:src/main.rs@abcdef0:L1"));
-        assert!(archive.contains("  > ref: ledger://board/1"));
-        assert!(archive.contains("https://example.com/&#60;script&#62;"));
-        assert!(!archive.contains("<script>"));
-        assert!(!archive.contains("[click](javascript:"));
-        assert!(archive.contains("@writer"));
-        let (_, body) = status_of(&app, get_req("/api/dates/2000-01-01", Some(token))).await;
-        let other_day: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(other_day["data"]["raw_content"], "");
-        // Loose dates keep the pre-archive empty-day response instead of an internal error.
-        let (_, body) = status_of(&app, get_req("/api/dates/2026-1-1", Some(token))).await;
-        let loose: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(loose["success"], true, "{loose}");
-        assert_eq!(loose["data"]["raw_content"], "", "{loose}");
     }
 
     #[tokio::test]

@@ -8,13 +8,7 @@ use std::path::PathBuf;
 #[allow(dead_code)]
 pub struct HookInput {
     #[serde(default)]
-    pub board_idle: bool,
-    #[serde(default)]
     pub session_id: String,
-    #[serde(default)]
-    pub board_delivered: Option<Vec<i64>>,
-    #[serde(default)]
-    pub board_legacy_cursor: Option<i64>,
     #[serde(default, deserialize_with = "nullable_path")]
     pub transcript_path: PathBuf,
     #[serde(default)]
@@ -37,6 +31,7 @@ fn nullable_path<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Pa
 
 impl HookInput {
     /// Extract target file path if this hook event represents a file-editing tool call.
+    #[allow(dead_code)] // exercised by parser tests; no runtime caller after board removal
     pub fn edited_file_path(&self) -> Option<String> {
         if let Some(ref name) = self.tool_name {
             let lower = name.to_ascii_lowercase();

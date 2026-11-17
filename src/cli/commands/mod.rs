@@ -1,4 +1,3 @@
-pub mod board;
 mod codex_hooks;
 pub mod config;
 pub mod digest;

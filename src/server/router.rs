@@ -6,7 +6,6 @@ use axum::{
 };
 use std::sync::Arc;
 
-use super::board_handlers;
 use super::handlers::{self, AppState};
 use super::static_files::serve_static;
 
@@ -36,47 +35,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/tokens/revoke", post(handlers::revoke_token_api))
         .route("/ingest", post(handlers::ingest))
-        // Multi-Agent Coordination Board routes (`/api/board/*`)
-        .route("/board/sessions", post(board_handlers::register_session))
-        .route(
-            "/board/session/status",
-            post(board_handlers::session_status),
-        )
-        .route("/board/inbox", get(board_handlers::inbox))
-        .route("/board/ack", post(board_handlers::ack))
-        .route("/board/delivered", post(board_handlers::delivered))
-        .route("/board/messages/:id", get(board_handlers::message_by_id))
-        .route("/board/status", get(board_handlers::get_board_status))
-        .route(
-            "/board/messages",
-            get(board_handlers::get_board_messages).post(board_handlers::post_board_messages),
-        )
-        .route("/board/check", get(board_handlers::get_board_check))
-        .route("/board/agents.md", get(board_handlers::get_board_agents_md))
-        .route(
-            "/board/heartbeat",
-            post(board_handlers::post_board_heartbeat),
-        )
-        .route(
-            "/board/locks/claim",
-            post(board_handlers::post_board_locks_claim),
-        )
-        .route(
-            "/board/locks/touch",
-            post(board_handlers::post_board_locks_touch),
-        )
-        .route(
-            "/board/locks/release",
-            post(board_handlers::post_board_locks_release),
-        )
-        .route(
-            "/board/tasks/claim",
-            post(board_handlers::post_board_tasks_claim),
-        )
-        .route(
-            "/board/tasks/update",
-            post(board_handlers::post_board_tasks_update),
-        )
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),
