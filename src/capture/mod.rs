@@ -45,6 +45,7 @@ pub async fn run(config: &Config) -> Result<usize> {
     records.truncate(500);
     for r in &mut records {
         // Last line of defense: nothing leaves the machine unredacted.
+        r.project = crate::redaction::redact_for_config(&r.project, config);
         r.payload_json = crate::redaction::redact_for_config(&r.payload_json, config);
         r.content_hash = hash(&r.payload_json);
     }
@@ -114,19 +115,25 @@ fn git(cwd: &Path, args: &[&str]) -> Option<String> {
 // ---- O3: per-turn session handoff entries written by the Pi extension ----
 
 fn collect_handoffs(root: &Path, machine: &str, now: &str) -> Vec<CaptureRecord> {
-    let mut out = Vec::new();
+    let mut latest: BTreeMap<String, (u64, Value)> = BTreeMap::new();
     let Ok(repos) = std::fs::read_dir(root) else {
-        return out;
+        return Vec::new();
     };
     for repo in repos.flatten() {
         let Ok(files) = std::fs::read_dir(repo.path()) else {
             continue;
         };
         for file in files.flatten() {
-            let name = file.file_name().to_string_lossy().to_string();
-            if !name.ends_with(".json") {
+            if !file.file_name().to_string_lossy().ends_with(".json") {
                 continue;
             }
+            let file_updated = file
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
             let Ok(raw) = std::fs::read_to_string(file.path()) else {
                 continue;
             };
@@ -136,22 +143,87 @@ fn collect_handoffs(root: &Path, machine: &str, now: &str) -> Vec<CaptureRecord>
             let Some(session) = entry.get("session").and_then(Value::as_str) else {
                 continue;
             };
-            let worktree = entry.get("worktree").and_then(Value::as_str).unwrap_or("");
-            let mut payload = entry.clone();
-            payload["project"] = json!(worktree);
-            out.push(record(
-                machine,
-                KIND_HANDOFF,
-                session.to_string(),
-                payload,
-                now,
-            ));
-            if out.len() >= 100 {
-                return out;
+            let task = entry
+                .get("task")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim_start();
+            let reviewer = ["Act as the review sub-agent", "Delegated task node:"]
+                .iter()
+                .any(|prefix| task.starts_with(prefix));
+            let probe = entry
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .starts_with("EFF probe")
+                && ["Reply exactly:", "No tools needed"]
+                    .iter()
+                    .any(|prefix| task.starts_with(prefix));
+            if reviewer || probe {
+                continue;
+            }
+            let worktree = entry
+                .get("worktree")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let updated = entry
+                .get("updated")
+                .and_then(Value::as_u64)
+                .unwrap_or(file_updated);
+            let group = if worktree.is_empty() {
+                format!("session:{session}")
+            } else {
+                worktree.clone()
+            };
+            let replace = latest
+                .get(&group)
+                .map(|(seen, previous)| {
+                    let previous_session = previous
+                        .get("session")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    (updated, session) > (*seen, previous_session)
+                })
+                .unwrap_or(true);
+            if replace {
+                latest.insert(group, (updated, entry));
             }
         }
     }
-    out
+    let mut latest: Vec<(u64, Value)> = latest.into_values().collect();
+    latest.sort_by(|(a, pa), (b, pb)| {
+        b.cmp(a).then_with(|| {
+            pb.get("session")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .cmp(pa.get("session").and_then(Value::as_str).unwrap_or(""))
+        })
+    });
+    latest
+        .into_iter()
+        .take(100)
+        .map(|(_, mut payload)| {
+            let worktree = payload
+                .get("worktree")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            payload["project"] = json!(worktree);
+            record(
+                machine,
+                KIND_HANDOFF,
+                hash(if worktree.is_empty() {
+                    payload.get("session").and_then(Value::as_str).unwrap_or("")
+                } else {
+                    &worktree
+                })[..16]
+                    .to_string(),
+                payload,
+                now,
+            )
+        })
+        .collect()
 }
 
 // ---- A2: live git facts for every worktree seen in a handoff entry ----
@@ -262,6 +334,20 @@ fn is_correction(text: &str) -> bool {
     CORRECTION_MARKERS.iter().any(|m| lower.starts_with(m))
 }
 
+fn error_summary(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && *line != "(no output)"
+                && !line
+                    .chars()
+                    .all(|c| matches!(c, '.' | 'F' | 'E' | 's' | 'x'))
+        })
+        .next()
+        .map(|line| line.chars().take(160).collect())
+}
+
 fn text_of(content: &Value) -> String {
     if let Some(s) = content.as_str() {
         return s.to_string();
@@ -284,8 +370,8 @@ fn collect_session_facts(root: &Path, machine: &str, now: &str, out: &mut Vec<Ca
     let Ok(dirs) = std::fs::read_dir(root) else {
         return;
     };
-    // (tool, first error line) -> count, grouped across sessions of this run.
-    let mut errors: BTreeMap<(String, String), u64> = BTreeMap::new();
+    // (project, tool, error line) -> count, grouped across sessions of this run.
+    let mut errors: BTreeMap<(String, String, String), u64> = BTreeMap::new();
     let mut corrections = 0;
     for dir in dirs.flatten() {
         let Ok(files) = std::fs::read_dir(dir.path()) else {
@@ -310,10 +396,17 @@ fn collect_session_facts(root: &Path, machine: &str, now: &str, out: &mut Vec<Ca
             let Ok(raw) = std::fs::read_to_string(&path) else {
                 continue;
             };
+            let mut project = session.clone();
             for (idx, line) in raw.lines().enumerate() {
                 let Ok(entry) = serde_json::from_str::<Value>(line) else {
                     continue;
                 };
+                if entry.get("type").and_then(Value::as_str) == Some("session") {
+                    if let Some(cwd) = entry.get("cwd").and_then(Value::as_str) {
+                        project = cwd.to_string();
+                    }
+                    continue;
+                }
                 if entry.get("type").and_then(Value::as_str) != Some("message") {
                     continue;
                 }
@@ -325,7 +418,7 @@ fn collect_session_facts(root: &Path, machine: &str, now: &str, out: &mut Vec<Ca
                         let text = text_of(msg.get("content").unwrap_or(&Value::Null));
                         if is_correction(&text) {
                             let payload = json!({
-                                "project": session, "session": session, "text": text.trim(),
+                                "project": project, "session": session, "text": text.trim(),
                             });
                             out.push(record(
                                 machine,
@@ -352,23 +445,22 @@ fn collect_session_facts(root: &Path, machine: &str, now: &str, out: &mut Vec<Ca
                             .and_then(Value::as_str)
                             .unwrap_or("unknown")
                             .to_string();
-                        let first = text_of(msg.get("content").unwrap_or(&Value::Null))
-                            .lines()
-                            .next()
-                            .unwrap_or("")
-                            .chars()
-                            .take(160)
-                            .collect::<String>();
-                        *errors.entry((tool, first)).or_insert(0) += 1;
+                        let content = text_of(msg.get("content").unwrap_or(&Value::Null));
+                        let Some(error) = error_summary(&content) else {
+                            continue;
+                        };
+                        *errors.entry((project.clone(), tool, error)).or_insert(0) += 1;
                     }
                     _ => {}
                 }
             }
         }
     }
-    for ((tool, error), count) in errors.into_iter().take(100) {
-        let key = format!("{}:{}", tool, &hash(&error)[..16]);
-        let payload = json!({ "tool": tool, "error": error, "count": count });
+    let mut errors: Vec<_> = errors.into_iter().collect();
+    errors.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    for ((project, tool, error), count) in errors.into_iter().take(100) {
+        let key = format!("{}:{}", tool, &hash(&format!("{project}\0{error}"))[..16]);
+        let payload = json!({ "project": project, "tool": tool, "error": error, "count": count });
         out.push(record(machine, KIND_TOOL_ERROR, key, payload, now));
     }
 }
@@ -377,6 +469,91 @@ fn collect_session_facts(root: &Path, machine: &str, now: &str, out: &mut Vec<Ca
 mod tests {
     use super::*;
 
+    #[test]
+    fn handoffs_skip_probes_and_keep_latest_per_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store/deadbeef");
+        std::fs::create_dir_all(&store).unwrap();
+        for (session, task, updated) in [
+            ("old", "fix the bug", 1),
+            ("new", "fix the bug", 2),
+            ("aaa", "fix the bug", 2),
+            ("probe2", "No tools needed", 5),
+            ("delegated", "Delegated task node:x", 6),
+            ("probe", "Reply exactly: ok", 3),
+            ("review", "Act as the review sub-agent for this task", 4),
+        ] {
+            std::fs::write(
+                store.join(format!("{session}.json")),
+                json!({"session": session, "worktree": "/repo/wt", "task": task, "updated": updated, "status": if matches!(session, "probe" | "probe2") { "EFF probe: done" } else { "EFF real: done" }}).to_string(),
+            ).unwrap();
+        }
+        let handoffs = collect_handoffs(&dir.path().join("store"), "m", "now");
+        assert_eq!(handoffs.len(), 1);
+        assert_eq!(handoffs[0].key, hash("/repo/wt")[..16]);
+        assert!(handoffs[0].payload_json.contains("\"session\":\"new\""));
+        assert!(!handoffs[0].key.contains("/repo"));
+    }
+
+    #[test]
+    fn handoffs_without_worktrees_keep_separate_session_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store/deadbeef");
+        std::fs::create_dir_all(&store).unwrap();
+        for session in ["s1", "s2"] {
+            std::fs::write(
+                store.join(format!("{session}.json")),
+                json!({"session":session,"worktree":"","task":"fix"}).to_string(),
+            )
+            .unwrap();
+        }
+        let handoffs = collect_handoffs(&dir.path().join("store"), "m", "now");
+        assert_eq!(handoffs.len(), 2);
+        assert!(handoffs.iter().any(|h| h.key == hash("s1")[..16]));
+        assert!(handoffs.iter().any(|h| h.key == hash("s2")[..16]));
+    }
+
+    #[test]
+    fn handoff_cap_keeps_newest_worktrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store/deadbeef");
+        std::fs::create_dir_all(&store).unwrap();
+        for i in 0..101 {
+            std::fs::write(
+                store.join(format!("s{i}.json")),
+                json!({"session":format!("s{i}"),"worktree":format!("/repo/wt{i}"),"task":"fix","updated":i}).to_string(),
+            ).unwrap();
+        }
+        let handoffs = collect_handoffs(&dir.path().join("store"), "m", "now");
+        assert_eq!(handoffs.len(), 100);
+        assert!(handoffs[0].payload_json.contains("/repo/wt100"));
+        assert!(!handoffs
+            .iter()
+            .any(|h| h.payload_json.contains("/repo/wt0\"")));
+    }
+
+    #[test]
+    fn error_summary_filters_noise_and_preserves_failure_text() {
+        assert_eq!(error_summary(""), None);
+        assert_eq!(error_summary("(no output)"), None);
+        assert_eq!(error_summary("....F...."), None);
+        assert_eq!(
+            error_summary("....\nFAILED tests/test_x.rs::test_x"),
+            Some("FAILED tests/test_x.rs::test_x".into())
+        );
+        assert_eq!(
+            error_summary("Traceback (most recent call last):"),
+            Some("Traceback (most recent call last):".into())
+        );
+        assert_eq!(
+            error_summary("Permission denied"),
+            Some("Permission denied".into())
+        );
+        assert_eq!(
+            error_summary("thread 'main' panicked at src/main.rs"),
+            Some("thread 'main' panicked at src/main.rs".into())
+        );
+    }
     #[test]
     fn correction_markers_are_conservative() {
         assert!(is_correction("no, the other file"));
@@ -407,7 +584,10 @@ mod tests {
         let handoffs = collect_handoffs(&dir.path().join("store"), "m", "now");
         assert_eq!(handoffs.len(), 1);
         assert_eq!(handoffs[0].kind, KIND_HANDOFF);
-        assert_eq!(handoffs[0].key, "s1");
+        assert_eq!(
+            handoffs[0].key,
+            hash(&wt.to_string_lossy().to_string())[..16]
+        );
         // Not a git repo, so no worktree record; nothing panics.
         let worktrees = collect_worktrees(&handoffs, "m", "now");
         assert!(worktrees.is_empty());
@@ -419,6 +599,15 @@ mod tests {
         let sessions = dir.path().join("proj");
         std::fs::create_dir_all(&sessions).unwrap();
         let mut lines = Vec::new();
+        lines.push(json!({"type":"session", "cwd":"/repo/wt"}).to_string());
+        for noise in ["", "(no output)", "....F...."] {
+            lines.push(
+                json!({"type":"message", "message": {
+                    "role":"toolResult", "is_error":true, "tool_name":"bash", "content":noise,
+                }})
+                .to_string(),
+            );
+        }
         for i in 0..3 {
             lines.push(
                 json!({ "type": "message", "message": {
@@ -447,6 +636,7 @@ mod tests {
         collect_session_facts(dir.path(), "m", "now", &mut out);
         let errors: Vec<_> = out.iter().filter(|r| r.kind == KIND_TOOL_ERROR).collect();
         assert_eq!(errors.len(), 1);
+        assert!(errors[0].payload_json.contains("/repo/wt"));
         assert!(errors[0].payload_json.contains("\"count\":3"));
         assert!(errors[0].payload_json.contains("exit code 1"));
         let corrections: Vec<_> = out.iter().filter(|r| r.kind == KIND_CORRECTION).collect();
